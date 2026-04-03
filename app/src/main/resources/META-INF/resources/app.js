@@ -27,6 +27,7 @@
     const connectionStatus = document.getElementById('connection-status');
     const queueArea = document.getElementById('queue-area');
     const queueResizeHandle = document.getElementById('queue-resize-handle');
+    const inputResizeHandle = document.getElementById('input-resize-handle');
     const activityLabel = document.getElementById('activity-label');
     const inputArea = document.getElementById('input-area');
     const logPanel = document.getElementById('log-panel');
@@ -1133,6 +1134,48 @@
             toggleAutoInQueue(idx);
         }
     });
+
+    // --- Input textarea resize handle ---
+    var INPUT_HEIGHT_KEY = 'coder-agent-input-height' + SESSION_SUFFIX;
+    var savedInputHeight = localStorage.getItem(INPUT_HEIGHT_KEY);
+    if (savedInputHeight) {
+        promptInput.style.height = savedInputHeight + 'px';
+    } else {
+        // Default: match rows="5" (line-height:1.5 * 14px * 5 + 2*10px padding)
+        promptInput.style.height = '125px';
+    }
+
+    (function () {
+        var dragging = false;
+        var startY = 0;
+        var startHeight = 0;
+
+        inputResizeHandle.addEventListener('mousedown', function (e) {
+            e.preventDefault();
+            dragging = true;
+            startY = e.clientY;
+            startHeight = promptInput.offsetHeight;
+            inputResizeHandle.classList.add('dragging');
+            document.body.style.cursor = 'ns-resize';
+            document.body.style.userSelect = 'none';
+        });
+
+        document.addEventListener('mousemove', function (e) {
+            if (!dragging) return;
+            var delta = startY - e.clientY;
+            var newHeight = Math.max(42, Math.min(startHeight + delta, 500));
+            promptInput.style.height = newHeight + 'px';
+        });
+
+        document.addEventListener('mouseup', function () {
+            if (!dragging) return;
+            dragging = false;
+            inputResizeHandle.classList.remove('dragging');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            localStorage.setItem(INPUT_HEIGHT_KEY, promptInput.offsetHeight);
+        });
+    })();
 
     // --- Queue resize handle ---
     var QUEUE_HEIGHT_KEY = 'coder-agent-queue-height' + SESSION_SUFFIX;

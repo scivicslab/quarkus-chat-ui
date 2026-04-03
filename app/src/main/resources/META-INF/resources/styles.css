@@ -506,6 +506,30 @@ header h1[contenteditable]:focus {
     50% { opacity: 1; }
 }
 
+/* Input resize handle */
+#input-resize-handle {
+    flex-shrink: 0;
+    height: 6px;
+    background: var(--border-color);
+    cursor: ns-resize;
+    position: relative;
+}
+#input-resize-handle:hover,
+#input-resize-handle.dragging {
+    background: var(--accent-blue);
+}
+#input-resize-handle::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 30px;
+    height: 2px;
+    background: var(--text-secondary);
+    border-radius: 1px;
+}
+
 /* Queue resize handle */
 #queue-resize-handle {
     flex-shrink: 0;
