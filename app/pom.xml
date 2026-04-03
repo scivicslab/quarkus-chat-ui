@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd"
+    xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.scivicslab.coderagent</groupId>
+    <artifactId>quarkus-coder-agent-parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+  <artifactId>coder-agent-app</artifactId>
+
+  <dependencies>
+    <!-- All providers included in the single JAR -->
+    <dependency>
+      <groupId>com.scivicslab.coderagent</groupId>
+      <artifactId>coder-agent-provider-claude</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.scivicslab.coderagent</groupId>
+      <artifactId>coder-agent-provider-codex</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.scivicslab.coderagent</groupId>
+      <artifactId>coder-agent-provider-openai-compat</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.rest-assured</groupId>
+      <artifactId>rest-assured</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>${quarkus.platform.group-id}</groupId>
+        <artifactId>quarkus-maven-plugin</artifactId>
+        <version>${quarkus.platform.version}</version>
+        <extensions>true</extensions>
+        <executions>
+          <execution>
+            <goals>
+              <goal>build</goal>
+              <goal>generate-code</goal>
+              <goal>generate-code-tests</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <jvmArgs>--add-opens java.base/java.lang=ALL-UNNAMED</jvmArgs>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <profile>
+      <id>native</id>
+      <activation>
+        <property><name>native</name></property>
+      </activation>
+      <properties>
+        <quarkus.native.enabled>true</quarkus.native.enabled>
+      </properties>
+    </profile>
+  </profiles>
+</project>
