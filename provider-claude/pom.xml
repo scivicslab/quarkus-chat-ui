@@ -4,16 +4,25 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>com.scivicslab.coderagent</groupId>
-    <artifactId>quarkus-coder-agent-parent</artifactId>
+    <groupId>com.scivicslab.chatui</groupId>
+    <artifactId>quarkus-chat-ui-parent</artifactId>
     <version>1.0.0</version>
   </parent>
-  <artifactId>coder-agent-provider-claude</artifactId>
+  <artifactId>chat-ui-provider-claude</artifactId>
 
   <dependencies>
     <dependency>
-      <groupId>com.scivicslab.coderagent</groupId>
-      <artifactId>coder-agent-provider-cli</artifactId>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>chat-ui-provider-cli</artifactId>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>io.smallrye</groupId>
+        <artifactId>jandex-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
 </project>

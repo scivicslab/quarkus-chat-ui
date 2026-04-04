@@ -1,4 +1,4 @@
-// quarkus-coder-agent REST + EventSource SSE client
+// quarkus-chat-ui REST + EventSource SSE client
 
 (function () {
     'use strict';
@@ -11,8 +11,8 @@
             var v = localStorage.getItem(k);
             keys.push(k + '=' + (v && v.length > 60 ? v.substring(0, 60) + '...' : v));
         }
-        console.log('[coder-agent] localStorage dump (' + localStorage.length + ' keys): ' + keys.join(' | '));
-        console.log('[coder-agent] page URL: ' + window.location.href);
+        console.log('[chat-ui] localStorage dump (' + localStorage.length + ' keys): ' + keys.join(' | '));
+        console.log('[chat-ui] page URL: ' + window.location.href);
     })();
 
     const chatArea = document.getElementById('chat-area');
@@ -46,9 +46,9 @@
     })();
 
     // --- Theme (per-session in k8s-pups, global in standalone) ---
-    var THEME_KEY = 'coder-agent-theme' + SESSION_SUFFIX;
+    var THEME_KEY = 'chat-ui-theme' + SESSION_SUFFIX;
     var savedTheme = localStorage.getItem(THEME_KEY) || 'dark-catppuccin';
-    console.log('[coder-agent] theme restore: key=' + THEME_KEY + ' saved=' + localStorage.getItem(THEME_KEY) + ' using=' + savedTheme);
+    console.log('[chat-ui] theme restore: key=' + THEME_KEY + ' saved=' + localStorage.getItem(THEME_KEY) + ' using=' + savedTheme);
     document.documentElement.setAttribute('data-theme', savedTheme);
     themeSelect.value = savedTheme;
 
@@ -56,10 +56,10 @@
         var theme = themeSelect.value;
         document.documentElement.setAttribute('data-theme', theme);
         localStorage.setItem(THEME_KEY, theme);
-        console.log('[coder-agent] theme saved: key=' + THEME_KEY + ' value=' + theme);
+        console.log('[chat-ui] theme saved: key=' + THEME_KEY + ' value=' + theme);
     });
 
-    // --- Keybind (from server config: -Dcoder-agent.keybind=emacs|vi|default) ---
+    // --- Keybind (from server config: -Dchat-ui.keybind=emacs|vi|default) ---
     promptInput.addEventListener('keydown', function (e) {
         if (activeKeybind !== 'emacs') return;
         if (!e.ctrlKey) return;
@@ -270,7 +270,7 @@
     // --- Editable title ---
     var appTitle = document.getElementById('app-title');
     var defaultTitle = appTitle.textContent;
-    var savedTitle = localStorage.getItem('coder-agent-custom-title');
+    var savedTitle = localStorage.getItem('chat-ui-custom-title');
     if (savedTitle) {
         appTitle.textContent = savedTitle;
         document.title = savedTitle;
@@ -281,9 +281,9 @@
     appTitle.addEventListener('blur', function () {
         var t = appTitle.textContent.trim();
         if (t && t !== defaultTitle) {
-            localStorage.setItem('coder-agent-custom-title', t);
+            localStorage.setItem('chat-ui-custom-title', t);
         } else {
-            localStorage.removeItem('coder-agent-custom-title');
+            localStorage.removeItem('chat-ui-custom-title');
             appTitle.textContent = defaultTitle;
         }
         document.title = appTitle.textContent;
@@ -293,7 +293,7 @@
     });
 
     // --- Model key (per-session in k8s-pups, global in standalone) ---
-    var MODEL_KEY = 'coder-agent-model' + SESSION_SUFFIX;
+    var MODEL_KEY = 'chat-ui-model' + SESSION_SUFFIX;
 
     let currentAssistantMsg = null;
     let currentAssistantText = '';
@@ -302,12 +302,12 @@
     let pendingPrompt = false;  // true when an ask_user prompt is awaiting user response
 
     // --- Chat history (persisted to localStorage) ---
-    var HISTORY_KEY = 'coder-agent-history' + SESSION_SUFFIX;
+    var HISTORY_KEY = 'chat-ui-history' + SESSION_SUFFIX;
     var MAX_HISTORY = 500;
     var chatHistory = []; // [{role: 'user'|'assistant'|'info'|'error', text: string}]
 
     // --- Prompt Queue (position-based, persisted to localStorage) ---
-    var QUEUE_KEY = 'coder-agent-queue' + SESSION_SUFFIX;
+    var QUEUE_KEY = 'chat-ui-queue' + SESSION_SUFFIX;
     var queue = [];   // [{text: string, auto: boolean}]
     var queuePos = 0; // index of next item to send
     var MAX_QUEUE_SIZE = 100;
@@ -387,7 +387,7 @@
 
                 // Restore previously selected model from localStorage
                 var savedModel = localStorage.getItem(MODEL_KEY);
-                console.log('[coder-agent] model restore: saved=' + savedModel + ' options=' + modelSelect.options.length);
+                console.log('[chat-ui] model restore: saved=' + savedModel + ' options=' + modelSelect.options.length);
                 if (savedModel) {
                     var found = false;
                     for (var i = 0; i < modelSelect.options.length; i++) {
@@ -397,7 +397,7 @@
                             break;
                         }
                     }
-                    console.log('[coder-agent] model restore: found=' + found + ' current=' + modelSelect.value);
+                    console.log('[chat-ui] model restore: found=' + found + ' current=' + modelSelect.value);
                 }
             })
             .catch(function () {
@@ -744,7 +744,7 @@
             var targetModel = savedModel || msg.model;
             var currentOption = modelSelect.options[modelSelect.selectedIndex];
             var currentIsLocal = currentOption && currentOption.getAttribute('data-type') === 'local';
-            console.log('[coder-agent] updateStatus model: server=' + msg.model + ' saved=' + savedModel + ' target=' + targetModel + ' currentIsLocal=' + currentIsLocal);
+            console.log('[chat-ui] updateStatus model: server=' + msg.model + ' saved=' + savedModel + ' target=' + targetModel + ' currentIsLocal=' + currentIsLocal);
             if (!currentIsLocal) {
                 // Only set if the target model exists in the dropdown
                 for (var i = 0; i < modelSelect.options.length; i++) {
@@ -1136,7 +1136,7 @@
     });
 
     // --- Input textarea resize handle ---
-    var INPUT_HEIGHT_KEY = 'coder-agent-input-height' + SESSION_SUFFIX;
+    var INPUT_HEIGHT_KEY = 'chat-ui-input-height' + SESSION_SUFFIX;
     var savedInputHeight = localStorage.getItem(INPUT_HEIGHT_KEY);
     if (savedInputHeight) {
         promptInput.style.height = savedInputHeight + 'px';
@@ -1178,7 +1178,7 @@
     })();
 
     // --- Queue resize handle ---
-    var QUEUE_HEIGHT_KEY = 'coder-agent-queue-height' + SESSION_SUFFIX;
+    var QUEUE_HEIGHT_KEY = 'chat-ui-queue-height' + SESSION_SUFFIX;
     var savedQueueHeight = localStorage.getItem(QUEUE_HEIGHT_KEY);
     if (savedQueueHeight) {
         queueArea.style.height = savedQueueHeight + 'px';
@@ -1676,9 +1676,9 @@
         // Persist selected model across page reloads
         try {
             localStorage.setItem(MODEL_KEY, selected);
-            console.log('[coder-agent] model saved: ' + selected + ' verify=' + localStorage.getItem(MODEL_KEY));
+            console.log('[chat-ui] model saved: ' + selected + ' verify=' + localStorage.getItem(MODEL_KEY));
         } catch (e) {
-            console.error('[coder-agent] model save FAILED:', e);
+            console.error('[chat-ui] model save FAILED:', e);
         }
 
         // Local models: no server-side /model command needed (model sent per-request)
@@ -1719,7 +1719,7 @@
                 // Apply keybind from server config
                 if (cfg.keybind) {
                     activeKeybind = cfg.keybind;
-                    console.log('[coder-agent] keybind: ' + activeKeybind);
+                    console.log('[chat-ui] keybind: ' + activeKeybind);
                 }
                 // Show API key dialog if not authenticated
                 if (cfg.authenticated === false) {

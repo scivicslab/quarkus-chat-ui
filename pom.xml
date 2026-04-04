@@ -3,8 +3,8 @@
     xmlns="http://maven.apache.org/POM/4.0.0"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>com.scivicslab.coderagent</groupId>
-  <artifactId>quarkus-coder-agent-parent</artifactId>
+  <groupId>com.scivicslab.chatui</groupId>
+  <artifactId>quarkus-chat-ui-parent</artifactId>
   <version>1.0.0</version>
   <packaging>pom</packaging>
 
@@ -19,6 +19,7 @@
 
   <properties>
     <compiler-plugin.version>3.14.0</compiler-plugin.version>
+    <jandex-plugin.version>3.2.7</jandex-plugin.version>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
@@ -26,6 +27,8 @@
     <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
     <quarkus.platform.version>3.28.3</quarkus.platform.version>
     <surefire-plugin.version>3.5.4</surefire-plugin.version>
+    <failsafe-plugin.version>3.5.4</failsafe-plugin.version>
+    <playwright.version>1.52.0</playwright.version>
     <pojo-actor.version>3.0.1</pojo-actor.version>
   </properties>
 
@@ -55,28 +58,28 @@
       </dependency>
       <!-- Internal modules -->
       <dependency>
-        <groupId>com.scivicslab.coderagent</groupId>
-        <artifactId>coder-agent-core</artifactId>
+        <groupId>com.scivicslab.chatui</groupId>
+        <artifactId>chat-ui-core</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>com.scivicslab.coderagent</groupId>
-        <artifactId>coder-agent-provider-cli</artifactId>
+        <groupId>com.scivicslab.chatui</groupId>
+        <artifactId>chat-ui-provider-cli</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>com.scivicslab.coderagent</groupId>
-        <artifactId>coder-agent-provider-claude</artifactId>
+        <groupId>com.scivicslab.chatui</groupId>
+        <artifactId>chat-ui-provider-claude</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>com.scivicslab.coderagent</groupId>
-        <artifactId>coder-agent-provider-codex</artifactId>
+        <groupId>com.scivicslab.chatui</groupId>
+        <artifactId>chat-ui-provider-codex</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>com.scivicslab.coderagent</groupId>
-        <artifactId>coder-agent-provider-openai-compat</artifactId>
+        <groupId>com.scivicslab.chatui</groupId>
+        <artifactId>chat-ui-provider-openai-compat</artifactId>
         <version>${project.version}</version>
       </dependency>
     </dependencies>
@@ -92,6 +95,34 @@
             <compilerArgs>
               <arg>-parameters</arg>
             </compilerArgs>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>io.smallrye</groupId>
+          <artifactId>jandex-maven-plugin</artifactId>
+          <version>${jandex-plugin.version}</version>
+          <executions>
+            <execution>
+              <id>make-index</id>
+              <goals><goal>jandex</goal></goals>
+            </execution>
+          </executions>
+        </plugin>
+        <plugin>
+          <artifactId>maven-failsafe-plugin</artifactId>
+          <version>${failsafe-plugin.version}</version>
+          <executions>
+            <execution>
+              <goals>
+                <goal>integration-test</goal>
+                <goal>verify</goal>
+              </goals>
+            </execution>
+          </executions>
+          <configuration>
+            <systemPropertyVariables>
+              <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+            </systemPropertyVariables>
           </configuration>
         </plugin>
         <plugin>

@@ -4,25 +4,25 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>com.scivicslab.coderagent</groupId>
-    <artifactId>quarkus-coder-agent-parent</artifactId>
+    <groupId>com.scivicslab.chatui</groupId>
+    <artifactId>quarkus-chat-ui-parent</artifactId>
     <version>1.0.0</version>
   </parent>
-  <artifactId>coder-agent-app</artifactId>
+  <artifactId>chat-ui-app</artifactId>
 
   <dependencies>
     <!-- All providers included in the single JAR -->
     <dependency>
-      <groupId>com.scivicslab.coderagent</groupId>
-      <artifactId>coder-agent-provider-claude</artifactId>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>chat-ui-provider-claude</artifactId>
     </dependency>
     <dependency>
-      <groupId>com.scivicslab.coderagent</groupId>
-      <artifactId>coder-agent-provider-codex</artifactId>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>chat-ui-provider-codex</artifactId>
     </dependency>
     <dependency>
-      <groupId>com.scivicslab.coderagent</groupId>
-      <artifactId>coder-agent-provider-openai-compat</artifactId>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>chat-ui-provider-openai-compat</artifactId>
     </dependency>
     <dependency>
       <groupId>io.quarkus</groupId>
@@ -34,10 +34,19 @@
       <artifactId>rest-assured</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>com.microsoft.playwright</groupId>
+      <artifactId>playwright</artifactId>
+      <version>${playwright.version}</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
     <plugins>
+      <plugin>
+        <artifactId>maven-failsafe-plugin</artifactId>
+      </plugin>
       <plugin>
         <groupId>${quarkus.platform.group-id}</groupId>
         <artifactId>quarkus-maven-plugin</artifactId>
