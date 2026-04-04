@@ -33,6 +33,8 @@ public abstract class CliLlmProvider implements LlmProvider {
     protected final CliProcess cliProcess;
     protected final SlashCommandHandler commandHandler;
     protected final Path sessionFile;
+    private final java.util.Set<String> pendingPermissionIds =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
     /**
      * Creates a new CLI-based LLM provider.
@@ -113,7 +115,16 @@ public abstract class CliLlmProvider implements LlmProvider {
      */
     @Override
     public void respond(String promptId, String response) throws IOException {
-        cliProcess.writeUserMessage(response);
+        if (pendingPermissionIds.remove(promptId)) {
+            cliProcess.writePermissionResponse(promptId, response);
+        } else {
+            cliProcess.writeUserMessage(response);
+        }
+    }
+
+    /** Records a permission request's tool_use_id so respond() can use the right format. */
+    public void registerPermissionRequest(String toolUseId) {
+        pendingPermissionIds.add(toolUseId);
     }
 
     /** Cancels the currently running CLI process, if any. */
@@ -198,8 +209,13 @@ public abstract class CliLlmProvider implements LlmProvider {
                     emitter.accept(ChatEvent.error(event.content()));
                 }
             }
-            case "prompt" -> emitter.accept(ChatEvent.prompt(
-                    event.promptId(), event.content(), event.promptType(), event.options()));
+            case "prompt" -> {
+                if ("permission".equals(event.promptType()) && event.promptId() != null) {
+                    registerPermissionRequest(event.promptId());
+                }
+                emitter.accept(ChatEvent.prompt(
+                        event.promptId(), event.content(), event.promptType(), event.options()));
+            }
             default -> { /* ignore */ }
         }
     }

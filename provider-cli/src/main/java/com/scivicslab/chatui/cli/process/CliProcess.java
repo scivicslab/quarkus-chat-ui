@@ -188,6 +188,38 @@ public class CliProcess {
         stdinStream.flush();
     }
 
+    /**
+     * Sends a permission response back to the CLI process.
+     *
+     * <p>Claude Code CLI expects permission responses as a tool result in stream-json format.
+     * The {@code response} should be one of: "yes", "yes-dont-ask-again", "no".</p>
+     *
+     * @param toolUseId the tool_use_id from the permission request
+     * @param response  the user's answer ("yes", "yes-dont-ask-again", or "no")
+     * @throws IOException if writing to the process stdin fails
+     */
+    public void writePermissionResponse(String toolUseId, String response) throws IOException {
+        if (stdinStream == null) throw new IOException("No active process stdin");
+        String normalised = normalisePermissionResponse(response);
+        String json = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":"
+            + "[{\"type\":\"tool_result\",\"tool_use_id\":"
+            + escapeJsonString(toolUseId) + ",\"content\":"
+            + escapeJsonString(normalised) + "}]}}\n";
+        stdinStream.write(json.getBytes(StandardCharsets.UTF_8));
+        stdinStream.flush();
+        logger.info("Permission response sent: " + normalised + " for tool_use_id=" + toolUseId);
+    }
+
+    static String normalisePermissionResponse(String raw) {
+        if (raw == null) return "no";
+        return switch (raw.toLowerCase().trim()) {
+            case "yes", "y", "1", "ok", "allow" -> "yes";
+            case "yes-dont-ask-again", "yes, don't ask again",
+                 "yes don't ask again", "always" -> "yes-dont-ask-again";
+            default -> "no";
+        };
+    }
+
     List<String> buildCommand() {
         List<String> cmd = new ArrayList<>();
         cmd.add(binary);

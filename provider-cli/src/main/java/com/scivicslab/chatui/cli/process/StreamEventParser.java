@@ -6,11 +6,14 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.logging.Logger;
 
 /**
  * Parses stream-json output lines from CLI LLM tools (claude, codex) into {@link StreamEvent} objects.
  */
 public class StreamEventParser {
+
+    private static final Logger logger = Logger.getLogger(StreamEventParser.class.getName());
 
     /**
      * Parses a single JSON line from the CLI stream into a {@link StreamEvent}.
@@ -31,7 +34,10 @@ public class StreamEventParser {
                 case "result" -> parseResult(json, jsonLine);
                 case "error" -> parseError(json, jsonLine);
                 case "rate_limit_event" -> new StreamEvent("rate_limit_event", null, null, -1, -1, false, jsonLine);
-                default -> new StreamEvent(type, null, null, -1, -1, false, jsonLine);
+                default -> {
+                    logger.warning("Unknown CLI event type: " + type + " | " + jsonLine);
+                    yield new StreamEvent(type, null, null, -1, -1, false, jsonLine);
+                }
             };
         } catch (Exception e) {
             return StreamEvent.error("Failed to parse JSON: " + e.getMessage());
@@ -41,11 +47,57 @@ public class StreamEventParser {
     private StreamEvent parseSystem(JSONObject json, String rawJson) {
         String subtype = json.optString("subtype", "");
         String sessionId = json.optString("session_id", null);
+
+        if ("permission_request".equals(subtype)) {
+            return parsePermissionRequest(json, rawJson);
+        }
+
         String model = json.optString("model", "");
         String content = "init".equals(subtype)
                 ? "Session initialized" + (model.isEmpty() ? "" : " (model: " + model + ")")
                 : json.optString("message", json.optString("content", subtype));
         return new StreamEvent("system", content, sessionId, -1, -1, false, rawJson);
+    }
+
+    private StreamEvent parsePermissionRequest(JSONObject json, String rawJson) {
+        String toolUseId = json.optString("tool_use_id", UUID.randomUUID().toString());
+        String toolName = json.optString("tool_name", "unknown tool");
+
+        // Build a human-readable message describing what permission is being requested
+        String message = json.optString("message", "");
+        if (message.isBlank()) {
+            JSONObject toolInput = json.optJSONObject("tool_input");
+            if (toolInput != null && "Write".equals(toolName)) {
+                message = "Allow Claude to write: " + toolInput.optString("file_path", "(unknown file)");
+            } else if (toolInput != null && "Edit".equals(toolName)) {
+                message = "Allow Claude to edit: " + toolInput.optString("file_path", "(unknown file)");
+            } else if (toolInput != null && "Bash".equals(toolName)) {
+                message = "Allow Claude to run: " + toolInput.optString("command", "(command)");
+            } else {
+                message = "Allow Claude to use the " + toolName + " tool?";
+            }
+        }
+
+        // Parse options if provided by the CLI, otherwise use standard permission options
+        List<String> options = new ArrayList<>();
+        JSONArray optionsArray = json.optJSONArray("options");
+        if (optionsArray != null && optionsArray.length() > 0) {
+            for (int i = 0; i < optionsArray.length(); i++) {
+                Object opt = optionsArray.opt(i);
+                if (opt instanceof JSONObject optObj) {
+                    options.add(optObj.optString("label", optObj.optString("value", opt.toString())));
+                } else {
+                    options.add(String.valueOf(opt));
+                }
+            }
+        } else {
+            options.add("Yes");
+            options.add("Yes, don't ask again");
+            options.add("No");
+        }
+
+        logger.info("Permission request for tool: " + toolName + " (id=" + toolUseId + ")");
+        return StreamEvent.prompt(toolUseId, message, "permission", options, rawJson);
     }
 
     private StreamEvent parseAssistant(JSONObject json, String rawJson) {
