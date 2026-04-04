@@ -36,49 +36,6 @@ public class McpTools {
     @Inject
     ChatResource chatResource;
 
-    @Tool(description = "Send a prompt to the LLM and return the response. "
-            + "This is a synchronous call that waits for the full response.")
-    String sendPrompt(
-            @ToolArg(description = "The prompt text to send to the LLM") String prompt,
-            @ToolArg(description = "The model to use (e.g., sonnet, opus, haiku). Leave empty for current model.") String model,
-            @ToolArg(description = "Caller info injected by MCP Gateway (optional)") String _caller
-    ) {
-        var ref = actorSystem.getChatActor();
-        if (ref.ask(ChatActor::isBusy).join()) {
-            return "Error: LLM is currently processing another prompt. Try again later.";
-        }
-
-        String effectiveModel = (model == null || model.isBlank())
-                ? ref.ask(ChatActor::getModel).join() : model;
-
-        var response = new StringBuilder();
-
-        String callerLabel = formatCaller(_caller);
-        chatResource.emitSse(ChatEvent.info("[MCP" + callerLabel + "] " + prompt));
-
-        try {
-            var done = new CompletableFuture<Void>();
-            ref.tell(a -> a.startPrompt(prompt, effectiveModel, event -> {
-                if ("delta".equals(event.type())) {
-                    response.append(event.content());
-                } else if ("error".equals(event.type())) {
-                    response.append("[ERROR] ").append(event.content());
-                }
-                chatResource.emitSse(event);
-            }, ref, done));
-            done.get(5, TimeUnit.MINUTES);
-        } catch (TimeoutException e) {
-            return "Error: Prompt timed out after 5 minutes. Partial response: " + response;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return "Error: Interrupted. Partial response: " + response;
-        } catch (Exception e) {
-            return "Error: " + e.getMessage() + ". Partial response: " + response;
-        }
-
-        return response.toString();
-    }
-
     @Tool(description = "Get the current status of the chat-ui instance (model, session, busy state)")
     String getStatus() {
         var ref = actorSystem.getChatActor();
