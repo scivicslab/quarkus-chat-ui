@@ -106,6 +106,48 @@ public class McpTools {
         return "Cancel requested.";
     }
 
+    @Tool(description = "Submit a prompt to the LLM asynchronously. Returns a session ID immediately. "
+            + "Use getPromptStatus and getPromptResult to check progress and retrieve results.")
+    String submitPrompt(
+            @ToolArg(description = "The prompt text to send to the LLM") String prompt,
+            @ToolArg(description = "The model to use (e.g., sonnet, opus, haiku). Leave empty for current model.") String model,
+            @ToolArg(description = "Caller info injected by MCP Gateway (optional)") String _caller
+    ) {
+        var request = new ChatResource.PromptRequest();
+        request.text = prompt;
+        request.model = model;
+
+        String callerLabel = formatCaller(_caller);
+        if (!callerLabel.isEmpty()) {
+            chatResource.emitSse(ChatEvent.info("[MCP" + callerLabel + "] submitPrompt: " + prompt));
+        }
+
+        var response = chatResource.submit(request);
+        if (response.status().equals("error") || response.status().equals("busy")) {
+            return String.format("Error: %s", response.error());
+        }
+        return String.format("Submitted. sessionId=%s, status=%s", response.sessionId(), response.status());
+    }
+
+    @Tool(description = "Get the processing status of a submitted prompt")
+    String getPromptStatus(
+            @ToolArg(description = "The session ID returned from submitPrompt") String sessionId
+    ) {
+        var response = chatResource.getStatus(sessionId);
+        return String.format("sessionId=%s, status=%s", response.sessionId(), response.status());
+    }
+
+    @Tool(description = "Get the result of a completed prompt. Returns an error if still processing.")
+    String getPromptResult(
+            @ToolArg(description = "The session ID returned from submitPrompt") String sessionId
+    ) {
+        var response = chatResource.getResult(sessionId);
+        if (response.error() != null) {
+            return String.format("Error: %s", response.error());
+        }
+        return response.result();
+    }
+
     /**
      * Formats _caller into a readable label.
      * HATEOAS: _caller is a URL like "http://localhost:8888/api/sessions/abc123"

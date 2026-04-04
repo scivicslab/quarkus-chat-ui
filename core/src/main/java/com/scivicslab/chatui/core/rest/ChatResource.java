@@ -19,6 +19,7 @@ import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
@@ -173,6 +174,84 @@ public class ChatResource {
                 ? request.model : ref.ask(ChatActor::getModel).join();
         ref.tell(a -> a.startPrompt(request.text, model, this::emitSse, ref, new CompletableFuture<>()));
         return ChatEvent.info("Processing");
+    }
+
+    @POST
+    @Path("/chat/submit")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    /**
+     * Submits a user prompt to the LLM asynchronously.
+     * Returns immediately with a session ID. The response is streamed via SSE.
+     *
+     * @param request the prompt request containing user text and optional model override
+     * @return a submit response with session ID and status, or an error
+     */
+    public SubmitResponse submit(PromptRequest request) {
+        if (request == null || request.text == null || request.text.isBlank()) {
+            return new SubmitResponse(null, "error", "Empty prompt");
+        }
+        var ref = actorSystem.getChatActor();
+        if (ref.ask(ChatActor::isBusy).join()) {
+            return new SubmitResponse(null, "busy", "LLM is currently processing another prompt");
+        }
+        String model = (request.model != null && !request.model.isBlank())
+                ? request.model : ref.ask(ChatActor::getModel).join();
+        ref.tell(a -> a.startPrompt(request.text, model, this::emitSse, ref, new CompletableFuture<>()));
+
+        // Wait briefly for session ID to be set
+        try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        String sessionId = ref.ask(ChatActor::getSessionId).join();
+        return new SubmitResponse(sessionId, "submitted", null);
+    }
+
+    @GET
+    @Path("/chat/status/{sessionId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    /**
+     * Gets the processing status of a submitted prompt.
+     *
+     * @param sessionId the session ID returned from submit
+     * @return the status response with session ID, status, and optional progress
+     */
+    public StatusResponse getStatus(@PathParam("sessionId") String sessionId) {
+        var ref = actorSystem.getChatActor();
+        String currentSessionId = ref.ask(ChatActor::getSessionId).join();
+
+        if (sessionId == null || !sessionId.equals(currentSessionId)) {
+            return new StatusResponse(sessionId, "unknown", null);
+        }
+
+        boolean isBusy = ref.ask(ChatActor::isBusy).join();
+        String status = isBusy ? "processing" : "completed";
+
+        return new StatusResponse(sessionId, status, null);
+    }
+
+    @GET
+    @Path("/chat/result/{sessionId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    /**
+     * Gets the result of a completed prompt processing.
+     *
+     * @param sessionId the session ID returned from submit
+     * @return the result response with session ID and completion status
+     */
+    public ResultResponse getResult(@PathParam("sessionId") String sessionId) {
+        var ref = actorSystem.getChatActor();
+        String currentSessionId = ref.ask(ChatActor::getSessionId).join();
+
+        if (sessionId == null || !sessionId.equals(currentSessionId)) {
+            return new ResultResponse(sessionId, null, "Unknown session ID");
+        }
+
+        boolean isBusy = ref.ask(ChatActor::isBusy).join();
+        if (isBusy) {
+            return new ResultResponse(sessionId, null, "Processing still in progress");
+        }
+
+        return new ResultResponse(sessionId, "Completed. Results streamed via SSE.", null);
     }
 
     @POST
@@ -395,6 +474,9 @@ public class ChatResource {
     public record HistoryResponse(String role, String content) {}
     public record ModelInfo(String name, String type, String server) {}
     public record FetchResult(boolean success, String content, String error) {}
+    public record SubmitResponse(String sessionId, String status, String error) {}
+    public record StatusResponse(String sessionId, String status, Double progress) {}
+    public record ResultResponse(String sessionId, String result, String error) {}
 
     public static class PromptRequest {
         public String text;
