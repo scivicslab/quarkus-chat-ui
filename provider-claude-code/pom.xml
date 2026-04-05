@@ -8,7 +8,7 @@
     <artifactId>quarkus-chat-ui-parent</artifactId>
     <version>1.0.0</version>
   </parent>
-  <artifactId>chat-ui-provider-cli</artifactId>
+  <artifactId>chat-ui-provider-claude-code</artifactId>
 
   <dependencies>
     <dependency>

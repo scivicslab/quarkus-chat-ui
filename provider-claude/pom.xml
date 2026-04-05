@@ -13,7 +13,7 @@
   <dependencies>
     <dependency>
       <groupId>com.scivicslab.chatui</groupId>
-      <artifactId>chat-ui-provider-cli</artifactId>
+      <artifactId>chat-ui-provider-claude-code</artifactId>
     </dependency>
     <dependency>
       <groupId>io.quarkus</groupId>

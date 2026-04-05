@@ -19,7 +19,7 @@ A multi-provider chat UI for Large Language Models, built with [Quarkus](https:/
 ```
 quarkus-chat-ui/
 ├── core/                   # Actor system, REST API, SSE streaming, MCP server
-├── provider-cli/           # Base CLI provider (process management, stream parsing)
+├── provider-claude-code/   # Claude Code CLI provider (process management, stream parsing)
 ├── provider-claude/        # Claude Code CLI adapter
 ├── provider-codex/         # OpenAI Codex CLI adapter
 ├── provider-openai-compat/ # OpenAI-compatible HTTP API (vLLM, Ollama, …)

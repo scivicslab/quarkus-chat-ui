@@ -10,7 +10,7 @@
 
   <modules>
     <module>core</module>
-    <module>provider-cli</module>
+    <module>provider-claude-code</module>
     <module>provider-claude</module>
     <module>provider-codex</module>
     <module>provider-openai-compat</module>
@@ -64,7 +64,7 @@
       </dependency>
       <dependency>
         <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-provider-cli</artifactId>
+        <artifactId>chat-ui-provider-claude-code</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>

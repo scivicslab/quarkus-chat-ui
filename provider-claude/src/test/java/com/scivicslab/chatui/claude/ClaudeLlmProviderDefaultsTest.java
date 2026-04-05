@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <p>Uses a minimal subclass of {@link CliLlmProvider} to test the constructor
  * logic without CDI/Quarkus. Tests verify the resulting {@link CliConfig} rather
- * than the CLI command (which is package-private to provider-cli).</p>
+ * than the CLI command (which is package-private to provider-claude-code).</p>
  */
 class ClaudeLlmProviderDefaultsTest {
 
