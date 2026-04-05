@@ -68,7 +68,31 @@ Requires `OPENAI_API_KEY` set in the environment.
 
 ### vLLM / Ollama (OpenAI-compatible HTTP)
 
+If you don't have a local LLM server running yet, [Ollama](https://ollama.com/) is the easiest way to get started:
+
 ```bash
+# Install Ollama, then pull a model
+ollama pull qwen2.5-coder:7b
+
+# Ollama listens on http://localhost:11434 by default
+```
+
+For GPU-accelerated inference, [vLLM](https://docs.vllm.ai/) serves any HuggingFace-compatible model on the same OpenAI-compatible API:
+
+```bash
+vllm serve Qwen/Qwen2.5-Coder-7B-Instruct --port 8000
+```
+
+Then start quarkus-chat-ui pointing at your server:
+
+```bash
+# Ollama
+java -Dchat-ui.provider=openai-compat \
+     -Dchat-ui.servers=http://localhost:11434/v1 \
+     -Dquarkus.http.port=28010 \
+     -jar app/target/quarkus-app/quarkus-run.jar
+
+# vLLM
 java -Dchat-ui.provider=openai-compat \
      -Dchat-ui.servers=http://localhost:8000 \
      -Dquarkus.http.port=28010 \
