@@ -2,6 +2,8 @@
 
 A multi-provider chat UI for Large Language Models, built with [Quarkus](https://quarkus.io/) and [POJO-actor](https://github.com/scivicslab/pojo-actor).
 
+![quarkus-chat-ui screenshot](chat_UI01.png)
+
 ## Features
 
 - **Multiple LLM providers** — Claude Code CLI, OpenAI Codex CLI, and OpenAI-compatible APIs (vLLM, Ollama)
@@ -142,7 +144,7 @@ Each instance exposes itself as an HTTP MCP server at `/mcp`. Available tools:
 | `getStatus` | Current model, session ID, and busy state |
 | `listModels` | Available model names |
 
-Register as an MCP server in Claude Code:
+Register as an MCP server in Claude Code CLI:
 
 ```bash
 claude mcp add --transport http chat-ui-28010 http://localhost:28010/mcp
