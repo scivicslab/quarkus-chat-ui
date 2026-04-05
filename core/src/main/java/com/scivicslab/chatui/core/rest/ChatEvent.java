@@ -95,6 +95,16 @@ public record ChatEvent(
     }
 
     /**
+     * Creates a user message event, displayed in the chat area as a user prompt.
+     *
+     * @param content the user's prompt text
+     * @return a new user event
+     */
+    public static ChatEvent user(String content) {
+        return new ChatEvent("user", content, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
      * Creates an MCP user message event, displayed in the chat area like a user message
      * but with MCP sender attribution.
      *
