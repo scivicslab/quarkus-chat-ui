@@ -1,16 +1,16 @@
 # quarkus-chat-ui
 
-A multi-provider chat UI for Large Language Models, built with [Quarkus](https://quarkus.io/) and [POJO-actor](https://github.com/scivicslab/POJO-actor).
+A multi-provider chat UI for Large Language Models, built with [Quarkus](https://quarkus.io/) and [POJO-actor](https://github.com/scivicslab/pojo-actor).
 
 ## Features
 
-- **Multiple LLM providers** — Claude CLI, Codex CLI, and OpenAI-compatible APIs (vLLM, Ollama)
+- **Multiple LLM providers** — Claude Code CLI, OpenAI Codex CLI, and OpenAI-compatible APIs (vLLM, Ollama)
 - **Streaming responses** — Server-Sent Events (SSE) for real-time token streaming
-- **Prompt queue** — Queue multiple prompts and execute them sequentially
-- **Theme support** — 10 built-in themes (dark and light variants) with localStorage persistence
-- **Slash commands** — Provider-specific commands (e.g., `/model`, `/compact`, `/clear`)
-- **Keyboard modes** — Default, Emacs, and Vi keybindings
-- **Context overflow recovery** — Automatic history trimming when the context window is exceeded
+- **Prompt queue** — Queue multiple prompts; they execute automatically in order
+- **MCP server** — Each instance exposes itself at `/mcp` for agent-to-agent communication
+- **Theme support** — 10 built-in themes (dark and light variants)
+- **Slash commands** — Provider-specific commands (`/model`, `/compact`, `/clear`, …)
+- **Keyboard modes** — Default, Mac, and Vim keybindings
 - **Watchdog monitoring** — Detects and recovers from stalled LLM processes
 - **URL fetch** — Fetches and extracts text from URLs for inclusion in prompts
 
@@ -18,99 +18,139 @@ A multi-provider chat UI for Large Language Models, built with [Quarkus](https:/
 
 ```
 quarkus-chat-ui/
-├── core/                       # Actor system, REST API, SSE streaming
-├── provider-cli/               # Base CLI provider (process management, stream parsing)
-├── provider-claude/            # Claude Code CLI adapter
-├── provider-codex/             # OpenAI Codex CLI adapter
-├── provider-openai-compat/     # OpenAI-compatible HTTP API (vLLM, Ollama)
-└── app/                        # Quarkus application assembly + static web UI
+├── core/                   # Actor system, REST API, SSE streaming, MCP server
+├── provider-cli/           # Base CLI provider (process management, stream parsing)
+├── provider-claude/        # Claude Code CLI adapter
+├── provider-codex/         # OpenAI Codex CLI adapter
+├── provider-openai-compat/ # OpenAI-compatible HTTP API (vLLM, Ollama, …)
+└── app/                    # Quarkus application assembly + static web UI
 ```
 
-The application uses the **actor model** via POJO-actor for managing chat sessions, watchdog timers, and queue processing. Each chat session is handled by a `ChatActor` that serializes all operations on a single thread, eliminating concurrency bugs.
+The concurrency model is built on [POJO-actor](https://github.com/scivicslab/pojo-actor). Each concern — chat session, side questions, queue management, stall detection — runs in its own actor. Blocking I/O runs on virtual threads that report back when done. There are no `synchronized` blocks in the application code.
 
 ## Prerequisites
 
 - Java 21+
 - Maven 3.9+
-- One of the supported LLM backends:
-  - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) with `ANTHROPIC_API_KEY`
-  - [OpenAI Codex CLI](https://github.com/openai/codex) with `OPENAI_API_KEY`
-  - A running [vLLM](https://github.com/vllm-project/vllm) or [Ollama](https://ollama.ai/) server
+- One of the supported LLM backends (see [Providers](#providers))
 
 ## Build
 
 ```bash
-rm -rf target
-mvn install
+git clone https://github.com/scivicslab/quarkus-chat-ui
+cd quarkus-chat-ui
+mvn install -DskipTests
 ```
 
-The runnable JAR is produced at `app/target/quarkus-app/quarkus-run.jar`. Copy it to a stable location:
-
-```bash
-cp app/target/quarkus-app/quarkus-run.jar ~/bin/chat-ui.jar
-```
+The runnable JAR is produced at `app/target/quarkus-app/quarkus-run.jar`.
 
 ## Run
 
+### Claude Code CLI
+
 ```bash
-# Claude provider (default)
 java -Dchat-ui.provider=claude \
      -Dquarkus.http.port=28010 \
-     -jar ~/bin/chat-ui.jar
+     -jar app/target/quarkus-app/quarkus-run.jar
+```
 
-# OpenAI-compatible provider (vLLM / Ollama)
+Requires `ANTHROPIC_API_KEY` set in the environment (or pass `-Dchat-ui.api-key=sk-ant-…`).
+
+### OpenAI Codex CLI
+
+```bash
+java -Dchat-ui.provider=codex \
+     -Dquarkus.http.port=28010 \
+     -jar app/target/quarkus-app/quarkus-run.jar
+```
+
+Requires `OPENAI_API_KEY` set in the environment.
+
+### vLLM / Ollama (OpenAI-compatible HTTP)
+
+```bash
 java -Dchat-ui.provider=openai-compat \
      -Dchat-ui.servers=http://localhost:8000 \
      -Dquarkus.http.port=28010 \
-     -jar ~/bin/chat-ui.jar
+     -jar app/target/quarkus-app/quarkus-run.jar
 ```
 
-Open `http://localhost:28010` in your browser.
+`chat-ui.servers` accepts a comma-separated list of server URLs for load balancing.
+
+Open `http://localhost:28010` in a browser.
+
+## Providers
+
+| `chat-ui.provider` | Backend | Auth |
+|--------------------|---------|------|
+| `claude` | [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) | `ANTHROPIC_API_KEY` |
+| `codex` | [OpenAI Codex CLI](https://github.com/openai/codex) | `OPENAI_API_KEY` |
+| `openai-compat` | Any OpenAI-compatible HTTP server (vLLM, Ollama, …) | optional API key |
 
 ## Configuration
 
-Key properties (set via `-D` flags or `application.properties`):
+All properties can be passed as `-D` flags or set in `application.properties`.
 
 | Property | Default | Description |
 |----------|---------|-------------|
 | `chat-ui.provider` | `claude` | LLM provider: `claude`, `codex`, or `openai-compat` |
-| `chat-ui.servers` | `http://localhost:8000` | Comma-separated server URLs (openai-compat only) |
-| `chat-ui.default-model` | *(auto-detect)* | Default model name |
-| `chat-ui.keybind` | `default` | Keyboard mode: `default`, `mac`, or `vim` |
+| `chat-ui.servers` | `http://localhost:8000` | Server URLs for `openai-compat` (comma-separated) |
+| `chat-ui.default-model` | *(provider default)* | Model name override |
+| `chat-ui.api-key` | *(env var)* | API key (prefer env vars `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) |
+| `chat-ui.permission-mode` | *(none)* | Claude/Codex permission mode (e.g. `bypassPermissions`) |
+| `chat-ui.allowed-tools` | *(all)* | Comma-separated list of allowed tools (Claude/Codex) |
+| `chat-ui.session-file` | `.chat-ui-session` | Path to persist the CLI session ID |
 | `chat-ui.title` | `Coder Agent` | Browser tab and header title |
-| `chat-ui.api-key` | *(env var)* | API key (prefer `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` env vars) |
+| `chat-ui.keybind` | `default` | Keyboard mode: `default`, `mac`, or `vim` |
+| `chat-ui.gateway-url` | *(none)* | MCP Gateway URL for multi-agent routing (e.g. `http://localhost:8888`) |
 | `quarkus.http.port` | `8090` | HTTP listen port |
+
+## MCP server
+
+Each instance exposes itself as an HTTP MCP server at `/mcp`. Available tools:
+
+| Tool | Description |
+|------|-------------|
+| `submitPrompt` | Send a prompt to the LLM (queued, async). Accepts `_caller` for agent-to-agent replies. |
+| `getPromptStatus` | Check if the LLM is still processing |
+| `getPromptResult` | Retrieve the completed response |
+| `cancelRequest` | Interrupt the current LLM request |
+| `getStatus` | Current model, session ID, and busy state |
+| `listModels` | Available model names |
+
+Register as an MCP server in Claude Code:
+
+```bash
+claude mcp add --transport http chat-ui-28010 http://localhost:28010/mcp
+```
 
 ## Testing
 
 ### Unit tests
 
-Pure Java tests with no external dependencies. No `@QuarkusTest`, no Docker, no DevServices.
+Pure Java tests, no `@QuarkusTest`, no Docker, no DevServices.
 
 ```bash
 mvn test
 ```
 
-### E2E tests (Java Playwright)
+### E2E tests (Playwright)
 
-Browser-based tests against a running instance. Uses `maven-failsafe-plugin` with `*IT.java` naming.
+Browser-based tests against a running instance.
 
 ```bash
 # First time only: install Chromium
-PW_HOME=~/.m2/repository/com/microsoft/playwright
-java -cp "$PW_HOME/playwright/1.52.0/playwright-1.52.0.jar:$PW_HOME/driver/1.52.0/driver-1.52.0.jar:$PW_HOME/driver-bundle/1.52.0/driver-bundle-1.52.0.jar" \
+java -cp ~/.m2/repository/com/microsoft/playwright/driver-bundle/1.52.0/driver-bundle-1.52.0.jar \
   com.microsoft.playwright.CLI install chromium
 
-# Run E2E tests (app must be running)
-mvn verify -pl app -am -Dchat-ui.e2e.base-url=http://localhost:28010
+# Run E2E tests
+mvn verify -pl app -am
 ```
 
-### Test summary
-
-| Type | Classes | Tests | Framework |
-|------|---------|-------|-----------|
-| Unit (`*Test.java`) | 14 | 295 | JUnit 5 |
-| E2E (`*IT.java`) | 6 | 31 | Playwright 1.52 |
+| Type | Tests |
+|------|-------|
+| Unit (`*Test.java`) | ~122 |
+| E2E (`*IT.java`) | ~33 |
 
 ## License
 
