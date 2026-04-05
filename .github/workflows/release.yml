@@ -111,27 +111,6 @@ jobs:
           name: native-macos-arm64
           path: quarkus-chat-ui-*-macos-arm64
 
-  # ── Native: macOS x86_64 (Intel) ────────────────────────────────────────────
-  native-macos-amd64:
-    needs: test
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v4
-      - uses: graalvm/setup-graalvm@v1
-        with:
-          java-version: '21'
-          distribution: 'graalvm-community'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: 'maven'
-      - name: Build native
-        run: mvn package -Pnative -DskipTests -DskipITs -pl app -am
-      - name: Stage artifact
-        run: cp app/target/chat-ui-app-*-runner quarkus-chat-ui-${{ github.ref_name }}-macos-amd64
-      - uses: actions/upload-artifact@v4
-        with:
-          name: native-macos-amd64
-          path: quarkus-chat-ui-*-macos-amd64
-
   # ── Native: Windows x86_64 ──────────────────────────────────────────────────
   native-windows-amd64:
     needs: test
@@ -161,7 +140,6 @@ jobs:
       - native-linux-amd64
       - native-linux-arm64
       - native-macos-arm64
-      - native-macos-amd64
       - native-windows-amd64
     runs-on: ubuntu-latest
     steps:
