@@ -8,3 +8,10 @@ target/
 .classpath
 .project
 .factorypath
+# Runtime session files and test artifacts
+.chat-ui-session-*
+app-*.log
+E2E_TEST_REPORT_*.md
+TEST_REQUEST_FROM_*.md
+test_file_*.txt
+test_mcp_message.sh
