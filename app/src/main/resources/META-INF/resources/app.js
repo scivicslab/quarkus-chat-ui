@@ -458,6 +458,15 @@
             case 'info':
                 appendMessage('info', event.content);
                 break;
+            case 'mcp_user':
+                appendMcpUserMessage(event.content);
+                break;
+            case 'btw_delta':
+                handleBtwDelta(event.content);
+                break;
+            case 'btw_result':
+                handleBtwResult();
+                break;
             case 'status':
                 updateStatus(event);
                 break;
@@ -834,6 +843,66 @@
         saveHistory();
         scrollToBottom();
         trimChatArea();
+    }
+
+    function appendMcpUserMessage(text) {
+        var div = document.createElement('div');
+        div.className = 'message user mcp-user';
+        div.textContent = text;
+        var footer = document.createElement('div');
+        footer.className = 'message-footer';
+        var timeSpan = document.createElement('span');
+        timeSpan.textContent = formatTime(new Date());
+        footer.appendChild(timeSpan);
+        div.appendChild(footer);
+        chatArea.appendChild(div);
+        chatHistory.push({ role: 'user', text: text });
+        saveHistory();
+        scrollToBottom();
+        trimChatArea();
+    }
+
+    // --- BTW side question ---
+
+    var btwResponseText = '';
+
+    function showBtwOverlay(question) {
+        btwResponseText = '';
+        document.getElementById('btw-question').textContent = question;
+        document.getElementById('btw-response').innerHTML =
+            '<span class="thinking-indicator">Thinking...</span>';
+        document.getElementById('btw-overlay').style.display = 'flex';
+    }
+
+    function handleBtwDelta(content) {
+        if (!content) return;
+        btwResponseText += content;
+        document.getElementById('btw-response').innerHTML =
+            marked.parse(closeOpenMarkdown(btwResponseText));
+    }
+
+    function handleBtwResult() {
+        if (btwResponseText) {
+            document.getElementById('btw-response').innerHTML =
+                marked.parse(btwResponseText);
+        }
+    }
+
+    async function executeBtw(question) {
+        showBtwOverlay(question);
+        try {
+            var resp = await fetch('api/btw', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question: question, model: modelSelect.value })
+            });
+            if (!resp.ok) {
+                document.getElementById('btw-response').textContent =
+                    'Error: HTTP ' + resp.status;
+            }
+        } catch (e) {
+            document.getElementById('btw-response').textContent = 'Error: ' + e.message;
+        }
     }
 
     // --- History persistence (localStorage) ---
@@ -1334,6 +1403,13 @@
 
         promptInput.value = '';
         autoResize();
+
+        // /btw: side question — runs independently, never queued, works while busy
+        if (text.toLowerCase().startsWith('/btw ')) {
+            var btwQuestion = text.slice(5).trim();
+            if (btwQuestion) executeBtw(btwQuestion);
+            return;
+        }
 
         // Slash commands via REST (always immediate, never queued)
         if (text.startsWith('/')) {
@@ -1841,6 +1917,19 @@
                 .then(function (resp) { return resp.json(); })
                 .then(function (logs) { appendLogBatch(logs); })
                 .catch(function () { /* ignore */ });
+        }
+    });
+
+    // --- BTW overlay close ---
+
+    document.getElementById('btw-close').addEventListener('click', function () {
+        document.getElementById('btw-overlay').style.display = 'none';
+    });
+
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape'
+                && document.getElementById('btw-overlay').style.display !== 'none') {
+            document.getElementById('btw-overlay').style.display = 'none';
         }
     });
 

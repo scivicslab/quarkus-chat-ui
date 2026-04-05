@@ -2,7 +2,12 @@ package com.scivicslab.chatui.cli.process;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
@@ -26,142 +31,232 @@ class CliProcessTest {
     @DisplayName("constructor stores binary, apiKeyEnvVar, and config")
     void constructor_storesFields() {
         CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
-
         assertSame(defaultConfig, process.getConfig());
     }
 
-    // --- buildCommand tests ---
+    // --- buildCommand: base flags ---
 
-    @Test
-    @DisplayName("buildCommand() generates correct base command for default config")
-    void buildCommand_defaultConfig_generatesBaseCommand() {
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
-        List<String> cmd = process.buildCommand();
+    @Nested
+    @DisplayName("buildCommand() base flags")
+    class BuildCommandBase {
 
-        assertEquals(BINARY, cmd.get(0));
-        assertTrue(cmd.contains("--output-format"));
-        assertTrue(cmd.contains("stream-json"));
-        assertTrue(cmd.contains("--input-format"));
-        assertTrue(cmd.contains("--verbose"));
-        // Default config has model set
-        assertTrue(cmd.contains("--model"));
-        assertTrue(cmd.contains("claude-sonnet-4-5"));
+        @Test
+        @DisplayName("generates correct base command for default config")
+        void defaultConfig_generatesBaseCommand() {
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
+            List<String> cmd = process.buildCommand();
+
+            assertEquals(BINARY, cmd.get(0));
+            assertTrue(cmd.contains("--output-format"));
+            assertTrue(cmd.contains("stream-json"));
+            assertTrue(cmd.contains("--input-format"));
+            assertTrue(cmd.contains("--verbose"));
+            assertTrue(cmd.contains("--model"));
+            assertTrue(cmd.contains("claude-sonnet-4-5"));
+        }
+
+        @Test
+        @DisplayName("default config does NOT include --permission-mode (provider sets it)")
+        void defaultConfig_excludesPermissionMode() {
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
+            List<String> cmd = process.buildCommand();
+
+            assertFalse(cmd.contains("--permission-mode"),
+                "CliConfig.defaults() has null permissionMode, so --permission-mode " +
+                "must NOT appear. Each provider sets its own default.");
+        }
     }
 
-    @Test
-    @DisplayName("buildCommand() includes --model when model is set")
-    void buildCommand_withModel_includesModelFlag() {
-        CliConfig config = CliConfig.defaults("claude-opus-4");
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
-        List<String> cmd = process.buildCommand();
+    // --- buildCommand: --model ---
 
-        int idx = cmd.indexOf("--model");
-        assertTrue(idx >= 0, "--model flag should be present");
-        assertEquals("claude-opus-4", cmd.get(idx + 1));
+    @Nested
+    @DisplayName("buildCommand() --model flag")
+    class BuildCommandModel {
+
+        @Test
+        @DisplayName("includes --model when model is set")
+        void withModel_includesModelFlag() {
+            CliConfig config = CliConfig.defaults("claude-opus-4");
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            List<String> cmd = process.buildCommand();
+
+            int idx = cmd.indexOf("--model");
+            assertTrue(idx >= 0, "--model flag should be present");
+            assertEquals("claude-opus-4", cmd.get(idx + 1));
+        }
+
+        @Test
+        @DisplayName("does not include --model when model is null")
+        void nullModel_excludesModelFlag() {
+            CliConfig config = new CliConfig(null, null, 0, null, null, false, null, null);
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            List<String> cmd = process.buildCommand();
+
+            assertFalse(cmd.contains("--model"));
+        }
     }
 
-    @Test
-    @DisplayName("buildCommand() does not include --model when model is null")
-    void buildCommand_nullModel_excludesModelFlag() {
-        CliConfig config = new CliConfig(null, null, 0, null, null, false, null);
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
-        List<String> cmd = process.buildCommand();
+    // --- buildCommand: --permission-mode ---
 
-        assertFalse(cmd.contains("--model"));
+    @Nested
+    @DisplayName("buildCommand() --permission-mode flag")
+    class BuildCommandPermissionMode {
+
+        @ParameterizedTest
+        @ValueSource(strings = {"acceptEdits", "default", "auto", "bypassPermissions", "plan"})
+        @DisplayName("includes --permission-mode for each valid value")
+        void validValues_includesFlag(String mode) {
+            CliConfig config = CliConfig.defaults("m").withPermissionMode(mode);
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            List<String> cmd = process.buildCommand();
+
+            int idx = cmd.indexOf("--permission-mode");
+            assertTrue(idx >= 0);
+            assertEquals(mode, cmd.get(idx + 1));
+        }
+
+        @Test
+        @DisplayName("excludes --permission-mode when null")
+        void nullPermissionMode_excludesFlag() {
+            CliConfig config = new CliConfig("m", null, 0, null, null, false, null, null);
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            List<String> cmd = process.buildCommand();
+
+            assertFalse(cmd.contains("--permission-mode"));
+        }
+
+        @Test
+        @DisplayName("excludes --permission-mode when blank")
+        void blankPermissionMode_excludesFlag() {
+            CliConfig config = CliConfig.defaults("m").withPermissionMode("   ");
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            List<String> cmd = process.buildCommand();
+
+            assertFalse(cmd.contains("--permission-mode"));
+        }
+
+        @Test
+        @DisplayName("--permission-mode appears before --allowedTools in command")
+        void permissionModeBeforeAllowedTools() {
+            CliConfig config = CliConfig.defaults("m")
+                .withPermissionMode("bypassPermissions")
+                .withAllowedTools("Bash");
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            List<String> cmd = process.buildCommand();
+
+            int permIdx = cmd.indexOf("--permission-mode");
+            int toolsIdx = cmd.indexOf("--allowedTools");
+            assertTrue(permIdx >= 0);
+            assertTrue(toolsIdx >= 0);
+            assertTrue(permIdx < toolsIdx, "--permission-mode should come before --allowedTools");
+        }
     }
 
-    @Test
-    @DisplayName("buildCommand() includes --resume when sessionId is set")
-    void buildCommand_withSessionId_includesResumeFlag() {
-        CliConfig config = defaultConfig.withSessionId("s-abc-123");
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
-        List<String> cmd = process.buildCommand();
+    // --- buildCommand: --resume ---
 
-        int idx = cmd.indexOf("--resume");
-        assertTrue(idx >= 0, "--resume flag should be present");
-        assertEquals("s-abc-123", cmd.get(idx + 1));
+    @Nested
+    @DisplayName("buildCommand() --resume flag")
+    class BuildCommandResume {
+
+        @Test
+        @DisplayName("includes --resume when sessionId is set")
+        void withSessionId_includesResumeFlag() {
+            CliConfig config = defaultConfig.withSessionId("s-abc-123");
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            List<String> cmd = process.buildCommand();
+
+            int idx = cmd.indexOf("--resume");
+            assertTrue(idx >= 0, "--resume flag should be present");
+            assertEquals("s-abc-123", cmd.get(idx + 1));
+        }
+
+        @Test
+        @DisplayName("does not include --resume when sessionId is null")
+        void nullSessionId_excludesResumeFlag() {
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
+            List<String> cmd = process.buildCommand();
+
+            assertFalse(cmd.contains("--resume"));
+        }
     }
 
-    @Test
-    @DisplayName("buildCommand() does not include --resume when sessionId is null")
-    void buildCommand_nullSessionId_excludesResumeFlag() {
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
-        List<String> cmd = process.buildCommand();
+    // --- buildCommand: -c (continue) ---
 
-        assertFalse(cmd.contains("--resume"));
+    @Nested
+    @DisplayName("buildCommand() -c flag")
+    class BuildCommandContinue {
+
+        @Test
+        @DisplayName("includes -c when continueSession is true")
+        void withContinueSession_includesCFlag() {
+            CliConfig config = defaultConfig.withContinueSession();
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            assertTrue(process.buildCommand().contains("-c"));
+        }
+
+        @Test
+        @DisplayName("does not include -c when continueSession is false")
+        void withoutContinueSession_excludesCFlag() {
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
+            assertFalse(process.buildCommand().contains("-c"));
+        }
     }
 
-    @Test
-    @DisplayName("buildCommand() includes -c when continueSession is true")
-    void buildCommand_withContinueSession_includesCFlag() {
-        CliConfig config = defaultConfig.withContinueSession();
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
-        List<String> cmd = process.buildCommand();
+    // --- buildCommand: --max-turns ---
 
-        assertTrue(cmd.contains("-c"));
+    @Nested
+    @DisplayName("buildCommand() --max-turns flag")
+    class BuildCommandMaxTurns {
+
+        @Test
+        @DisplayName("includes --max-turns when maxTurns > 0")
+        void withMaxTurns_includesMaxTurnsFlag() {
+            CliConfig config = defaultConfig.withMaxTurns(5);
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            List<String> cmd = process.buildCommand();
+
+            int idx = cmd.indexOf("--max-turns");
+            assertTrue(idx >= 0);
+            assertEquals("5", cmd.get(idx + 1));
+        }
+
+        @Test
+        @DisplayName("does not include --max-turns when maxTurns is 0")
+        void zeroMaxTurns_excludesMaxTurnsFlag() {
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
+            assertFalse(process.buildCommand().contains("--max-turns"));
+        }
     }
 
-    @Test
-    @DisplayName("buildCommand() does not include -c when continueSession is false")
-    void buildCommand_withoutContinueSession_excludesCFlag() {
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
-        List<String> cmd = process.buildCommand();
+    // --- buildCommand: --allowedTools ---
 
-        assertFalse(cmd.contains("-c"));
+    @Nested
+    @DisplayName("buildCommand() --allowedTools flag")
+    class BuildCommandAllowedTools {
+
+        @Test
+        @DisplayName("includes --allowedTools for each tool")
+        void withAllowedTools_includesEachTool() {
+            CliConfig config = defaultConfig.withAllowedTools("Bash", "Read", "Write");
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
+            List<String> cmd = process.buildCommand();
+
+            long count = cmd.stream().filter("--allowedTools"::equals).count();
+            assertEquals(3, count);
+
+            int firstIdx = cmd.indexOf("--allowedTools");
+            assertEquals("Bash", cmd.get(firstIdx + 1));
+        }
+
+        @Test
+        @DisplayName("does not include --allowedTools when tools is null")
+        void nullAllowedTools_excludesFlag() {
+            CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
+            assertFalse(process.buildCommand().contains("--allowedTools"));
+        }
     }
 
-    @Test
-    @DisplayName("buildCommand() includes --max-turns when maxTurns > 0")
-    void buildCommand_withMaxTurns_includesMaxTurnsFlag() {
-        CliConfig config = defaultConfig.withMaxTurns(5);
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
-        List<String> cmd = process.buildCommand();
-
-        int idx = cmd.indexOf("--max-turns");
-        assertTrue(idx >= 0, "--max-turns flag should be present");
-        assertEquals("5", cmd.get(idx + 1));
-    }
-
-    @Test
-    @DisplayName("buildCommand() does not include --max-turns when maxTurns is 0")
-    void buildCommand_zeroMaxTurns_excludesMaxTurnsFlag() {
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
-        List<String> cmd = process.buildCommand();
-
-        assertFalse(cmd.contains("--max-turns"));
-    }
-
-    @Test
-    @DisplayName("buildCommand() includes --allowedTools for each tool")
-    void buildCommand_withAllowedTools_includesEachTool() {
-        CliConfig config = defaultConfig.withAllowedTools("Bash", "Read", "Write");
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
-        List<String> cmd = process.buildCommand();
-
-        // Each tool should be preceded by --allowedTools
-        int firstIdx = cmd.indexOf("--allowedTools");
-        assertTrue(firstIdx >= 0, "--allowedTools flag should be present");
-
-        // Count occurrences of --allowedTools
-        long count = cmd.stream().filter("--allowedTools"::equals).count();
-        assertEquals(3, count, "should have one --allowedTools per tool");
-
-        // Verify the tools follow their flags in order
-        assertEquals("Bash", cmd.get(firstIdx + 1));
-        int secondIdx = cmd.subList(firstIdx + 1, cmd.size()).indexOf("--allowedTools") + firstIdx + 1;
-        assertEquals("Read", cmd.get(secondIdx + 1));
-        int thirdIdx = cmd.subList(secondIdx + 1, cmd.size()).indexOf("--allowedTools") + secondIdx + 1;
-        assertEquals("Write", cmd.get(thirdIdx + 1));
-    }
-
-    @Test
-    @DisplayName("buildCommand() does not include --allowedTools when tools is null")
-    void buildCommand_nullAllowedTools_excludesFlag() {
-        CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
-        List<String> cmd = process.buildCommand();
-
-        assertFalse(cmd.contains("--allowedTools"));
-    }
+    // --- buildCommand: all options combined ---
 
     @Test
     @DisplayName("buildCommand() combines all options correctly")
@@ -170,17 +265,15 @@ class CliProcessTest {
             .withSessionId("s-999")
             .withContinueSession()
             .withMaxTurns(3)
+            .withPermissionMode("bypassPermissions")
             .withAllowedTools("Bash", "Edit");
         CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
         List<String> cmd = process.buildCommand();
 
-        // Base flags
         assertEquals(BINARY, cmd.get(0));
         assertTrue(cmd.contains("--output-format"));
         assertTrue(cmd.contains("--input-format"));
         assertTrue(cmd.contains("--verbose"));
-
-        // All options present
         assertTrue(cmd.contains("--model"));
         assertTrue(cmd.contains("claude-opus-4"));
         assertTrue(cmd.contains("--resume"));
@@ -188,169 +281,181 @@ class CliProcessTest {
         assertTrue(cmd.contains("-c"));
         assertTrue(cmd.contains("--max-turns"));
         assertTrue(cmd.contains("3"));
+        assertTrue(cmd.contains("--permission-mode"));
+        assertTrue(cmd.contains("bypassPermissions"));
         assertEquals(2, cmd.stream().filter("--allowedTools"::equals).count());
     }
 
-    // --- isAlive tests ---
+    // --- isAlive ---
 
     @Test
     @DisplayName("isAlive() returns false when no process has been started")
     void isAlive_noProcessStarted_returnsFalse() {
         CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
-
         assertFalse(process.isAlive());
     }
 
-    // --- escapeJsonString tests ---
+    // --- normalisePermissionResponse ---
 
-    @Test
-    @DisplayName("escapeJsonString() wraps simple text in double quotes")
-    void escapeJsonString_simpleText_wrapsInQuotes() {
-        String result = CliProcess.escapeJsonString("hello");
+    @Nested
+    @DisplayName("normalisePermissionResponse()")
+    class NormalisePermissionResponse {
 
-        assertEquals("\"hello\"", result);
+        @ParameterizedTest
+        @ValueSource(strings = {"yes", "Yes", "YES", "y", "Y", "1", "ok", "OK", "allow", "Allow"})
+        @DisplayName("maps affirmative inputs to 'yes'")
+        void affirmative_mapsToYes(String input) {
+            assertEquals("yes", CliProcess.normalisePermissionResponse(input));
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {
+            "yes-dont-ask-again", "Yes, don't ask again",
+            "yes don't ask again", "always", "Always"
+        })
+        @DisplayName("maps always-approve inputs to 'yes-dont-ask-again'")
+        void alwaysApprove_mapsToDontAskAgain(String input) {
+            assertEquals("yes-dont-ask-again", CliProcess.normalisePermissionResponse(input));
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"no", "No", "NO", "n", "deny", "reject", "nope", "cancel"})
+        @DisplayName("maps negative or unknown inputs to 'no'")
+        void negative_mapsToNo(String input) {
+            assertEquals("no", CliProcess.normalisePermissionResponse(input));
+        }
+
+        @Test
+        @DisplayName("null input maps to 'no'")
+        void null_mapsToNo() {
+            assertEquals("no", CliProcess.normalisePermissionResponse(null));
+        }
+
+        @Test
+        @DisplayName("whitespace-padded input is trimmed")
+        void whitespace_isTrimmed() {
+            assertEquals("yes", CliProcess.normalisePermissionResponse("  yes  "));
+        }
     }
 
-    @Test
-    @DisplayName("escapeJsonString() escapes double quotes")
-    void escapeJsonString_doubleQuotes_escaped() {
-        String result = CliProcess.escapeJsonString("say \"hello\"");
+    // --- escapeJsonString ---
 
-        assertEquals("\"say \\\"hello\\\"\"", result);
+    @Nested
+    @DisplayName("escapeJsonString()")
+    class EscapeJsonString {
+
+        @Test
+        @DisplayName("wraps simple text in double quotes")
+        void simpleText_wrapsInQuotes() {
+            assertEquals("\"hello\"", CliProcess.escapeJsonString("hello"));
+        }
+
+        @Test
+        @DisplayName("escapes double quotes")
+        void doubleQuotes_escaped() {
+            assertEquals("\"say \\\"hello\\\"\"", CliProcess.escapeJsonString("say \"hello\""));
+        }
+
+        @Test
+        @DisplayName("escapes backslashes")
+        void backslashes_escaped() {
+            assertEquals("\"path\\\\to\\\\file\"", CliProcess.escapeJsonString("path\\to\\file"));
+        }
+
+        @Test
+        @DisplayName("escapes newlines")
+        void newlines_escaped() {
+            assertEquals("\"line1\\nline2\"", CliProcess.escapeJsonString("line1\nline2"));
+        }
+
+        @Test
+        @DisplayName("escapes carriage returns")
+        void carriageReturns_escaped() {
+            assertEquals("\"line1\\rline2\"", CliProcess.escapeJsonString("line1\rline2"));
+        }
+
+        @Test
+        @DisplayName("escapes tabs")
+        void tabs_escaped() {
+            assertEquals("\"col1\\tcol2\"", CliProcess.escapeJsonString("col1\tcol2"));
+        }
+
+        @Test
+        @DisplayName("escapes control characters as unicode")
+        void controlChars_escapedAsUnicode() {
+            assertEquals("\"a\\u0001b\"", CliProcess.escapeJsonString("a\u0001b"));
+        }
+
+        @Test
+        @DisplayName("preserves Japanese text")
+        void japaneseText_preservedCorrectly() {
+            assertEquals("\"日本語テスト\"", CliProcess.escapeJsonString("日本語テスト"));
+        }
+
+        @Test
+        @DisplayName("handles mixed content with special chars and Japanese")
+        void mixedContent_handledCorrectly() {
+            assertEquals("\"Say \\\"こんにちは\\\"\\nNew line\"",
+                CliProcess.escapeJsonString("Say \"こんにちは\"\nNew line"));
+        }
+
+        @Test
+        @DisplayName("handles empty string")
+        void emptyString_returnsEmptyQuoted() {
+            assertEquals("\"\"", CliProcess.escapeJsonString(""));
+        }
     }
 
-    @Test
-    @DisplayName("escapeJsonString() escapes backslashes")
-    void escapeJsonString_backslashes_escaped() {
-        String result = CliProcess.escapeJsonString("path\\to\\file");
+    // --- stripAnsi ---
 
-        assertEquals("\"path\\\\to\\\\file\"", result);
-    }
+    @Nested
+    @DisplayName("stripAnsi()")
+    class StripAnsi {
 
-    @Test
-    @DisplayName("escapeJsonString() escapes newlines")
-    void escapeJsonString_newlines_escaped() {
-        String result = CliProcess.escapeJsonString("line1\nline2");
+        @Test
+        @DisplayName("removes ANSI color codes")
+        void colorCodes_removed() {
+            assertEquals("ERROR: something failed",
+                CliProcess.stripAnsi("\u001b[31mERROR\u001b[0m: something failed"));
+        }
 
-        assertEquals("\"line1\\nline2\"", result);
-    }
+        @Test
+        @DisplayName("removes ANSI cursor movement codes")
+        void cursorCodes_removed() {
+            assertEquals("Hello", CliProcess.stripAnsi("\u001b[2J\u001b[HHello"));
+        }
 
-    @Test
-    @DisplayName("escapeJsonString() escapes carriage returns")
-    void escapeJsonString_carriageReturns_escaped() {
-        String result = CliProcess.escapeJsonString("line1\rline2");
+        @Test
+        @DisplayName("removes ANSI SGR with multiple parameters")
+        void sgrMultiParams_removed() {
+            assertEquals("SUCCESS", CliProcess.stripAnsi("\u001b[1;32mSUCCESS\u001b[0m"));
+        }
 
-        assertEquals("\"line1\\rline2\"", result);
-    }
+        @Test
+        @DisplayName("preserves normal text without ANSI sequences")
+        void normalText_preserved() {
+            String input = "This is plain text with no ANSI codes.";
+            assertEquals(input, CliProcess.stripAnsi(input));
+        }
 
-    @Test
-    @DisplayName("escapeJsonString() escapes tabs")
-    void escapeJsonString_tabs_escaped() {
-        String result = CliProcess.escapeJsonString("col1\tcol2");
+        @Test
+        @DisplayName("preserves empty string")
+        void emptyString_returnsEmpty() {
+            assertEquals("", CliProcess.stripAnsi(""));
+        }
 
-        assertEquals("\"col1\\tcol2\"", result);
-    }
+        @Test
+        @DisplayName("preserves Japanese text")
+        void japaneseText_preserved() {
+            assertEquals("日本語テスト", CliProcess.stripAnsi("日本語テスト"));
+        }
 
-    @Test
-    @DisplayName("escapeJsonString() escapes control characters as unicode")
-    void escapeJsonString_controlChars_escapedAsUnicode() {
-        // 0x01 (SOH) should be escaped as \u0001
-        String result = CliProcess.escapeJsonString("a\u0001b");
-
-        assertEquals("\"a\\u0001b\"", result);
-    }
-
-    @Test
-    @DisplayName("escapeJsonString() handles Japanese text correctly")
-    void escapeJsonString_japaneseText_preservedCorrectly() {
-        String result = CliProcess.escapeJsonString("Hello world");
-
-        assertEquals("\"Hello world\"", result);
-
-        // Multi-byte Japanese characters should pass through unchanged
-        String japanese = CliProcess.escapeJsonString("日本語テスト");
-        assertEquals("\"日本語テスト\"", japanese);
-    }
-
-    @Test
-    @DisplayName("escapeJsonString() handles mixed content with special chars and Japanese")
-    void escapeJsonString_mixedContent_handledCorrectly() {
-        String result = CliProcess.escapeJsonString("Say \"こんにちは\"\nNew line");
-
-        assertEquals("\"Say \\\"こんにちは\\\"\\nNew line\"", result);
-    }
-
-    @Test
-    @DisplayName("escapeJsonString() handles empty string")
-    void escapeJsonString_emptyString_returnsEmptyQuoted() {
-        String result = CliProcess.escapeJsonString("");
-
-        assertEquals("\"\"", result);
-    }
-
-    // --- stripAnsi tests ---
-
-    @Test
-    @DisplayName("stripAnsi() removes ANSI color codes")
-    void stripAnsi_colorCodes_removed() {
-        // ESC[31m = red, ESC[0m = reset
-        String input = "\u001b[31mERROR\u001b[0m: something failed";
-        String result = CliProcess.stripAnsi(input);
-
-        assertEquals("ERROR: something failed", result);
-    }
-
-    @Test
-    @DisplayName("stripAnsi() removes ANSI cursor movement codes")
-    void stripAnsi_cursorCodes_removed() {
-        // ESC[2J = clear screen, ESC[H = cursor home
-        String input = "\u001b[2J\u001b[HHello";
-        String result = CliProcess.stripAnsi(input);
-
-        assertEquals("Hello", result);
-    }
-
-    @Test
-    @DisplayName("stripAnsi() removes ANSI SGR with multiple parameters")
-    void stripAnsi_sgrMultiParams_removed() {
-        // ESC[1;32m = bold green
-        String input = "\u001b[1;32mSUCCESS\u001b[0m";
-        String result = CliProcess.stripAnsi(input);
-
-        assertEquals("SUCCESS", result);
-    }
-
-    @Test
-    @DisplayName("stripAnsi() preserves normal text without ANSI sequences")
-    void stripAnsi_normalText_preserved() {
-        String input = "This is plain text with no ANSI codes.";
-        String result = CliProcess.stripAnsi(input);
-
-        assertEquals(input, result);
-    }
-
-    @Test
-    @DisplayName("stripAnsi() preserves empty string")
-    void stripAnsi_emptyString_returnsEmpty() {
-        assertEquals("", CliProcess.stripAnsi(""));
-    }
-
-    @Test
-    @DisplayName("stripAnsi() preserves Japanese text")
-    void stripAnsi_japaneseText_preserved() {
-        String input = "日本語テスト";
-        String result = CliProcess.stripAnsi(input);
-
-        assertEquals(input, result);
-    }
-
-    @Test
-    @DisplayName("stripAnsi() removes ANSI from text with Japanese characters")
-    void stripAnsi_ansiWithJapanese_removesOnlyAnsi() {
-        String input = "\u001b[33m警告\u001b[0m: テスト失敗";
-        String result = CliProcess.stripAnsi(input);
-
-        assertEquals("警告: テスト失敗", result);
+        @Test
+        @DisplayName("removes ANSI from text with Japanese characters")
+        void ansiWithJapanese_removesOnlyAnsi() {
+            assertEquals("警告: テスト失敗",
+                CliProcess.stripAnsi("\u001b[33m警告\u001b[0m: テスト失敗"));
+        }
     }
 
     // --- getConfig / setConfig ---
@@ -373,7 +478,6 @@ class CliProcessTest {
     @DisplayName("getLastSessionId() returns null when no result event has been received")
     void getLastSessionId_noResult_returnsNull() {
         CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
-
         assertNull(process.getLastSessionId());
     }
 }

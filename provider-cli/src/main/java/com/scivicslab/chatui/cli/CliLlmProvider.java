@@ -43,12 +43,14 @@ public abstract class CliLlmProvider implements LlmProvider {
      * @param apiKeyEnvVar    the environment variable name for the API key
      * @param defaultModel    the default model identifier to use
      * @param allowedTools    comma-separated list of allowed tool names, or empty
+     * @param permissionMode  CLI permission mode (acceptEdits, default, auto, bypassPermissions)
      * @param sessionFilePath base path for the session persistence file
      * @param httpPort        HTTP port used to disambiguate session files
      */
     protected CliLlmProvider(String binary, String apiKeyEnvVar, String defaultModel,
-                              Optional<String> allowedTools, String sessionFilePath, int httpPort) {
-        CliConfig config = buildInitialConfig(defaultModel, allowedTools);
+                              Optional<String> allowedTools, Optional<String> permissionMode,
+                              String sessionFilePath, int httpPort) {
+        CliConfig config = buildInitialConfig(defaultModel, allowedTools, permissionMode);
         this.sessionFile = resolveSessionFile(sessionFilePath, httpPort);
         config = restoreSession(config);
         this.cliProcess = new CliProcess(binary, apiKeyEnvVar, config);
@@ -260,8 +262,12 @@ public abstract class CliLlmProvider implements LlmProvider {
 
     // ---- Helpers ----
 
-    private static CliConfig buildInitialConfig(String defaultModel, Optional<String> allowedTools) {
+    private static CliConfig buildInitialConfig(String defaultModel, Optional<String> allowedTools,
+                                                  Optional<String> permissionMode) {
         CliConfig config = CliConfig.defaults(defaultModel);
+        if (permissionMode.isPresent() && !permissionMode.get().isBlank()) {
+            config = config.withPermissionMode(permissionMode.get().trim());
+        }
         if (allowedTools.isPresent() && !allowedTools.get().isBlank()) {
             String[] tools = allowedTools.get().split(",");
             for (int i = 0; i < tools.length; i++) tools[i] = tools[i].trim();

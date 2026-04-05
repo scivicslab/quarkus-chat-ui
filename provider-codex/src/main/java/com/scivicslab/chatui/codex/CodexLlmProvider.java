@@ -8,8 +8,13 @@ import java.util.Optional;
 
 /**
  * LlmProvider implementation for the Codex CLI (OpenAI).
+ *
+ * <p>Codex CLI permission handling follows the same pattern as Claude Code CLI.
+ * Defaults to {@code bypassPermissions} if not configured.</p>
  */
 public class CodexLlmProvider extends CliLlmProvider {
+
+    private static final String DEFAULT_PERMISSION_MODE = "bypassPermissions";
 
     private static final List<ModelEntry> MODELS = List.of(
         new ModelEntry("gpt-5.4", "codex", null),
@@ -21,14 +26,18 @@ public class CodexLlmProvider extends CliLlmProvider {
      * Creates a new Codex LLM provider with the given configuration.
      *
      * @param allowedTools   comma-separated list of tools the CLI is allowed to use, if any
+     * @param permissionMode CLI permission mode override; defaults to bypassPermissions
      * @param sessionFilePath path to the file used for persisting session state
      * @param httpPort        HTTP port of the running Quarkus application
      */
     public CodexLlmProvider(
             @ConfigProperty(name = "chat-ui.allowed-tools") Optional<String> allowedTools,
+            @ConfigProperty(name = "chat-ui.permission-mode") Optional<String> permissionMode,
             @ConfigProperty(name = "chat-ui.session-file", defaultValue = ".chat-ui-session") String sessionFilePath,
             @ConfigProperty(name = "quarkus.http.port", defaultValue = "8090") int httpPort) {
-        super("codex", "OPENAI_API_KEY", "gpt-5.4", allowedTools, sessionFilePath, httpPort);
+        super("codex", "OPENAI_API_KEY", "gpt-5.4", allowedTools,
+              permissionMode.or(() -> Optional.of(DEFAULT_PERMISSION_MODE)),
+              sessionFilePath, httpPort);
     }
 
     /** {@inheritDoc} */

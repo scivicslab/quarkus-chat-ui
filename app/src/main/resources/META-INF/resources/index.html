@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Console - Claude</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="styles.css?v=28">
+    <link rel="stylesheet" href="styles.css?v=29">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -58,7 +58,7 @@
         <footer>
             <div id="input-area" style="position:relative">
                 <div id="predict-popup" style="display:none"></div>
-                <textarea id="prompt-input" placeholder="Type a message... (Shift+Enter to send, Tab to predict)" rows="5"></textarea>
+                <textarea id="prompt-input" placeholder="Type a message... (Shift+Enter to send, Tab to predict, /btw question for side questions)" rows="5"></textarea>
                 <div id="buttons">
                     <button id="send-btn" title="Send (Shift+Enter)">Send</button>
                     <button id="cancel-btn" title="Cancel" disabled>Cancel</button>
@@ -66,6 +66,15 @@
                 </div>
             </div>
         </footer>
+    </div>
+    <!-- BTW Overlay (side question while LLM is processing) -->
+    <div id="btw-overlay" style="display:none">
+        <div id="btw-header">
+            <span class="btw-label">BTW</span>
+            <button id="btw-close" title="Close (Escape)">&#x00D7;</button>
+        </div>
+        <div id="btw-question"></div>
+        <div id="btw-response"></div>
     </div>
     <!-- API Key Dialog (shown when no authentication is configured) -->
     <div id="auth-overlay" style="display:none">
@@ -77,6 +86,6 @@
             <p id="auth-error" style="color:var(--error-text,#f44);display:none"></p>
         </div>
     </div>
-    <script src="app.js?v=37"></script>
+    <script src="app.js?v=38"></script>
 </body>
 </html>

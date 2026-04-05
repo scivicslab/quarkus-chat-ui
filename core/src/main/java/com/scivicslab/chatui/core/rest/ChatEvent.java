@@ -13,6 +13,7 @@ import java.util.List;
  *   <li>{@code result} - Final result with session ID and cost info</li>
  *   <li>{@code error} - Error message</li>
  *   <li>{@code info} - Informational message (e.g., model changed)</li>
+ *   <li>{@code mcp_user} - User message received via MCP (displayed like a user message with MCP attribution)</li>
  *   <li>{@code status} - Status update (model, session, busy state)</li>
  *   <li>{@code thinking} - Thinking/activity indicator</li>
  *   <li>{@code prompt} - Interactive prompt from the LLM (tool permission, yes/no, etc.)</li>
@@ -94,6 +95,17 @@ public record ChatEvent(
     }
 
     /**
+     * Creates an MCP user message event, displayed in the chat area like a user message
+     * but with MCP sender attribution.
+     *
+     * @param content the message content (includes caller label and prompt text)
+     * @return a new mcp_user event
+     */
+    public static ChatEvent mcpUser(String content) {
+        return new ChatEvent("mcp_user", content, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
      * Creates a status event reporting the current model, session, and busy state.
      *
      * @param model     the active model name
@@ -150,5 +162,26 @@ public record ChatEvent(
     public static ChatEvent log(String level, String logger, String message, long ts) {
         return new ChatEvent("log", message, null, null, null, null, null,
                              null, null, null, level, logger, ts);
+    }
+
+    /**
+     * Creates a btw_delta event carrying a partial text chunk from a /btw side question response.
+     *
+     * @param content the partial text content
+     * @return a new btw_delta event
+     */
+    public static ChatEvent btwDelta(String content) {
+        return new ChatEvent("btw_delta", content, null, null, null, null, null,
+                             null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a btw_result event indicating that a /btw side question response is complete.
+     *
+     * @return a new btw_result event
+     */
+    public static ChatEvent btwResult() {
+        return new ChatEvent("btw_result", null, null, null, null, null, null,
+                             null, null, null, null, null, null);
     }
 }

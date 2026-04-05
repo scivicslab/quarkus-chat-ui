@@ -64,6 +64,18 @@ abstract class E2eTestBase {
         page = context.newPage();
     }
 
+    /**
+     * Dismisses the auth overlay if it is currently visible.
+     * Some providers (e.g. openai-compat without a configured API key) show
+     * the overlay on startup. Tests that need to interact with the input area
+     * must call this before attempting any click or keyboard action.
+     */
+    void dismissAuthOverlay() {
+        page.evaluate(
+                "() => { var el = document.querySelector('#auth-overlay');"
+                        + " if (el && el.style.display !== 'none') el.style.display = 'none'; }");
+    }
+
     @AfterEach
     void closeContext() {
         if (context != null) {

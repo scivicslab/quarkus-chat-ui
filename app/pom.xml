@@ -65,6 +65,53 @@
           <jvmArgs>--add-opens java.base/java.lang=ALL-UNNAMED</jvmArgs>
         </configuration>
       </plugin>
+      <!-- Start Quarkus app before integration tests using built JAR -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.3.0</version>
+        <executions>
+          <execution>
+            <id>start-quarkus-it</id>
+            <phase>pre-integration-test</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>java</executable>
+              <arguments>
+                <argument>--add-opens</argument>
+                <argument>java.base/java.lang=ALL-UNNAMED</argument>
+                <argument>-Dquarkus.http.port=28010</argument>
+                <argument>-Dchat-ui.provider=openai-compat</argument>
+                <argument>-jar</argument>
+                <argument>${project.build.directory}/quarkus-app/quarkus-run.jar</argument>
+              </arguments>
+              <async>true</async>
+              <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <!-- Wait for Quarkus app to finish starting up -->
+      <plugin>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>3.1.0</version>
+        <executions>
+          <execution>
+            <id>wait-for-quarkus-it</id>
+            <phase>pre-integration-test</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <target>
+                <sleep seconds="10"/>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 

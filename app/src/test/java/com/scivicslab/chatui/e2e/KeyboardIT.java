@@ -28,6 +28,8 @@ class KeyboardIT extends E2eTestBase {
                 null,
                 new Page.WaitForFunctionOptions().setTimeout(10000));
 
+        dismissAuthOverlay();
+
         Locator input = page.locator("#prompt-input");
         input.click();
         input.pressSequentially("line1");

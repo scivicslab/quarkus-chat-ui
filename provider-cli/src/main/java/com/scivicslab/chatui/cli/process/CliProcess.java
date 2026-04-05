@@ -234,6 +234,10 @@ public class CliProcess {
         if (config.maxTurns() > 0) { cmd.add("--max-turns"); cmd.add(String.valueOf(config.maxTurns())); }
         if (config.sessionId() != null) { cmd.add("--resume"); cmd.add(config.sessionId()); }
         if (config.continueSession()) cmd.add("-c");
+        if (config.permissionMode() != null && !config.permissionMode().isBlank()) {
+            cmd.add("--permission-mode");
+            cmd.add(config.permissionMode());
+        }
         if (config.allowedTools() != null) {
             for (String tool : config.allowedTools()) { cmd.add("--allowedTools"); cmd.add(tool); }
         }

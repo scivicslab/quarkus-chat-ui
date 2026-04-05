@@ -2,6 +2,7 @@ package com.scivicslab.chatui.core.mcp;
 
 import com.scivicslab.chatui.core.actor.ChatActor;
 import com.scivicslab.chatui.core.actor.LlmConsoleActorSystem;
+import com.scivicslab.chatui.core.actor.QueueActor;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.provider.ProviderCapabilities;
 import com.scivicslab.chatui.core.provider.ProviderContext;
@@ -33,6 +34,7 @@ class McpToolsTest {
 
     private ActorSystem actorSystem;
     private ActorRef<ChatActor> chatRef;
+    private ActorRef<QueueActor> queueRef;
     private McpTools mcpTools;
     private StubProvider provider;
     private List<ChatEvent> emittedEvents;
@@ -44,12 +46,16 @@ class McpToolsTest {
         ChatActor chatActor = new ChatActor(provider, Optional.of("test-key"));
         chatRef = actorSystem.actorOf("chat", chatActor);
 
-        // Build a stub LlmConsoleActorSystem that returns our chatRef
-        var stubActorSystem = new StubActorSystem(chatRef, provider);
+        QueueActor queueActor = new QueueActor();
+        queueRef = actorSystem.actorOf("queue", queueActor);
+        chatRef.tell(a -> a.setQueueActor(queueRef));
+
+        // Build a stub LlmConsoleActorSystem that returns our chatRef and queueRef
+        var stubActorSystem = new StubActorSystem(chatRef, queueRef, provider);
 
         // Build a stub ChatResource that captures emitted SSE events
         emittedEvents = new ArrayList<>();
-        var stubChatResource = new StubChatResource(emittedEvents);
+        var stubChatResource = new StubChatResource(emittedEvents, chatRef);
 
         // Construct McpTools and inject dependencies via reflection
         mcpTools = new McpTools();
@@ -103,149 +109,110 @@ class McpToolsTest {
     }
 
     @Nested
-    @DisplayName("sendPrompt")
-    class SendPromptTests {
+    @DisplayName("submitPrompt")
+    class SubmitPromptTests {
 
         @Test
-        @DisplayName("returns LLM response on success")
-        void successfulPrompt() {
-            provider.setResponseText("Hello from LLM");
+        @DisplayName("returns queued or accepted message")
+        void successfulSubmit() {
+            String result = mcpTools.submitPrompt("test prompt", "", null);
 
-            String result = mcpTools.sendPrompt("test prompt", "", null);
-
-            assertEquals("Hello from LLM", result);
+            assertTrue(result.contains("Message accepted") || result.contains("Queued"),
+                    "Expected 'Message accepted' or 'Queued' in: " + result);
         }
 
         @Test
-        @DisplayName("uses specified model when provided")
-        void usesSpecifiedModel() {
-            provider.setResponseText("response");
-
-            mcpTools.sendPrompt("test", "other-model", null);
-
-            assertEquals("other-model", provider.lastModel);
-        }
-
-        @Test
-        @DisplayName("uses current model when model is blank")
-        void usesCurrentModelWhenBlank() {
-            provider.setResponseText("response");
-
-            mcpTools.sendPrompt("test", "", null);
-
-            assertEquals("stub-model", provider.lastModel);
-        }
-
-        @Test
-        @DisplayName("emits SSE info event with caller label")
+        @DisplayName("emits mcp_user event with caller label and message content")
         void emitsInfoEventWithCaller() {
-            provider.setResponseText("response");
+            mcpTools.submitPrompt("hello", "", "agent-X");
 
-            mcpTools.sendPrompt("hello", "", "agent-X");
-
-            boolean hasInfo = emittedEvents.stream()
-                    .anyMatch(e -> "info".equals(e.type())
+            boolean hasMcpUser = emittedEvents.stream()
+                    .anyMatch(e -> "mcp_user".equals(e.type())
                             && e.content().contains("[MCP from agent-X]")
                             && e.content().contains("hello"));
-            assertTrue(hasInfo, "Expected info event with caller label");
+            assertTrue(hasMcpUser, "Expected mcp_user event with caller label and message content");
         }
 
         @Test
-        @DisplayName("emits SSE info event without caller when null")
+        @DisplayName("emits mcp_user event with 'unknown' when caller is null")
         void emitsInfoEventWithoutCaller() {
-            provider.setResponseText("response");
+            mcpTools.submitPrompt("hello", "", null);
 
-            mcpTools.sendPrompt("hello", "", null);
-
-            boolean hasInfo = emittedEvents.stream()
-                    .anyMatch(e -> "info".equals(e.type())
-                            && e.content().contains("[MCP]")
+            boolean hasMcpUser = emittedEvents.stream()
+                    .anyMatch(e -> "mcp_user".equals(e.type())
+                            && e.content().contains("[MCP from unknown]")
                             && e.content().contains("hello"));
-            assertTrue(hasInfo, "Expected info event without caller label");
+            assertTrue(hasMcpUser, "Expected mcp_user event with unknown caller");
         }
 
         @Test
-        @DisplayName("returns error text when provider emits error")
-        void returnsErrorFromProvider() {
-            provider.setErrorText("Something went wrong");
-
-            String result = mcpTools.sendPrompt("test", "", null);
-
-            assertTrue(result.contains("[ERROR] Something went wrong"));
-        }
-
-        @Test
-        @DisplayName("returns busy error when actor is already processing")
+        @DisplayName("queues message when actor is busy")
         void returnsBusyError() throws Exception {
-            // Make the actor busy by starting a prompt that never completes
+            // Make the actor busy
             provider.setHang(true);
             chatRef.tell(a -> a.startPrompt("hang", "stub-model",
                     e -> {}, chatRef, new CompletableFuture<>()));
-            Thread.sleep(100); // let the virtual thread start
+            Thread.sleep(100);
 
-            String result = mcpTools.sendPrompt("second prompt", "", null);
+            String result = mcpTools.submitPrompt("second prompt", "", null);
 
-            assertEquals("Error: LLM is currently processing another prompt. Try again later.", result);
+            // With QueueActor, busy state doesn't return error - it accepts the message
+            assertTrue(result.contains("Queued") || result.contains("position") || result.contains("Message accepted"),
+                    "Expected message to be queued or accepted, got: " + result);
 
-            // Clean up: cancel the hanging prompt
+            // Clean up
             chatRef.tell(ChatActor::cancel);
             Thread.sleep(100);
         }
     }
 
     @Nested
-    @DisplayName("formatCaller")
+    @DisplayName("formatCallerLabel")
     class FormatCallerTests {
 
         @Test
-        @DisplayName("non-URL caller is returned as-is with 'from' prefix")
+        @DisplayName("non-URL caller is returned as-is with message content")
         void nonUrlCaller() {
-            provider.setResponseText("ok");
-
-            mcpTools.sendPrompt("test", "", "agent-A");
+            mcpTools.submitPrompt("test", "", "agent-A");
 
             boolean found = emittedEvents.stream()
-                    .anyMatch(e -> "info".equals(e.type())
-                            && e.content().contains(" from agent-A"));
+                    .anyMatch(e -> "mcp_user".equals(e.type())
+                            && e.content().contains("[MCP from agent-A]")
+                            && e.content().contains("test"));
             assertTrue(found);
         }
 
         @Test
-        @DisplayName("null caller produces no label")
+        @DisplayName("null caller uses 'unknown' label")
         void nullCaller() {
-            provider.setResponseText("ok");
-
-            mcpTools.sendPrompt("test", "", null);
+            mcpTools.submitPrompt("test", "", null);
 
             boolean found = emittedEvents.stream()
-                    .anyMatch(e -> "info".equals(e.type())
-                            && e.content().equals("[MCP] test"));
-            assertTrue(found);
+                    .anyMatch(e -> "mcp_user".equals(e.type())
+                            && e.content().contains("[MCP from unknown]"));
+            assertTrue(found, "Expected mcp_user event with unknown caller");
         }
 
         @Test
-        @DisplayName("blank caller produces no label")
+        @DisplayName("blank caller uses 'unknown' label")
         void blankCaller() {
-            provider.setResponseText("ok");
-
-            mcpTools.sendPrompt("test", "", "  ");
+            mcpTools.submitPrompt("test", "", "  ");
 
             boolean found = emittedEvents.stream()
-                    .anyMatch(e -> "info".equals(e.type())
-                            && e.content().equals("[MCP] test"));
-            assertTrue(found);
+                    .anyMatch(e -> "mcp_user".equals(e.type())
+                            && e.content().contains("[MCP from unknown]"));
+            assertTrue(found, "Expected mcp_user event with unknown caller");
         }
 
         @Test
-        @DisplayName("unreachable URL falls back to raw URL")
+        @DisplayName("URL caller extracts authority (host:port) with message content")
         void unreachableUrlFallback() {
-            provider.setResponseText("ok");
-
-            mcpTools.sendPrompt("test", "", "http://127.0.0.1:1/no-server");
+            mcpTools.submitPrompt("test", "", "http://127.0.0.1:1/no-server");
 
             boolean found = emittedEvents.stream()
-                    .anyMatch(e -> "info".equals(e.type())
-                            && e.content().contains(" from http://127.0.0.1:1/no-server"));
+                    .anyMatch(e -> "mcp_user".equals(e.type())
+                            && e.content().contains("[MCP from 127.0.0.1:1]")
+                            && e.content().contains("test"));
             assertTrue(found);
         }
     }
@@ -297,18 +264,21 @@ class McpToolsTest {
     }
 
     /**
-     * Stub LlmConsoleActorSystem that wraps a pre-built ActorRef.
+     * Stub LlmConsoleActorSystem that wraps pre-built ActorRefs.
      */
     static class StubActorSystem extends LlmConsoleActorSystem {
-        private final ActorRef<ChatActor> ref;
+        private final ActorRef<ChatActor> chatRef;
+        private final ActorRef<QueueActor> queueRef;
         private final LlmProvider provider;
 
-        StubActorSystem(ActorRef<ChatActor> ref, LlmProvider provider) {
-            this.ref = ref;
+        StubActorSystem(ActorRef<ChatActor> chatRef, ActorRef<QueueActor> queueRef, LlmProvider provider) {
+            this.chatRef = chatRef;
+            this.queueRef = queueRef;
             this.provider = provider;
         }
 
-        @Override public ActorRef<ChatActor> getChatActor() { return ref; }
+        @Override public ActorRef<ChatActor> getChatActor() { return chatRef; }
+        @Override public ActorRef<QueueActor> getQueueActor() { return queueRef; }
         @Override public LlmProvider getProvider() { return provider; }
     }
 
@@ -317,11 +287,38 @@ class McpToolsTest {
      */
     static class StubChatResource extends ChatResource {
         private final List<ChatEvent> events;
+        private final ActorRef<ChatActor> chatRef;
+        private int sessionCounter = 0;
 
-        StubChatResource(List<ChatEvent> events) { this.events = events; }
+        StubChatResource(List<ChatEvent> events, ActorRef<ChatActor> chatRef) {
+            this.events = events;
+            this.chatRef = chatRef;
+        }
 
         @Override
         public void emitSse(ChatEvent event) { events.add(event); }
+
+        @Override
+        public SubmitResponse submit(PromptRequest request) {
+            if (request == null || request.text == null || request.text.isBlank()) {
+                return new SubmitResponse(null, "error", "Empty prompt");
+            }
+            if (chatRef.ask(ChatActor::isBusy).join()) {
+                return new SubmitResponse(null, "busy", "LLM is currently processing another prompt");
+            }
+            String sessionId = "session-" + (++sessionCounter);
+            return new SubmitResponse(sessionId, "submitted", null);
+        }
+
+        @Override
+        public StatusResponse getStatus(String sessionId) {
+            return new StatusResponse(sessionId, "completed", 1.0);
+        }
+
+        @Override
+        public ResultResponse getResult(String sessionId) {
+            return new ResultResponse(sessionId, "Completed successfully", null);
+        }
     }
 
     private static void setField(Object target, String fieldName, Object value) throws Exception {

@@ -47,31 +47,46 @@ public class QueueActor {
      */
     public void enqueue(String prompt, String model, String mode,
                         int timeoutSeconds, Consumer<ChatEvent> emitter,
-                        ActorRef<ChatActor> chatActorRef, ActorRef<QueueActor> self) {
+                        ActorRef<ChatActor> chatActorRef, ActorRef<QueueActor> self,
+                        String source) {
 
         CompletableFuture<Void> done = new CompletableFuture<>();
 
         switch (mode) {
             case "cancel_and_send" -> {
-                QueueItem item = new QueueItem(prompt, model, mode, 0, Instant.now(), emitter, done);
+                QueueItem item = new QueueItem(prompt, model, mode, 0, Instant.now(), emitter, done, source);
                 queue.addFirst(item);
                 chatActorRef.tell(ChatActor::cancel);
                 emitter.accept(ChatEvent.info("Current prompt cancelled. Your message is queued."));
                 LOG.info("cancel_and_send: cancelled current prompt, queued at front (queue size=" + queue.size() + ")");
             }
             case "wait" -> {
-                QueueItem item = new QueueItem(prompt, model, mode, timeoutSeconds, Instant.now(), emitter, done);
+                QueueItem item = new QueueItem(prompt, model, mode, timeoutSeconds, Instant.now(), emitter, done, source);
                 queue.addLast(item);
                 emitter.accept(ChatEvent.info("Waiting up to " + timeoutSeconds + "s for ChatActor to become idle."));
                 LOG.info("wait: queued with timeout=" + timeoutSeconds + "s (queue size=" + queue.size() + ")");
             }
             default -> {
                 // "queue" mode (default)
-                QueueItem item = new QueueItem(prompt, model, mode, 0, Instant.now(), emitter, done);
+                QueueItem item = new QueueItem(prompt, model, mode, 0, Instant.now(), emitter, done, source);
                 queue.addLast(item);
                 emitter.accept(ChatEvent.info("Queued. Your message will be sent when the current prompt finishes."));
                 LOG.info("queue: queued prompt (queue size=" + queue.size() + ")");
             }
+        }
+    }
+
+    /**
+     * Removes all MCP-sourced messages from the queue, leaving human-typed messages intact.
+     * Called on cancel to stop ongoing agent conversations without discarding
+     * messages the human has already queued up.
+     */
+    public void clearMcpMessages() {
+        int before = queue.size();
+        queue.removeIf(e -> "mcp".equals(e.source()));
+        int removed = before - queue.size();
+        if (removed > 0) {
+            LOG.info("queue: cleared " + removed + " MCP messages on cancel");
         }
     }
 
@@ -182,6 +197,7 @@ public class QueueActor {
             int timeoutSeconds,
             Instant enqueuedAt,
             Consumer<ChatEvent> emitter,
-            CompletableFuture<Void> done
+            CompletableFuture<Void> done,
+            String source   // "human" | "mcp"
     ) {}
 }

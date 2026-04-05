@@ -1075,6 +1075,73 @@ footer {
 .notification-failed {
     color: var(--accent-red);
 }
+/* BTW overlay (side question while LLM is processing) */
+#btw-overlay {
+    position: fixed;
+    bottom: 200px;
+    right: 16px;
+    width: 420px;
+    max-width: calc(100vw - 32px);
+    max-height: 50vh;
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent-blue);
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    display: flex;
+    flex-direction: column;
+    z-index: 1000;
+    overflow: hidden;
+}
+#btw-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 10px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+.btw-label {
+    font-size: 11px;
+    font-weight: bold;
+    color: var(--accent-blue);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+#btw-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0 2px;
+}
+#btw-close:hover { color: var(--text-primary); }
+#btw-question {
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: var(--user-bg);
+    border-bottom: 1px solid var(--border-color);
+    white-space: pre-wrap;
+    word-break: break-word;
+    flex-shrink: 0;
+    max-height: 72px;
+    overflow-y: auto;
+}
+#btw-response {
+    padding: 8px 10px;
+    font-size: 13px;
+    color: var(--text-primary);
+    overflow-y: auto;
+    flex: 1;
+    min-height: 48px;
+}
+#btw-response p { margin: 0 0 4px; }
+#btw-response pre { background: var(--code-bg); padding: 6px 8px; border-radius: 4px; overflow-x: auto; }
+#btw-response code { background: var(--code-bg); padding: 1px 4px; border-radius: 2px; font-size: 12px; }
+
 .notification-fade {
     opacity: 0;
 }

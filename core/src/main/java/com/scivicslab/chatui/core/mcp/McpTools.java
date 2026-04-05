@@ -6,6 +6,7 @@ import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.chatui.core.rest.ChatResource;
 import io.quarkiverse.mcp.server.Tool;
 import io.quarkiverse.mcp.server.ToolArg;
+import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.net.URI;
@@ -26,6 +27,7 @@ import java.util.stream.Collectors;
  * (e.g., another Claude Code instance via MCP Gateway) can interact with this
  * chat-ui instance programmatically.</p>
  */
+@ApplicationScoped
 public class McpTools {
 
     private static final Logger logger = Logger.getLogger(McpTools.class.getName());
@@ -59,7 +61,7 @@ public class McpTools {
         if (!ref.ask(ChatActor::isBusy).join()) {
             return "No request is currently running.";
         }
-        ref.tell(ChatActor::cancel);
+        ref.tellNow(ChatActor::cancel);
         return "Cancel requested.";
     }
 
@@ -70,20 +72,36 @@ public class McpTools {
             @ToolArg(description = "The model to use (e.g., sonnet, opus, haiku). Leave empty for current model.") String model,
             @ToolArg(description = "Caller info injected by MCP Gateway (optional)") String _caller
     ) {
-        var request = new ChatResource.PromptRequest();
-        request.text = prompt;
-        request.model = model;
+        // Display the MCP message as a user message in the chat area
+        // so the human can see what was received and the LLM response has context
+        String callerLabel = (_caller != null && !_caller.isBlank())
+                ? formatCallerLabel(_caller) : "unknown";
+        chatResource.emitSse(ChatEvent.mcpUser("[MCP from " + callerLabel + "] " + prompt));
 
-        String callerLabel = formatCaller(_caller);
-        if (!callerLabel.isEmpty()) {
-            chatResource.emitSse(ChatEvent.info("[MCP" + callerLabel + "] submitPrompt: " + prompt));
-        }
+        // Enrich prompt with position awareness (provider-agnostic solution)
+        String enrichedPrompt = buildEnrichedPrompt(prompt, _caller);
 
-        var response = chatResource.submit(request);
-        if (response.status().equals("error") || response.status().equals("busy")) {
-            return String.format("Error: %s", response.error());
+        // Use QueueActor to handle busy state gracefully
+        var queueRef = actorSystem.getQueueActor();
+        var chatRef = actorSystem.getChatActor();
+
+        queueRef.tell(q -> q.enqueue(
+            enrichedPrompt,
+            model,
+            "queue",  // default queue mode
+            0,        // no timeout
+            chatResource::emitSse,  // emitter for SSE events
+            chatRef,
+            queueRef,
+            "mcp"
+        ));
+
+        int queueSize = queueRef.ask(com.scivicslab.chatui.core.actor.QueueActor::getQueueSize).join();
+        if (queueSize > 1) {
+            return String.format("Queued at position %d. Your message will be sent when the current prompt finishes.", queueSize);
+        } else {
+            return "Message accepted. Processing will begin shortly.";
         }
-        return String.format("Submitted. sessionId=%s, status=%s", response.sessionId(), response.status());
     }
 
     @Tool(description = "Get the processing status of a submitted prompt")
@@ -106,10 +124,90 @@ public class McpTools {
     }
 
     /**
-     * Formats _caller into a readable label.
-     * HATEOAS: _caller is a URL like "http://localhost:8888/api/sessions/abc123"
+     * Builds an enriched prompt with position awareness for MCP messages.
+     * Solves 3 challenges:
+     * 1. Self-awareness: LLM knows its own URL
+     * 2. Sender recognition: LLM knows who sent the message
+     * 3. Reply method: LLM knows how to reply using callMcpServer tool
+     */
+    private String buildEnrichedPrompt(String prompt, String _caller) {
+        if (_caller == null || _caller.isBlank()) {
+            return prompt; // No enrichment for non-MCP messages
+        }
+
+        String selfUrl = getSelfUrl();
+        String callerUrl = extractUrl(_caller);
+        String callerLabel = formatCallerLabel(_caller);
+
+        return String.format(
+            "[Context]\n" +
+            "You are running on: %s\n" +
+            "Received via MCP from: %s\n\n" +
+            "[Message]\n" +
+            "%s\n\n" +
+            "[How to Reply]\n" +
+            "Use callMcpServer tool:\n" +
+            "- serverUrl: %s\n" +
+            "- toolName: submitPrompt\n" +
+            "- arguments: {\"prompt\":\"your reply\",\"model\":\"sonnet\",\"_caller\":\"%s\"}",
+            selfUrl,      // Self-awareness
+            callerLabel,  // Sender recognition
+            prompt,
+            callerUrl,    // Reply method
+            selfUrl
+        );
+    }
+
+    /**
+     * Gets the URL of this chat-ui instance.
+     */
+    private String getSelfUrl() {
+        int port = Integer.parseInt(System.getProperty("quarkus.http.port", "8080"));
+        return "http://localhost:" + port;
+    }
+
+    /**
+     * Extracts base URL from _caller parameter.
+     * Example: "http://localhost:28010/api/sessions/abc" -> "http://localhost:28010"
+     */
+    private String extractUrl(String caller) {
+        if (caller == null) {
+            return null;
+        }
+        if (caller.startsWith("http://") || caller.startsWith("https://")) {
+            try {
+                URI uri = new URI(caller);
+                return uri.getScheme() + "://" + uri.getAuthority();
+            } catch (Exception e) {
+                return caller;
+            }
+        }
+        // Fallback: if just a port number or identifier
+        return caller;
+    }
+
+    /**
+     * Formats _caller into a short label for display.
+     * Example: "http://localhost:28010" -> "localhost:28010"
+     */
+    private String formatCallerLabel(String caller) {
+        if (caller == null) {
+            return "unknown";
+        }
+        try {
+            URI uri = new URI(caller);
+            String authority = uri.getAuthority();
+            return authority != null ? authority : caller;
+        } catch (Exception e) {
+            return caller;
+        }
+    }
+
+    /**
+     * Formats _caller into a readable label (legacy HATEOAS version).
      * Fetches the URL to get caller metadata (name, remoteAddress, etc.)
      */
+    @SuppressWarnings("unused")
     private String formatCaller(String callerUrl) {
         if (callerUrl == null || callerUrl.isBlank()) {
             return "";

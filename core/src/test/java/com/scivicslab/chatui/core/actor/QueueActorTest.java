@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Pure JUnit 5 tests for QueueActor.
  *
  * <p>Uses a real ActorSystem with a minimal stub ChatActor to verify
- * enqueue, dequeue, cancel_and_send, and wait-with-timeout behavior.</p>
+ * enqueue, dequeue, cancel_and_send, wait-with-timeout, and clearMcpMessages behavior.</p>
  */
 class QueueActorTest {
 
@@ -58,13 +58,12 @@ class QueueActorTest {
     void queueMode_addsItemAndEmitsInfo() throws Exception {
         List<ChatEvent> events = new ArrayList<>();
 
-        // Use raw ActorRef<ChatActor> via unchecked cast — StubChatActor extends ChatActor
         @SuppressWarnings("unchecked")
         ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
 
         queueRef.tell(q -> q.enqueue(
                 "Hello", "gpt-4", "queue", 0,
-                events::add, chatActorRef, queueRef
+                events::add, chatActorRef, queueRef, "human"
         )).get(5, TimeUnit.SECONDS);
 
         assertEquals(1, queueActor.getQueueSize());
@@ -86,13 +85,13 @@ class QueueActorTest {
         // Enqueue a regular item first
         queueRef.tell(q -> q.enqueue(
                 "First", "gpt-4", "queue", 0,
-                events1::add, chatActorRef, queueRef
+                events1::add, chatActorRef, queueRef, "human"
         )).get(5, TimeUnit.SECONDS);
 
         // Enqueue cancel_and_send — should go to front
         queueRef.tell(q -> q.enqueue(
                 "Urgent", "gpt-4", "cancel_and_send", 0,
-                events2::add, chatActorRef, queueRef
+                events2::add, chatActorRef, queueRef, "human"
         )).get(5, TimeUnit.SECONDS);
 
         assertEquals(2, queueActor.getQueueSize());
@@ -116,7 +115,7 @@ class QueueActorTest {
 
         queueRef.tell(q -> q.enqueue(
                 "Wait prompt", "gpt-4", "wait", 30,
-                events::add, chatActorRef, queueRef
+                events::add, chatActorRef, queueRef, "human"
         )).get(5, TimeUnit.SECONDS);
 
         assertEquals(1, queueActor.getQueueSize());
@@ -136,7 +135,7 @@ class QueueActorTest {
         // Enqueue a prompt
         queueRef.tell(q -> q.enqueue(
                 "Hello", "gpt-4", "queue", 0,
-                events::add, chatActorRef, queueRef
+                events::add, chatActorRef, queueRef, "human"
         )).get(5, TimeUnit.SECONDS);
 
         assertEquals(1, queueActor.getQueueSize());
@@ -163,11 +162,11 @@ class QueueActorTest {
         @SuppressWarnings("unchecked")
         ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
 
-        queueRef.tell(q -> q.enqueue("First", null, "queue", 0, events1::add, chatActorRef, queueRef))
+        queueRef.tell(q -> q.enqueue("First", null, "queue", 0, events1::add, chatActorRef, queueRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Second", null, "queue", 0, events2::add, chatActorRef, queueRef))
+        queueRef.tell(q -> q.enqueue("Second", null, "queue", 0, events2::add, chatActorRef, queueRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Third", null, "queue", 0, events3::add, chatActorRef, queueRef))
+        queueRef.tell(q -> q.enqueue("Third", null, "queue", 0, events3::add, chatActorRef, queueRef, "human"))
                 .get(5, TimeUnit.SECONDS);
 
         assertEquals(3, queueActor.getQueueSize());
@@ -193,9 +192,9 @@ class QueueActorTest {
         // Make ChatActor busy so dequeue doesn't happen immediately
         chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
 
-        queueRef.tell(q -> q.enqueue("Normal", null, "queue", 0, eventsA::add, chatActorRef, queueRef))
+        queueRef.tell(q -> q.enqueue("Normal", null, "queue", 0, eventsA::add, chatActorRef, queueRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Urgent", null, "cancel_and_send", 0, eventsB::add, chatActorRef, queueRef))
+        queueRef.tell(q -> q.enqueue("Urgent", null, "cancel_and_send", 0, eventsB::add, chatActorRef, queueRef, "human"))
                 .get(5, TimeUnit.SECONDS);
 
         assertEquals(2, queueActor.getQueueSize());
@@ -232,7 +231,7 @@ class QueueActorTest {
         @SuppressWarnings("unchecked")
         ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
 
-        queueRef.tell(q -> q.enqueue("Tick test", null, "queue", 0, events::add, chatActorRef, queueRef))
+        queueRef.tell(q -> q.enqueue("Tick test", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
                 .get(5, TimeUnit.SECONDS);
 
         queueRef.tell(q -> q.tick(chatActorRef)).get(5, TimeUnit.SECONDS);
@@ -253,7 +252,7 @@ class QueueActorTest {
 
         chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
 
-        queueRef.tell(q -> q.enqueue("Blocked", null, "queue", 0, events::add, chatActorRef, queueRef))
+        queueRef.tell(q -> q.enqueue("Blocked", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
                 .get(5, TimeUnit.SECONDS);
 
         queueRef.tell(q -> q.tick(chatActorRef)).get(5, TimeUnit.SECONDS);
@@ -274,19 +273,10 @@ class QueueActorTest {
 
         chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
 
-        // Enqueue with 0-second timeout (expires immediately)
-        // We use a custom QueueItem with an enqueuedAt in the past to simulate expiration
-        queueRef.tell(q -> {
-            // Directly add an item that is already expired (enqueuedAt 10 seconds ago)
-            var item = new QueueActor.QueueItem(
-                    "Timed out", null, "wait", 1,
-                    Instant.now().minusSeconds(10), events::add, new CompletableFuture<>()
-            );
-            // Access the queue through enqueue first, then immediately tick
-            q.enqueue("Timed out", null, "wait", 1, events::add, chatActorRef, queueRef);
-        }).get(5, TimeUnit.SECONDS);
+        queueRef.tell(q -> q.enqueue("Timed out", null, "wait", 1, events::add, chatActorRef, queueRef, "human"))
+                .get(5, TimeUnit.SECONDS);
 
-        // Wait a tiny bit so the 1-second timeout has clearly expired
+        // Wait so the 1-second timeout has clearly expired
         Thread.sleep(1100);
 
         // Reset cancel flag to check if tick triggers cancel
@@ -304,6 +294,50 @@ class QueueActorTest {
                 .anyMatch(e -> "info".equals(e.type()) && e.content() != null
                         && e.content().contains("timeout expired"));
         assertTrue(hasTimeoutMsg, "Expected a timeout expired info event");
+    }
+
+    @Test
+    @DisplayName("clearMcpMessages removes only mcp-sourced items, leaving human items")
+    void clearMcpMessages_removesOnlyMcpItems() throws Exception {
+        List<ChatEvent> events = new ArrayList<>();
+
+        @SuppressWarnings("unchecked")
+        ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
+
+        chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
+
+        queueRef.tell(q -> q.enqueue("Human question", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
+                .get(5, TimeUnit.SECONDS);
+        queueRef.tell(q -> q.enqueue("MCP reply A", null, "queue", 0, events::add, chatActorRef, queueRef, "mcp"))
+                .get(5, TimeUnit.SECONDS);
+        queueRef.tell(q -> q.enqueue("MCP reply B", null, "queue", 0, events::add, chatActorRef, queueRef, "mcp"))
+                .get(5, TimeUnit.SECONDS);
+
+        assertEquals(3, queueActor.getQueueSize());
+
+        queueRef.tell(QueueActor::clearMcpMessages).get(5, TimeUnit.SECONDS);
+
+        assertEquals(1, queueActor.getQueueSize());
+    }
+
+    @Test
+    @DisplayName("clearMcpMessages on all-human queue removes nothing")
+    void clearMcpMessages_allHuman_removesNothing() throws Exception {
+        List<ChatEvent> events = new ArrayList<>();
+
+        @SuppressWarnings("unchecked")
+        ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
+
+        chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
+
+        queueRef.tell(q -> q.enqueue("Q1", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
+                .get(5, TimeUnit.SECONDS);
+        queueRef.tell(q -> q.enqueue("Q2", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
+                .get(5, TimeUnit.SECONDS);
+
+        queueRef.tell(QueueActor::clearMcpMessages).get(5, TimeUnit.SECONDS);
+
+        assertEquals(2, queueActor.getQueueSize());
     }
 
     // ========================================================================

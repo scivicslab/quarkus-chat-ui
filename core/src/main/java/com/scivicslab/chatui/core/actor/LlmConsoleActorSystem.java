@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.core.actor;
 
+import com.scivicslab.chatui.core.mcp.McpClientActor;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.service.LogStreamHandler;
 import com.scivicslab.pojoactor.core.ActorRef;
@@ -39,6 +40,8 @@ public class LlmConsoleActorSystem {
     private ActorRef<ChatActor> chatActorRef;
     private ActorRef<WatchdogActor> watchdogRef;
     private ActorRef<QueueActor> queueActorRef;
+    private ActorRef<BtwActor> btwActorRef;
+    private ActorRef<McpClientActor> mcpClientActorRef;
     private ScheduledExecutorService watchdogTimer;
     private ScheduledExecutorService queueTimer;
 
@@ -55,6 +58,7 @@ public class LlmConsoleActorSystem {
 
         // Create QueueActor and wire periodic tick
         queueActorRef = actorSystem.actorOf("queue", new QueueActor());
+        chatActorRef.tell(a -> a.setQueueActor(queueActorRef));
         queueTimer = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "queue-timer");
             t.setDaemon(true);
@@ -64,6 +68,14 @@ public class LlmConsoleActorSystem {
                 () -> queueActorRef.tell(q -> q.tick(chatActorRef)),
                 2, 2, TimeUnit.SECONDS);
         LOG.info("QueueActor initialized with 2s tick interval");
+
+        // Create BtwActor for /btw side questions (independent of ChatActor)
+        btwActorRef = actorSystem.actorOf("btw", new BtwActor(provider));
+        LOG.info("BtwActor initialized");
+
+        // Create McpClientActor for asynchronous MCP requests
+        mcpClientActorRef = actorSystem.actorOf("mcp-client", new McpClientActor());
+        LOG.info("McpClientActor initialized");
 
         if (provider.capabilities().supportsWatchdog()) {
             watchdogRef = actorSystem.actorOf("watchdog", new WatchdogActor());
@@ -112,6 +124,20 @@ public class LlmConsoleActorSystem {
      * @return the queue actor reference
      */
     public ActorRef<QueueActor> getQueueActor() { return queueActorRef; }
+
+    /**
+     * Returns the reference to the btw actor for /btw side questions.
+     *
+     * @return the btw actor reference
+     */
+    public ActorRef<BtwActor> getBtwActor() { return btwActorRef; }
+
+    /**
+     * Returns the reference to the MCP client actor.
+     *
+     * @return the MCP client actor reference
+     */
+    public ActorRef<McpClientActor> getMcpClientActor() { return mcpClientActorRef; }
 
     /**
      * Returns the injected LLM provider instance.

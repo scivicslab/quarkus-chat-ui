@@ -169,10 +169,13 @@ public class ChatResource {
         if (sseResponse == null) {
             return ChatEvent.error("No SSE connection. Please refresh the page.");
         }
-        var ref = actorSystem.getChatActor();
+        var chatRef = actorSystem.getChatActor();
         String model = (request.model != null && !request.model.isBlank())
-                ? request.model : ref.ask(ChatActor::getModel).join();
-        ref.tell(a -> a.startPrompt(request.text, model, this::emitSse, ref, new CompletableFuture<>()));
+                ? request.model : chatRef.ask(ChatActor::getModel).join();
+        var queueRef = actorSystem.getQueueActor();
+        queueRef.tell(q -> q.enqueue(
+                request.text, model, "queue", 0,
+                this::emitSse, chatRef, queueRef, "human"));
         return ChatEvent.info("Processing");
     }
 
@@ -299,7 +302,8 @@ public class ChatResource {
      * @return an info event confirming cancellation
      */
     public ChatEvent cancel() {
-        actorSystem.getChatActor().tell(ChatActor::cancel);
+        actorSystem.getChatActor().tellNow(ChatActor::cancel);
+        actorSystem.getQueueActor().tell(com.scivicslab.chatui.core.actor.QueueActor::clearMcpMessages);
         return ChatEvent.info("Cancelled");
     }
 
@@ -431,6 +435,32 @@ public class ChatResource {
     }
 
     @POST
+    @Path("/btw")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    /**
+     * Handles a /btw side question: runs a one-shot LLM call independently of the main
+     * conversation. Does not read or write ChatActor history. The response is streamed
+     * back via SSE using btw_delta / btw_result event types.
+     *
+     * @param request the side question with optional model override
+     * @return an info event on acceptance, or an error event on validation failure
+     */
+    public ChatEvent btw(BtwRequest request) {
+        if (request == null || request.question == null || request.question.isBlank()) {
+            return ChatEvent.error("Empty question");
+        }
+        String apiKey = actorSystem.getChatActor().ask(ChatActor::getApiKey).join();
+        String model = (request.model != null && !request.model.isBlank())
+                ? request.model : actorSystem.getProvider().getCurrentModel();
+
+        var btwRef = actorSystem.getBtwActor();
+        btwRef.tell(a -> a.startBtw(request.question, model, apiKey, this::emitSse, btwRef));
+
+        return ChatEvent.info("BTW processing");
+    }
+
+    @POST
     @Path("/fetch-url")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
@@ -498,5 +528,10 @@ public class ChatResource {
 
     public static class FetchRequest {
         public String url;
+    }
+
+    public static class BtwRequest {
+        public String question;
+        public String model;
     }
 }

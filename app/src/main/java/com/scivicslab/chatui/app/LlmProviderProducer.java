@@ -30,6 +30,9 @@ public class LlmProviderProducer {
     @ConfigProperty(name = "chat-ui.allowed-tools")
     Optional<String> allowedTools;
 
+    @ConfigProperty(name = "chat-ui.permission-mode")
+    Optional<String> permissionMode;
+
     @ConfigProperty(name = "chat-ui.session-file", defaultValue = ".chat-ui-session")
     String sessionFilePath;
 
@@ -55,8 +58,8 @@ public class LlmProviderProducer {
     public LlmProvider produce() {
         LOG.info("Initializing LLM provider: " + providerName);
         return switch (providerName.toLowerCase().trim()) {
-            case "claude" -> new ClaudeLlmProvider(allowedTools, sessionFilePath, httpPort);
-            case "codex" -> new CodexLlmProvider(allowedTools, sessionFilePath, httpPort);
+            case "claude" -> new ClaudeLlmProvider(allowedTools, permissionMode, sessionFilePath, httpPort);
+            case "codex" -> new CodexLlmProvider(allowedTools, permissionMode, sessionFilePath, httpPort);
             case "openai-compat" -> {
                 List<String> urls = Arrays.stream(servers.split(","))
                         .map(String::trim)

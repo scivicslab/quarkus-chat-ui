@@ -281,7 +281,7 @@ class ChatActorTest {
             List<ChatEvent> emitted = new ArrayList<>();
 
             // Simulate the completion callback
-            actor.onPromptComplete(emitted::add, new java.util.concurrent.CompletableFuture<>());
+            actor.onPromptComplete(emitted::add, new java.util.concurrent.CompletableFuture<>(), null);
 
             assertFalse(actor.isBusy());
             // Should emit a status event

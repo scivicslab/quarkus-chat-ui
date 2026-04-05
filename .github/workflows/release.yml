@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ── Unit tests ──────────────────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+      - name: Run unit tests
+        run: mvn test -DskipITs
+
+  # ── Fat-JAR + Javadoc ───────────────────────────────────────────────────────
+  build-jar:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+      - name: Build über-jar
+        run: mvn install -DskipTests -DskipITs -Dquarkus.package.jar.type=uber-jar
+      - name: Build Javadoc JAR
+        run: mvn javadoc:aggregate-jar
+      - name: Stage artifacts
+        run: |
+          TAG=${{ github.ref_name }}
+          cp app/target/chat-ui-app-*-runner.jar  quarkus-chat-ui-${TAG}.jar
+          cp target/*-javadoc.jar                  quarkus-chat-ui-${TAG}-javadoc.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jar-artifacts
+          path: quarkus-chat-ui-*.jar
+
+  # ── Native: Linux x86_64 ────────────────────────────────────────────────────
+  native-linux-amd64:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: 'maven'
+      - name: Build native
+        run: mvn package -Pnative -DskipTests -DskipITs -pl app -am
+      - name: Stage artifact
+        run: cp app/target/chat-ui-app-*-runner quarkus-chat-ui-${{ github.ref_name }}-linux-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-amd64
+          path: quarkus-chat-ui-*-linux-amd64
+
+  # ── Native: Linux ARM64 ─────────────────────────────────────────────────────
+  native-linux-arm64:
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: 'maven'
+      - name: Build native
+        run: mvn package -Pnative -DskipTests -DskipITs -pl app -am
+      - name: Stage artifact
+        run: cp app/target/chat-ui-app-*-runner quarkus-chat-ui-${{ github.ref_name }}-linux-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-arm64
+          path: quarkus-chat-ui-*-linux-arm64
+
+  # ── Native: macOS ARM64 (M1/M2/M3) ─────────────────────────────────────────
+  native-macos-arm64:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: 'maven'
+      - name: Build native
+        run: mvn package -Pnative -DskipTests -DskipITs -pl app -am
+      - name: Stage artifact
+        run: cp app/target/chat-ui-app-*-runner quarkus-chat-ui-${{ github.ref_name }}-macos-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-macos-arm64
+          path: quarkus-chat-ui-*-macos-arm64
+
+  # ── Native: macOS x86_64 (Intel) ────────────────────────────────────────────
+  native-macos-amd64:
+    needs: test
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: 'maven'
+      - name: Build native
+        run: mvn package -Pnative -DskipTests -DskipITs -pl app -am
+      - name: Stage artifact
+        run: cp app/target/chat-ui-app-*-runner quarkus-chat-ui-${{ github.ref_name }}-macos-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-macos-amd64
+          path: quarkus-chat-ui-*-macos-amd64
+
+  # ── Native: Windows x86_64 ──────────────────────────────────────────────────
+  native-windows-amd64:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: 'maven'
+      - name: Build native
+        run: mvn package -Pnative -DskipTests -DskipITs -pl app -am
+      - name: Stage artifact
+        shell: bash
+        run: cp app/target/chat-ui-app-*-runner.exe quarkus-chat-ui-${{ github.ref_name }}-windows-amd64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-windows-amd64
+          path: quarkus-chat-ui-*-windows-amd64.exe
+
+  # ── GitHub Release ──────────────────────────────────────────────────────────
+  release:
+    needs:
+      - build-jar
+      - native-linux-amd64
+      - native-linux-arm64
+      - native-macos-arm64
+      - native-macos-amd64
+      - native-windows-amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+      - name: List release artifacts
+        run: ls -lh artifacts/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

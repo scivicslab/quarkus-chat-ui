@@ -46,6 +46,7 @@ public class ChatActor {
     private volatile Thread activeThread;
 
     private ActorRef<WatchdogActor> watchdog;
+    private ActorRef<QueueActor> queueActor;
 
     private final ChatEvent[] logBuffer = new ChatEvent[LOG_BUFFER_SIZE];
     private int logHead = 0;
@@ -240,17 +241,23 @@ public class ChatActor {
                 logger.log(Level.WARNING, "Provider sendPrompt failed", e);
                 emitter.accept(ChatEvent.error("Error: " + e.getMessage()));
             } finally {
-                self.tell(a -> a.onPromptComplete(emitter, done));
+                self.tell(a -> a.onPromptComplete(emitter, done, self));
             }
         });
     }
 
     /** Called by the worker virtual thread when LLM processing finishes. */
-    public void onPromptComplete(Consumer<ChatEvent> emitter, CompletableFuture<Void> done) {
+    public void onPromptComplete(Consumer<ChatEvent> emitter, CompletableFuture<Void> done, ActorRef<ChatActor> self) {
         busy = false;
         activeThread = null;
         boolean useWatchdog = watchdog != null && provider.capabilities().supportsWatchdog();
         if (useWatchdog) watchdog.tell(WatchdogActor::onPromptFinished);
+
+        // Notify QueueActor to process next prompt
+        if (queueActor != null) {
+            queueActor.tell(q -> q.onPromptComplete(self));
+        }
+
         emitter.accept(ChatEvent.status(provider.getCurrentModel(), provider.getSessionId(), false));
         done.complete(null);
     }
@@ -354,6 +361,8 @@ public class ChatActor {
 
     /** Wire the watchdog actor reference. Called by LlmConsoleActorSystem after construction. */
     public void setWatchdog(ActorRef<WatchdogActor> watchdog) { this.watchdog = watchdog; }
+
+    public void setQueueActor(ActorRef<QueueActor> queueActor) { this.queueActor = queueActor; }
 
     public record HistoryEntry(String role, String content) {}
 }
