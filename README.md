@@ -30,6 +30,11 @@ quarkus-chat-ui/
 
 The concurrency model is built on [POJO-actor](https://github.com/scivicslab/pojo-actor). Each concern — chat session, side questions, queue management, stall detection — runs in its own actor. Blocking I/O runs on virtual threads that report back when done. There are no `synchronized` blocks in the application code.
 
+## Blog Posts
+
+- [quarkus-chat-ui: A Web Front-End for LLMs, and a Real-World Case for POJO-actor](https://scivicslab.com/blog/2026-04-05-quarkus-chat-ui-intro)
+- [quarkus-chat-ui (2): The Actor Design Behind LLM-to-LLM Conversation](https://scivicslab.com/blog/2026-04-05-pojo-actor-llm-conversation)
+
 ## Prerequisites
 
 - Java 21+
