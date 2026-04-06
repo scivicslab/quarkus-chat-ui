@@ -576,11 +576,22 @@
                 .replace(/<think>[\s\S]*$/, '');
             currentAssistantMsg.innerHTML = marked.parse(closeOpenMarkdown(displayText));
             scrollToBottom();
+        } else if (content) {
+            // Display thinking content
+            if (currentAssistantText && !currentAssistantText.endsWith('\n\n')) {
+                currentAssistantText += '\n\n';
+            }
+            currentAssistantText += '*💭 ' + content + '*\n\n';
+            var displayText = currentAssistantText
+                .replace(/<think>[\s\S]*?<\/think>/g, '')
+                .replace(/<think>[\s\S]*$/, '');
+            currentAssistantMsg.innerHTML = marked.parse(closeOpenMarkdown(displayText));
+            scrollToBottom();
         } else if (!currentAssistantText) {
             // Show generic thinking indicator before any text has arrived
             var indicator = document.createElement('div');
             indicator.className = 'thinking-indicator';
-            indicator.textContent = content || 'Thinking...';
+            indicator.textContent = 'Thinking...';
             currentAssistantMsg.appendChild(indicator);
             scrollToBottom();
         } else {
