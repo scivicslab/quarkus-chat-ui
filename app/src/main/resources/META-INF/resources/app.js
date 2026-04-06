@@ -557,9 +557,9 @@
             chatArea.appendChild(currentAssistantMsg);
         }
 
-        // Show tool activity messages (e.g., "Using Write...", "Tool completed.") temporarily.
-        // Do NOT add to currentAssistantText — they disappear when real content arrives.
-        if (content && (content.startsWith('Using ') || content === 'Tool completed.')) {
+        // All thinking content (tool use messages, reasoning) is shown temporarily.
+        // Nothing is added to currentAssistantText — it all disappears when delta text arrives.
+        if (content) {
             var label = content === 'Tool completed.' ? '✓ Tool completed.' : content;
             var indicator = currentAssistantMsg.querySelector('.thinking-indicator');
             if (indicator) {
@@ -572,17 +572,6 @@
                 ind.textContent = label;
                 currentAssistantMsg.appendChild(ind);
             }
-            scrollToBottom();
-        } else if (content) {
-            // Display thinking content — persists in currentAssistantText
-            if (currentAssistantText && !currentAssistantText.endsWith('\n\n')) {
-                currentAssistantText += '\n\n';
-            }
-            currentAssistantText += '*💭 ' + content + '*\n\n';
-            var displayText = currentAssistantText
-                .replace(/<think>[\s\S]*?<\/think>/g, '')
-                .replace(/<think>[\s\S]*$/, '');
-            currentAssistantMsg.innerHTML = marked.parse(closeOpenMarkdown(displayText));
             scrollToBottom();
         } else if (!currentAssistantText) {
             // Show generic thinking indicator before any text has arrived
