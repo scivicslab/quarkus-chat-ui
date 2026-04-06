@@ -2,11 +2,9 @@ package com.scivicslab.chatui.cli.process;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -137,10 +135,6 @@ public class CliProcess {
 
             String logLine = line;
             logger.info(() -> "stdout: " + logLine);
-            // TEMP: log raw JSON to /tmp/claude-raw-events.log for event type analysis
-            try (PrintWriter pw = new PrintWriter(new FileWriter("/tmp/claude-raw-events.log", true))) {
-                pw.println(line);
-            } catch (IOException ignored) {}
 
             StreamEvent event = parser.parse(line);
             if (event == null) continue;
