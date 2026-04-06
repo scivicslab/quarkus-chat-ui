@@ -187,7 +187,7 @@ class ClaudeLlmProviderDefaultsTest {
         private static final String DEFAULT_PERMISSION_MODE = "bypassPermissions";
 
         TestClaudeProvider(Optional<String> allowedTools, Optional<String> permissionMode) {
-            super("claude", "ANTHROPIC_API_KEY", "claude-sonnet-4-5",
+            super("claude", "ANTHROPIC_API_KEY", "claude-sonnet-4-6",
                   allowedTools,
                   permissionMode.filter(s -> !s.isBlank()).or(() -> Optional.of(DEFAULT_PERMISSION_MODE)),
                   System.getProperty("java.io.tmpdir") + "/.test-claude-session",
@@ -201,7 +201,7 @@ class ClaudeLlmProviderDefaultsTest {
         @Override public String id() { return "claude"; }
         @Override public String displayName() { return "Claude (Test)"; }
         @Override public List<LlmProvider.ModelEntry> getAvailableModels() {
-            return List.of(new LlmProvider.ModelEntry("claude-sonnet-4-5", "claude", null));
+            return List.of(new LlmProvider.ModelEntry("claude-sonnet-4-6", "claude", null));
         }
         @Override public String detectEnvApiKey() { return null; }
     }

@@ -27,9 +27,9 @@ public class ClaudeLlmProvider extends CliLlmProvider {
     private static final String DEFAULT_PERMISSION_MODE = "bypassPermissions";
 
     private static final List<ModelEntry> MODELS = List.of(
-        new ModelEntry("claude-opus-4-5", "claude", null),
-        new ModelEntry("claude-sonnet-4-5", "claude", null),
-        new ModelEntry("claude-haiku-4-5", "claude", null)
+        new ModelEntry("claude-opus-4-6", "claude", null),
+        new ModelEntry("claude-sonnet-4-6", "claude", null),
+        new ModelEntry("claude-haiku-4-5-20251001", "claude", null)
     );
 
     /**
@@ -48,7 +48,7 @@ public class ClaudeLlmProvider extends CliLlmProvider {
             @ConfigProperty(name = "chat-ui.permission-mode") Optional<String> permissionMode,
             @ConfigProperty(name = "chat-ui.session-file", defaultValue = ".chat-ui-session") String sessionFilePath,
             @ConfigProperty(name = "quarkus.http.port", defaultValue = "8090") int httpPort) {
-        super("claude", "ANTHROPIC_API_KEY", "claude-sonnet-4-5", allowedTools,
+        super("claude", "ANTHROPIC_API_KEY", "claude-sonnet-4-6", allowedTools,
               permissionMode.or(() -> Optional.of(DEFAULT_PERMISSION_MODE)),
               sessionFilePath, httpPort);
     }
