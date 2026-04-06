@@ -563,9 +563,13 @@
             var label = content === 'Tool completed.' ? '✓ Tool completed.' : content;
             var indicator = currentAssistantMsg.querySelector('.thinking-indicator');
             if (indicator) {
+                // Update existing indicator
                 indicator.setAttribute('data-base', label);
                 indicator.textContent = label;
-            } else if (!currentAssistantText) {
+            } else {
+                // Create new indicator.
+                // After a delta arrives, innerHTML= wipes the previous indicator.
+                // We always recreate it so thinking events remain visible even mid-response.
                 var ind = document.createElement('div');
                 ind.className = 'thinking-indicator';
                 ind.setAttribute('data-base', label);
@@ -574,15 +578,12 @@
             }
             scrollToBottom();
         } else if (!currentAssistantText) {
-            // Show generic thinking indicator before any text has arrived
+            // No content yet: show generic "Thinking..." before first delta
             var indicator = document.createElement('div');
             indicator.className = 'thinking-indicator';
             indicator.textContent = 'Thinking...';
             currentAssistantMsg.appendChild(indicator);
             scrollToBottom();
-        } else {
-            // Generic thinking after text: insert paragraph break before next delta
-            needsParagraphBreak = true;
         }
         // Update activity label in status bar
         var label = content || 'Thinking...';
