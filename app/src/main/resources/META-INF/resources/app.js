@@ -441,7 +441,37 @@
 
     // --- Event handling ---
 
+    // DEBUG: Write to /tmp/chat-ui-client-debug.txt
+    var debugLog = [];
+    function writeDebugLog(message) {
+        var timestamp = new Date().toISOString();
+        debugLog.push(timestamp + ' ' + message);
+        // Keep last 500 entries
+        if (debugLog.length > 500) debugLog.shift();
+    }
+
+    function saveDebugLog() {
+        var blob = new Blob([debugLog.join('\n')], {type: 'text/plain'});
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'chat-ui-client-debug.txt';
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    // Add download button
+    var debugBtn = document.createElement('button');
+    debugBtn.textContent = 'Download Debug Log';
+    debugBtn.style.cssText = 'position:fixed;bottom:10px;right:10px;z-index:9999;';
+    debugBtn.onclick = saveDebugLog;
+    document.body.appendChild(debugBtn);
+
     function handleEvent(event) {
+        // DEBUG: Log to memory
+        var contentPreview = event.content ? (event.content.length > 80 ? event.content.substring(0, 80) + '...' : event.content) : '(no content)';
+        writeDebugLog('[RECEIVED] type=' + event.type + ' content=' + contentPreview);
+
         switch (event.type) {
             case 'delta':
                 handleDelta(event.content);
@@ -526,15 +556,35 @@
             currentAssistantMsg.className = 'message assistant streaming';
             chatArea.appendChild(currentAssistantMsg);
         }
-        if (!currentAssistantText) {
-            // Show thinking indicator before any text has arrived
+
+        // Show tool activity messages (e.g., "Using Write...", "Tool completed.")
+        // Add them to currentAssistantText so they persist after re-rendering
+        if (content && content.startsWith('Using ')) {
+            if (currentAssistantText && !currentAssistantText.endsWith('\n\n')) {
+                currentAssistantText += '\n\n';
+            }
+            currentAssistantText += '*' + content + '*\n\n';
+            var displayText = currentAssistantText
+                .replace(/<think>[\s\S]*?<\/think>/g, '')
+                .replace(/<think>[\s\S]*$/, '');
+            currentAssistantMsg.innerHTML = marked.parse(closeOpenMarkdown(displayText));
+            scrollToBottom();
+        } else if (content === 'Tool completed.') {
+            currentAssistantText += '*✓ ' + content + '*\n\n';
+            var displayText = currentAssistantText
+                .replace(/<think>[\s\S]*?<\/think>/g, '')
+                .replace(/<think>[\s\S]*$/, '');
+            currentAssistantMsg.innerHTML = marked.parse(closeOpenMarkdown(displayText));
+            scrollToBottom();
+        } else if (!currentAssistantText) {
+            // Show generic thinking indicator before any text has arrived
             var indicator = document.createElement('div');
             indicator.className = 'thinking-indicator';
             indicator.textContent = content || 'Thinking...';
             currentAssistantMsg.appendChild(indicator);
             scrollToBottom();
         } else {
-            // Text already accumulated; insert paragraph break before next delta
+            // Generic thinking after text: insert paragraph break before next delta
             needsParagraphBreak = true;
         }
         // Update activity label in status bar
@@ -545,7 +595,11 @@
     }
 
     function handleDelta(content) {
-        if (!content) return;
+        if (!content) {
+            writeDebugLog('[handleDelta] SKIPPED: empty content');
+            return;
+        }
+        writeDebugLog('[handleDelta] Processing content length=' + content.length + ' text=' + content.substring(0, 50));
 
         // Re-enable cancel if server is still active (e.g., after POST timeout)
         if (!busy) {

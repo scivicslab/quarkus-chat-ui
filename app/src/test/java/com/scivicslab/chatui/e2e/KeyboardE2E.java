@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * verify that basic keyboard input and newline insertion work as
  * expected.</p>
  */
-class KeyboardIT extends E2eTestBase {
+class KeyboardE2E extends E2eTestBase {
 
     @Test
     @DisplayName("Enter key inserts newline in default keybind mode")

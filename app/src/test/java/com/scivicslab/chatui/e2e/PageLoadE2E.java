@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * E2E tests that verify the page loads correctly and essential
  * UI elements are present and in their expected initial state.
  */
-class PageLoadIT extends E2eTestBase {
+class PageLoadE2E extends E2eTestBase {
 
     @Test
     @DisplayName("Page title contains application name")

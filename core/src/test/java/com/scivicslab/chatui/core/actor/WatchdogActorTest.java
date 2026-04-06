@@ -110,10 +110,10 @@ class WatchdogActorTest {
     }
 
     @Test
-    @DisplayName("default stall threshold is 90 seconds")
-    void defaultThreshold_is90Seconds() {
+    @DisplayName("default stall threshold is 300 seconds (5 minutes)")
+    void defaultThreshold_is300Seconds() {
         WatchdogActor defaultWatchdog = new WatchdogActor();
-        assertEquals(Duration.ofSeconds(90), defaultWatchdog.getStallThreshold());
+        assertEquals(Duration.ofSeconds(300), defaultWatchdog.getStallThreshold());
     }
 
     @Test

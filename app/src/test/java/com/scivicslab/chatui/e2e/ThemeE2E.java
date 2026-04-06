@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 /**
  * E2E tests that verify theme switching functionality.
  */
-class ThemeIT extends E2eTestBase {
+class ThemeE2E extends E2eTestBase {
 
     @Test
     @DisplayName("Default theme is applied on first load")

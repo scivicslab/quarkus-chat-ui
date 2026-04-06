@@ -190,15 +190,33 @@ public abstract class CliLlmProvider implements LlmProvider {
     }
 
     private void dispatch(StreamEvent event, Consumer<ChatEvent> emitter, boolean[] staleSession) {
+        DebugLogger.logEvent("DISPATCH", event.type(), event.content());
+
         switch (event.type()) {
             case "assistant" -> {
-                if (event.hasContent()) emitter.accept(ChatEvent.delta(event.content()));
+                DebugLogger.log("[EMIT] Sending delta to SSE");
+                emitter.accept(ChatEvent.delta(event.content()));
             }
-            case "thinking" -> emitter.accept(ChatEvent.thinking("Thinking..."));
-            case "tool_activity" -> emitter.accept(ChatEvent.thinking("Using " + event.content() + "..."));
-            case "tool_result" -> emitter.accept(ChatEvent.thinking("Tool completed."));
-            case "system" -> { if (event.sessionId() != null) saveSession(event.sessionId()); }
+            case "thinking" -> {
+                DebugLogger.log("[EMIT] Sending thinking to SSE");
+                String thinkingText = (event.content() != null && !event.content().isEmpty())
+                        ? event.content() : "Thinking...";
+                emitter.accept(ChatEvent.thinking(thinkingText));
+            }
+            case "tool_activity" -> {
+                DebugLogger.log("[EMIT] Sending tool_activity to SSE");
+                emitter.accept(ChatEvent.thinking("Using " + event.content() + "..."));
+            }
+            case "tool_result" -> {
+                DebugLogger.log("[EMIT] Sending tool_result to SSE");
+                emitter.accept(ChatEvent.thinking("Tool completed."));
+            }
+            case "system" -> {
+                DebugLogger.log("[EMIT] System event (no SSE)");
+                if (event.sessionId() != null) saveSession(event.sessionId());
+            }
             case "result" -> {
+                DebugLogger.log("[EMIT] Sending result to SSE");
                 if (event.sessionId() != null) saveSession(event.sessionId());
                 emitter.accept(ChatEvent.result(event.sessionId(), event.costUsd(), event.durationMs(),
                         cliProcess.getConfig().model(), false));
@@ -207,18 +225,23 @@ public abstract class CliLlmProvider implements LlmProvider {
                 if (event.content() != null
                         && event.content().contains("No conversation found with session ID")) {
                     staleSession[0] = true;
+                    DebugLogger.log("[EMIT] Stale session error (not emitted)");
                 } else {
+                    DebugLogger.log("[EMIT] Sending error to SSE");
                     emitter.accept(ChatEvent.error(event.content()));
                 }
             }
             case "prompt" -> {
+                DebugLogger.log("[EMIT] Sending prompt to SSE");
                 if ("permission".equals(event.promptType()) && event.promptId() != null) {
                     registerPermissionRequest(event.promptId());
                 }
                 emitter.accept(ChatEvent.prompt(
                         event.promptId(), event.content(), event.promptType(), event.options()));
             }
-            default -> { /* ignore */ }
+            default -> {
+                DebugLogger.log("[EMIT] Unknown type, ignoring");
+            }
         }
     }
 

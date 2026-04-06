@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * can see what was sent. Previously, only "[MCP from xxx] submitPrompt"
  * notification was shown without the actual message content.</p>
  */
-class McpMessageDisplayIT extends E2eTestBase {
+class McpMessageDisplayE2E extends E2eTestBase {
 
     private static final String TEST_MESSAGE = "E2E_MCP_TEST_MESSAGE_" + System.currentTimeMillis();
 

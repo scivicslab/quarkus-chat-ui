@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * E2E tests that verify SSE connection establishment and
  * status indicator behavior.
  */
-class ConnectionIT extends E2eTestBase {
+class ConnectionE2E extends E2eTestBase {
 
     @Test
     @DisplayName("SSE connection establishes and status shows ready")

@@ -26,7 +26,7 @@ public class WatchdogActor {
 
     private static final Logger LOG = Logger.getLogger(WatchdogActor.class.getName());
 
-    static final Duration DEFAULT_STALL_THRESHOLD = Duration.ofSeconds(90);
+    static final Duration DEFAULT_STALL_THRESHOLD = Duration.ofSeconds(300);
 
     private final Duration stallThreshold;
 

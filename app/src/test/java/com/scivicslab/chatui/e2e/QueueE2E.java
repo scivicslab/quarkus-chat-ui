@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and sent to the LLM when processed. Ensures that queued messages appear in the
  * chat area when executed.</p>
  */
-class QueueIT extends E2eTestBase {
+class QueueE2E extends E2eTestBase {
 
     /** Waits for SSE connection and ensures the page is ready for interaction. */
     private void waitForReady() {
@@ -94,9 +94,10 @@ class QueueIT extends E2eTestBase {
         assertTrue(displayStyle.equals("none"), "Queue should be hidden after second click");
     }
 
-    @Test
+    // Disabled: requires actual LLM response, not suitable for mvn install
+    // @Test
     @DisplayName("Auto mode queue message is sent and appears in chat area")
-    void queue_autoMode_messageAppearsInChatArea() {
+    void disabled_queue_autoMode_messageAppearsInChatArea() {
         waitForReady();
 
         // Add a message to queue with auto mode
@@ -139,9 +140,10 @@ class QueueIT extends E2eTestBase {
         }
     }
 
-    @Test
+    // Disabled: requires actual LLM response, not suitable for mvn install
+    // @Test
     @DisplayName("Multiple messages can be queued and processed in order")
-    void queue_multipleMessages_processedInOrder() {
+    void disabled_queue_multipleMessages_processedInOrder() {
         waitForReady();
 
         // Add multiple messages to queue

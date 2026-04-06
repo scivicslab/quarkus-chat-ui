@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  * clearing) regardless of whether the backend produces a meaningful
  * LLM response.</p>
  */
-class ChatInteractionIT extends E2eTestBase {
+class ChatInteractionE2E extends E2eTestBase {
 
     /** Waits for SSE connection and ensures the page is ready for interaction. */
     private void waitForReady() {

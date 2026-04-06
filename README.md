@@ -41,10 +41,12 @@ The concurrency model is built on [POJO-actor](https://github.com/scivicslab/poj
 ```bash
 git clone https://github.com/scivicslab/quarkus-chat-ui
 cd quarkus-chat-ui
-mvn install -DskipTests
+mvn install
 ```
 
 The runnable JAR is produced at `app/target/quarkus-app/quarkus-run.jar`.
+
+**Note:** `mvn install` or `mvn package` runs unit tests by default. E2E tests are separate — see [Testing](#testing).
 
 ## Run
 
@@ -152,31 +154,51 @@ claude mcp add --transport http chat-ui-28010 http://localhost:28010/mcp
 
 ## Testing
 
-### Unit tests
+### Test types and naming
 
-Pure Java tests, no `@QuarkusTest`, no Docker, no DevServices.
+| Type | Naming | Description | Command |
+|------|--------|-------------|---------|
+| **Unit** | `*Test.java` | Pure Java tests, no external dependencies, uses mocks | `mvn test` |
+| **Integration** | `*IT.java` | Tests with real databases, APIs, or external services | `mvn verify` |
+| **E2E (UI)** | `*E2E.java` | Browser tests with Playwright (full user flows) | `mvn verify -Pe2e` |
 
+### Running tests
+
+**Standard build** (unit tests only):
+```bash
+mvn install
+# or
+mvn package
+```
+
+**Unit tests only**:
 ```bash
 mvn test
 ```
 
-### E2E tests (Playwright)
+**Unit + Integration tests**:
+```bash
+mvn verify
+```
 
-Browser-based tests against a running instance.
-
+**E2E tests** (requires Playwright):
 ```bash
 # First time only: install Chromium
 java -cp ~/.m2/repository/com/microsoft/playwright/driver-bundle/1.52.0/driver-bundle-1.52.0.jar \
   com.microsoft.playwright.CLI install chromium
 
 # Run E2E tests
-mvn verify -pl app -am
+mvn verify -Pe2e
 ```
 
-| Type | Tests |
+**Important:** `mvn install` and `mvn package` work without any special options or flags. E2E tests are opt-in via the `e2e` profile.
+
+### Test counts
+
+| Type | Count |
 |------|-------|
-| Unit (`*Test.java`) | ~122 |
-| E2E (`*IT.java`) | ~33 |
+| Unit tests | ~122 |
+| E2E tests | ~33 |
 
 ## License
 

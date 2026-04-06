@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * queue state in localStorage. These tests verify that state is
  * persisted and restored correctly.</p>
  */
-class LocalStorageIT extends E2eTestBase {
+class LocalStorageE2E extends E2eTestBase {
 
     @Test
     @DisplayName("Theme selection is saved to localStorage")

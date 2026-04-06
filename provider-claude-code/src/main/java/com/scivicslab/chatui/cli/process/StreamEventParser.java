@@ -111,7 +111,7 @@ public class StreamEventParser {
         }
 
         StringBuilder textBuilder = new StringBuilder();
-        boolean hasThinking = false;
+        StringBuilder thinkingBuilder = new StringBuilder();
         List<String> toolNames = new ArrayList<>();
 
         for (int i = 0; i < contentArray.length(); i++) {
@@ -119,7 +119,7 @@ public class StreamEventParser {
             if (block == null) continue;
             switch (block.optString("type", "")) {
                 case "text" -> textBuilder.append(block.optString("text", ""));
-                case "thinking" -> hasThinking = true;
+                case "thinking" -> thinkingBuilder.append(block.optString("thinking", ""));
                 case "tool_use" -> {
                     String toolName = block.optString("name", "");
                     if ("AskUserQuestion".equals(toolName)) return parseEmbeddedAskUser(block, rawJson);
@@ -130,7 +130,8 @@ public class StreamEventParser {
 
         String text = textBuilder.toString();
         if (!text.isEmpty()) return new StreamEvent("assistant", text, null, -1, -1, false, rawJson);
-        if (hasThinking) return new StreamEvent("thinking", null, null, -1, -1, false, rawJson);
+        String thinking = thinkingBuilder.toString();
+        if (!thinking.isEmpty()) return new StreamEvent("thinking", thinking, null, -1, -1, false, rawJson);
         if (!toolNames.isEmpty()) return new StreamEvent("tool_activity", String.join(", ", toolNames), null, -1, -1, false, rawJson);
         return new StreamEvent("assistant", "", null, -1, -1, false, rawJson);
     }
