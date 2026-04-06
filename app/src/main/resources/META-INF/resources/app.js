@@ -557,27 +557,24 @@
             chatArea.appendChild(currentAssistantMsg);
         }
 
-        // Show tool activity messages (e.g., "Using Write...", "Tool completed.")
-        // Add them to currentAssistantText so they persist after re-rendering
-        if (content && content.startsWith('Using ')) {
-            if (currentAssistantText && !currentAssistantText.endsWith('\n\n')) {
-                currentAssistantText += '\n\n';
+        // Show tool activity messages (e.g., "Using Write...", "Tool completed.") temporarily.
+        // Do NOT add to currentAssistantText — they disappear when real content arrives.
+        if (content && (content.startsWith('Using ') || content === 'Tool completed.')) {
+            var label = content === 'Tool completed.' ? '✓ Tool completed.' : content;
+            var indicator = currentAssistantMsg.querySelector('.thinking-indicator');
+            if (indicator) {
+                indicator.setAttribute('data-base', label);
+                indicator.textContent = label;
+            } else if (!currentAssistantText) {
+                var ind = document.createElement('div');
+                ind.className = 'thinking-indicator';
+                ind.setAttribute('data-base', label);
+                ind.textContent = label;
+                currentAssistantMsg.appendChild(ind);
             }
-            currentAssistantText += '*' + content + '*\n\n';
-            var displayText = currentAssistantText
-                .replace(/<think>[\s\S]*?<\/think>/g, '')
-                .replace(/<think>[\s\S]*$/, '');
-            currentAssistantMsg.innerHTML = marked.parse(closeOpenMarkdown(displayText));
-            scrollToBottom();
-        } else if (content === 'Tool completed.') {
-            currentAssistantText += '*✓ ' + content + '*\n\n';
-            var displayText = currentAssistantText
-                .replace(/<think>[\s\S]*?<\/think>/g, '')
-                .replace(/<think>[\s\S]*$/, '');
-            currentAssistantMsg.innerHTML = marked.parse(closeOpenMarkdown(displayText));
             scrollToBottom();
         } else if (content) {
-            // Display thinking content
+            // Display thinking content — persists in currentAssistantText
             if (currentAssistantText && !currentAssistantText.endsWith('\n\n')) {
                 currentAssistantText += '\n\n';
             }
