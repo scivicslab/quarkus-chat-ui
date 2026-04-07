@@ -11,6 +11,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.Optional;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -54,8 +55,8 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     @ConfigProperty(name = "chat-ui.agent-loop.enabled", defaultValue = "false")
     boolean enabled;
 
-    @ConfigProperty(name = "chat-ui.agent-loop.mcp-urls", defaultValue = "")
-    String mcpUrlsConfig;
+    @ConfigProperty(name = "chat-ui.agent-loop.mcp-urls")
+    Optional<String> mcpUrlsRaw;
 
     @ConfigProperty(name = "chat-ui.agent-loop.max-iterations", defaultValue = "10")
     int maxIterations;
@@ -73,7 +74,7 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     public void initialize(List<OpenAiCompatClient> clients) {
         this.clients = List.copyOf(clients);
         LOG.info("AgentLoop initialized with " + clients.size() + " client(s), "
-                + "mcp-urls=" + mcpUrlsConfig + ", max-iterations=" + maxIterations);
+                + "mcp-urls=" + mcpUrlsRaw.orElse("") + ", max-iterations=" + maxIterations);
     }
 
     @Override
@@ -164,7 +165,8 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     // ------------------------------------------------------------------ //
 
     private List<ToolDefinition> fetchAllTools() {
-        if (mcpUrlsConfig == null || mcpUrlsConfig.isBlank()) return List.of();
+        String mcpUrlsConfig = mcpUrlsRaw.orElse("");
+        if (mcpUrlsConfig.isBlank()) return List.of();
         List<ToolDefinition> all = new ArrayList<>();
         for (String raw : mcpUrlsConfig.split(",")) {
             String url = raw.trim();
@@ -228,7 +230,8 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     // ------------------------------------------------------------------ //
 
     private String callMcpTool(String toolName, String arguments) {
-        if (mcpUrlsConfig == null || mcpUrlsConfig.isBlank()) return "No MCP server configured";
+        String mcpUrlsConfig = mcpUrlsRaw.orElse("");
+        if (mcpUrlsConfig.isBlank()) return "No MCP server configured";
         String firstUrl = mcpUrlsConfig.split(",")[0].trim();
         try {
             return callToolOnServer(firstUrl, toolName, arguments);

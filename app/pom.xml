@@ -6,7 +6,7 @@
   <parent>
     <groupId>com.scivicslab.chatui</groupId>
     <artifactId>quarkus-chat-ui-parent</artifactId>
-    <version>1.0.0</version>
+    <version>1.2.0</version>
   </parent>
   <artifactId>chat-ui-app</artifactId>
 
@@ -75,6 +75,73 @@
 
   <profiles>
     <profile>
+      <!--
+        Smoke test for the documented uber-jar startup workflow.
+        Builds the uber-jar, starts it with the documented command
+        (java -Dchat-ui.provider=claude -jar ...-runner.jar), and verifies
+        the chat UI is reachable without a login screen.
+        Run with: mvn verify -Pe2e-uber-jar-smoke
+      -->
+      <id>e2e-uber-jar-smoke</id>
+      <properties>
+        <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
+              <includes>
+                <include>**/UberJarSmokeIT.java</include>
+              </includes>
+              <systemPropertyVariables>
+                <chat-ui.e2e.base-url>http://localhost:28015</chat-ui.e2e.base-url>
+              </systemPropertyVariables>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <version>3.3.0</version>
+            <executions>
+              <execution>
+                <id>start-uber-jar-smoke</id>
+                <phase>pre-integration-test</phase>
+                <goals><goal>exec</goal></goals>
+                <configuration>
+                  <executable>java</executable>
+                  <arguments>
+                    <argument>-Dchat-ui.provider=claude</argument>
+                    <argument>-Dquarkus.http.port=28015</argument>
+                    <argument>-jar</argument>
+                    <argument>${project.build.directory}/chat-ui-app-${project.version}-runner.jar</argument>
+                  </arguments>
+                  <async>true</async>
+                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <version>3.1.0</version>
+            <executions>
+              <execution>
+                <id>wait-for-uber-jar-smoke</id>
+                <phase>pre-integration-test</phase>
+                <goals><goal>run</goal></goals>
+                <configuration>
+                  <target><sleep seconds="15"/></target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
       <id>native</id>
       <activation>
         <property><name>native</name></property>
@@ -83,6 +150,77 @@
         <quarkus.native.enabled>true</quarkus.native.enabled>
       </properties>
     </profile>
+    <profile>
+      <!--
+        Regression guard: CLI provider + multi-user flag must NOT show the login screen.
+        Starts the server with claude provider AND chat-ui.multi-user=true to reproduce
+        the original bug, then verifies the browser goes straight to the chat UI.
+      -->
+      <id>e2e-cli-multiuser-flag</id>
+      <build>
+        <plugins>
+          <plugin>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
+              <includes>
+                <include>**/CliProviderMultiUserFlagIgnoredE2E.java</include>
+              </includes>
+              <systemPropertyVariables>
+                <chat-ui.e2e.base-url>http://localhost:28012</chat-ui.e2e.base-url>
+              </systemPropertyVariables>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <version>3.3.0</version>
+            <executions>
+              <execution>
+                <id>start-quarkus-cli-multiuser-flag-it</id>
+                <phase>pre-integration-test</phase>
+                <goals>
+                  <goal>exec</goal>
+                </goals>
+                <configuration>
+                  <executable>java</executable>
+                  <arguments>
+                    <argument>--add-opens</argument>
+                    <argument>java.base/java.lang=ALL-UNNAMED</argument>
+                    <argument>-Dquarkus.http.port=28012</argument>
+                    <argument>-Dchat-ui.provider=claude</argument>
+                    <argument>-Dchat-ui.multi-user=true</argument>
+                    <argument>-jar</argument>
+                    <argument>${project.build.directory}/quarkus-app/quarkus-run.jar</argument>
+                  </arguments>
+                  <async>true</async>
+                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <version>3.1.0</version>
+            <executions>
+              <execution>
+                <id>wait-for-quarkus-cli-multiuser-flag-it</id>
+                <phase>pre-integration-test</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <target>
+                    <sleep seconds="10"/>
+                  </target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
     <profile>
       <!-- Multi-user mode E2E: starts server with chat-ui.multi-user=true, runs LoginE2E -->
       <id>e2e-multi-user</id>
@@ -212,5 +350,143 @@
         </plugins>
       </build>
     </profile>
+
+    <profile>
+      <!--
+        Smoke test: openai-compat uber-jar, single-user mode.
+        Starts a mock vLLM server (mock-vllm.py) on port 19080, then starts the
+        uber-jar with provider=openai-compat pointing at the mock server.
+        Verifies: HTTP 200, providerId=openai-compat, multiUser=false, chat UI visible.
+        Run with: mvn verify -Pe2e-openai-compat-smoke
+      -->
+      <id>e2e-openai-compat-smoke</id>
+      <properties>
+        <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
+              <includes>
+                <include>**/OpenAiCompatSmokeIT.java</include>
+              </includes>
+              <systemPropertyVariables>
+                <chat-ui.e2e.base-url>http://localhost:28016</chat-ui.e2e.base-url>
+              </systemPropertyVariables>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <version>3.3.0</version>
+            <executions>
+              <execution>
+                <id>start-openai-compat-smoke</id>
+                <phase>pre-integration-test</phase>
+                <goals><goal>exec</goal></goals>
+                <configuration>
+                  <executable>java</executable>
+                  <arguments>
+                    <argument>-Dchat-ui.provider=openai-compat</argument>
+                    <argument>-Dchat-ui.servers=http://localhost:19080</argument>
+                    <argument>-Dquarkus.http.port=28016</argument>
+                    <argument>-jar</argument>
+                    <argument>${project.build.directory}/chat-ui-app-${project.version}-runner.jar</argument>
+                  </arguments>
+                  <async>true</async>
+                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <version>3.1.0</version>
+            <executions>
+              <execution>
+                <id>wait-for-openai-compat-smoke</id>
+                <phase>pre-integration-test</phase>
+                <goals><goal>run</goal></goals>
+                <configuration>
+                  <target><sleep seconds="15"/></target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <!--
+        Smoke test: openai-compat uber-jar, multi-user mode.
+        Starts a mock vLLM server (mock-vllm.py) on port 19081, then starts the
+        uber-jar with provider=openai-compat and multi-user=true.
+        Verifies: HTTP 200, providerId=openai-compat, multiUser=true, login screen visible.
+        Run with: mvn verify -Pe2e-openai-compat-multiuser-smoke
+      -->
+      <id>e2e-openai-compat-multiuser-smoke</id>
+      <properties>
+        <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
+              <includes>
+                <include>**/OpenAiCompatMultiUserSmokeIT.java</include>
+              </includes>
+              <systemPropertyVariables>
+                <chat-ui.e2e.base-url>http://localhost:28017</chat-ui.e2e.base-url>
+              </systemPropertyVariables>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <version>3.3.0</version>
+            <executions>
+              <execution>
+                <id>start-openai-compat-multiuser-smoke</id>
+                <phase>pre-integration-test</phase>
+                <goals><goal>exec</goal></goals>
+                <configuration>
+                  <executable>java</executable>
+                  <arguments>
+                    <argument>-Dchat-ui.provider=openai-compat</argument>
+                    <argument>-Dchat-ui.servers=http://localhost:19081</argument>
+                    <argument>-Dchat-ui.multi-user=true</argument>
+                    <argument>-Dquarkus.http.port=28017</argument>
+                    <argument>-jar</argument>
+                    <argument>${project.build.directory}/chat-ui-app-${project.version}-runner.jar</argument>
+                  </arguments>
+                  <async>true</async>
+                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <version>3.1.0</version>
+            <executions>
+              <execution>
+                <id>wait-for-openai-compat-multiuser-smoke</id>
+                <phase>pre-integration-test</phase>
+                <goals><goal>run</goal></goals>
+                <configuration>
+                  <target><sleep seconds="15"/></target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
   </profiles>
 </project>

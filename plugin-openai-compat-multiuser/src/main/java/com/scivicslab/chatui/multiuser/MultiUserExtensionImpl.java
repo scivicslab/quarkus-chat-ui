@@ -86,6 +86,10 @@ public class MultiUserExtensionImpl implements MultiUserExtension {
 
     @Override
     public boolean isEnabled() {
-        return multiUserEnabled;
+        if (!multiUserEnabled) return false;
+        // Multi-user mode is only meaningful for the openai-compat provider.
+        // CLI providers (claude, codex) manage sessions inside a single process
+        // and cannot share that process across users.
+        return "openai-compat".equals(provider.id());
     }
 }

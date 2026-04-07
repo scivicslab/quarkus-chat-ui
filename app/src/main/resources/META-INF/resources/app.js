@@ -68,18 +68,6 @@
 
     function doInitApp() {
 
-    // --- DEBUG: dump all localStorage keys on startup ---
-    (function () {
-        var keys = [];
-        for (var i = 0; i < localStorage.length; i++) {
-            var k = localStorage.key(i);
-            var v = localStorage.getItem(k);
-            keys.push(k + '=' + (v && v.length > 60 ? v.substring(0, 60) + '...' : v));
-        }
-        console.log('[chat-ui] localStorage dump (' + localStorage.length + ' keys): ' + keys.join(' | '));
-        console.log('[chat-ui] page URL: ' + window.location.href);
-    })();
-
     const chatArea = document.getElementById('chat-area');
     const promptInput = document.getElementById('prompt-input');
     const sendBtn = document.getElementById('send-btn');
@@ -518,37 +506,7 @@
 
     // --- Event handling ---
 
-    // DEBUG: Write to /tmp/chat-ui-client-debug.txt
-    var debugLog = [];
-    function writeDebugLog(message) {
-        var timestamp = new Date().toISOString();
-        debugLog.push(timestamp + ' ' + message);
-        // Keep last 500 entries
-        if (debugLog.length > 500) debugLog.shift();
-    }
-
-    function saveDebugLog() {
-        var blob = new Blob([debugLog.join('\n')], {type: 'text/plain'});
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = 'chat-ui-client-debug.txt';
-        a.click();
-        URL.revokeObjectURL(url);
-    }
-
-    // Add download button
-    var debugBtn = document.createElement('button');
-    debugBtn.textContent = 'Download Debug Log';
-    debugBtn.style.cssText = 'position:fixed;bottom:10px;right:10px;z-index:9999;';
-    debugBtn.onclick = saveDebugLog;
-    document.body.appendChild(debugBtn);
-
     function handleEvent(event) {
-        // DEBUG: Log to memory
-        var contentPreview = event.content ? (event.content.length > 80 ? event.content.substring(0, 80) + '...' : event.content) : '(no content)';
-        writeDebugLog('[RECEIVED] type=' + event.type + ' content=' + contentPreview);
-
         switch (event.type) {
             case 'delta':
                 handleDelta(event.content);
@@ -671,10 +629,8 @@
 
     function handleDelta(content) {
         if (!content) {
-            writeDebugLog('[handleDelta] SKIPPED: empty content');
             return;
         }
-        writeDebugLog('[handleDelta] Processing content length=' + content.length + ' text=' + content.substring(0, 50));
 
         // Re-enable cancel if server is still active (e.g., after POST timeout)
         if (!busy) {
