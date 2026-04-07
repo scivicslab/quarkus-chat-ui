@@ -208,19 +208,19 @@ class ChatActorTest {
         }
 
         @Test
-        @DisplayName("NONE mode without key is not authenticated")
-        void noneMode_noKey_notAuthenticated() {
+        @DisplayName("NONE mode without key is authenticated (no API key required)")
+        void noneMode_noKey_authenticated() {
             ChatActor actor = new ChatActor(new StubHttpProvider(), Optional.empty());
 
             assertEquals(AuthMode.NONE, actor.getAuthMode());
-            assertFalse(actor.isAuthenticated());
+            assertTrue(actor.isAuthenticated());
         }
 
         @Test
-        @DisplayName("NONE mode becomes authenticated after setApiKey()")
+        @DisplayName("NONE mode remains authenticated after setApiKey()")
         void noneMode_afterSetApiKey_authenticated() {
             ChatActor actor = new ChatActor(new StubHttpProvider(), Optional.empty());
-            assertFalse(actor.isAuthenticated());
+            assertTrue(actor.isAuthenticated());
 
             actor.setApiKey("user-provided-key");
 
@@ -236,11 +236,10 @@ class ChatActorTest {
     class SetApiKeyTests {
 
         @Test
-        @DisplayName("setApiKey stores the key and enables authentication")
-        void setApiKey_storesAndEnables() {
+        @DisplayName("setApiKey stores the key")
+        void setApiKey_storesKey() {
             ChatActor actor = new ChatActor(new StubHttpProvider(), Optional.empty());
             assertNull(actor.getApiKey());
-            assertFalse(actor.isAuthenticated());
 
             actor.setApiKey("new-key");
 

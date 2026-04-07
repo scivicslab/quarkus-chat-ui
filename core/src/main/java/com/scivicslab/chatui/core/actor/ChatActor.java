@@ -108,8 +108,8 @@ public class ChatActor {
      */
     public boolean isAuthenticated() {
         return authMode == AuthMode.CLI
-                || (authMode == AuthMode.API_KEY && apiKey != null)
-                || (authMode == AuthMode.NONE && apiKey != null);
+                || authMode == AuthMode.NONE
+                || (authMode == AuthMode.API_KEY && apiKey != null);
     }
 
     /**
