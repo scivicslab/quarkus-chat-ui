@@ -99,6 +99,11 @@ public class OpenAiCompatProvider implements LlmProvider {
                 models.add(new ModelEntry(name, "openai-compat", server));
             }
         }
+        // Auto-select the first available model if currentModel is still a placeholder
+        if (!models.isEmpty() && (currentModel == null || currentModel.isBlank() || currentModel.equals("default"))) {
+            currentModel = models.get(0).name();
+            logger.info("Auto-selected model: " + currentModel);
+        }
         return models;
     }
 
@@ -116,6 +121,15 @@ public class OpenAiCompatProvider implements LlmProvider {
     public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
         cancelled = false;
         if (model != null && !model.isBlank()) currentModel = model;
+
+        // If model is still a placeholder, try to resolve it from the server
+        if (currentModel == null || currentModel.isBlank() || currentModel.equals("default")) {
+            getAvailableModels();
+        }
+        if (currentModel == null || currentModel.isBlank() || currentModel.equals("default")) {
+            emitter.accept(ChatEvent.error("No model available. Please check that your LLM server is running and reachable."));
+            return;
+        }
 
         List<String> imageDataUrls = ctx.imageDataUrls() != null ? ctx.imageDataUrls() : List.of();
         history.addLast(new ChatMessage.User(prompt, imageDataUrls));
