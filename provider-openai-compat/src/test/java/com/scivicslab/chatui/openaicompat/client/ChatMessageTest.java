@@ -43,6 +43,8 @@ class ChatMessageTest {
         String role = switch (msg) {
             case ChatMessage.User u -> u.role();
             case ChatMessage.Assistant a -> a.role();
+            case ChatMessage.ToolCallRequest t -> t.role();
+            case ChatMessage.ToolResult r -> r.role();
         };
         assertEquals("user", role);
     }

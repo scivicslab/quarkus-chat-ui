@@ -15,6 +15,7 @@
     <module>provider-codex</module>
     <module>provider-openai-compat</module>
     <module>plugin-openai-compat-multiuser</module>
+    <module>plugin-openai-compat-agent</module>
     <module>app</module>
   </modules>
 
@@ -86,6 +87,11 @@
       <dependency>
         <groupId>com.scivicslab.chatui</groupId>
         <artifactId>chat-ui-plugin-openai-compat-multiuser</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.scivicslab.chatui</groupId>
+        <artifactId>chat-ui-plugin-openai-compat-agent</artifactId>
         <version>${project.version}</version>
       </dependency>
     </dependencies>

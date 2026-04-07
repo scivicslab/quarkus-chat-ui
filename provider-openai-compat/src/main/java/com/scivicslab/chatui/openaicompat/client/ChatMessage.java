@@ -35,4 +35,16 @@ public sealed interface ChatMessage {
     record Assistant(String content) implements ChatMessage {
         @Override public String role() { return "assistant"; }
     }
+
+    /** Assistant message that requests one or more tool calls instead of producing text. */
+    record ToolCallRequest(List<ToolCall> toolCalls) implements ChatMessage {
+        @Override public String role() { return "assistant"; }
+
+        public record ToolCall(String id, String name, String arguments) {}
+    }
+
+    /** Tool execution result, sent back to the model after a {@link ToolCallRequest}. */
+    record ToolResult(String toolCallId, String toolName, String content) implements ChatMessage {
+        @Override public String role() { return "tool"; }
+    }
 }

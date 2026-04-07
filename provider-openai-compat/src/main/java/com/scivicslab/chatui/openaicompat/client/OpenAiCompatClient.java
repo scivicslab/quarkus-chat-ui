@@ -1,10 +1,13 @@
 package com.scivicslab.chatui.openaicompat.client;
 
+import com.scivicslab.chatui.openaicompat.ToolDefinition;
+
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -33,6 +36,21 @@ public class OpenAiCompatClient {
         void onComplete(long durationMs);
         void onError(String message);
     }
+
+    /**
+     * Response from a non-streaming chat completion request.
+     *
+     * @param content      text content of the assistant message (may be {@code null} when tool_calls
+     *                     are present)
+     * @param toolCalls    list of tool calls requested by the model (empty when finish_reason is
+     *                     {@code stop})
+     * @param finishReason the value of {@code finish_reason} from the response ({@code stop},
+     *                     {@code tool_calls}, or {@code error:…} on failure)
+     */
+    public record NonStreamingResponse(
+            String content,
+            List<ChatMessage.ToolCallRequest.ToolCall> toolCalls,
+            String finishReason) {}
 
     /**
      * Creates a client targeting the given OpenAI-compatible server.
@@ -100,6 +118,46 @@ public class OpenAiCompatClient {
         } catch (Exception e) {
             logger.fine(() -> baseUrl + " /v1/models unavailable: " + e.getMessage());
             return List.of();
+        }
+    }
+
+    /**
+     * Sends a non-streaming chat completion request, optionally with tool definitions.
+     *
+     * <p>Used by the agent loop for intermediate turns where tool call parsing is needed.
+     * The final user-visible turn may also use this method; callers emit the response content
+     * as a single delta event.</p>
+     *
+     * @param model     the model identifier
+     * @param messages  conversation history
+     * @param noThink   if {@code true}, disables the model's thinking/CoT mode
+     * @param maxTokens maximum tokens to generate (0 for server default)
+     * @param tools     tool definitions to include in the request; empty list for no tools
+     * @return a {@link NonStreamingResponse} — never {@code null}; errors are represented as
+     *         {@code finishReason} starting with {@code "error:"}
+     */
+    public NonStreamingResponse sendNonStreaming(String model, List<ChatMessage> messages,
+                                                 boolean noThink, int maxTokens,
+                                                 List<ToolDefinition> tools) {
+        try {
+            String requestBody = buildRequestBody(model, messages, noThink, maxTokens, false, tools);
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/v1/chat/completions"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .timeout(Duration.ofMinutes(5))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                return new NonStreamingResponse(null, List.of(), "error:" + response.statusCode());
+            }
+            return parseNonStreamingResponse(response.body());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new NonStreamingResponse("Cancelled", List.of(), "error:interrupted");
+        } catch (Exception e) {
+            logger.warning("Non-streaming request failed: " + e.getMessage());
+            return new NonStreamingResponse("Error: " + e.getMessage(), List.of(), "error:exception");
         }
     }
 
@@ -193,36 +251,167 @@ public class OpenAiCompatClient {
         }
     }
 
+    /** Builds a streaming request body with no tools (backward-compatible). */
     static String buildRequestBody(String model, List<ChatMessage> messages,
-                                    boolean noThink, int maxTokens) {
+                                   boolean noThink, int maxTokens) {
+        return buildRequestBody(model, messages, noThink, maxTokens, true, List.of());
+    }
+
+    /**
+     * Builds a chat completion request body.
+     *
+     * @param stream whether to request SSE streaming ({@code stream:true/false})
+     * @param tools  tool definitions to include; empty list omits the {@code tools} field
+     */
+    static String buildRequestBody(String model, List<ChatMessage> messages,
+                                   boolean noThink, int maxTokens,
+                                   boolean stream, List<ToolDefinition> tools) {
         StringBuilder sb = new StringBuilder();
-        sb.append("{\"model\":\"").append(escapeJson(model)).append("\",\"stream\":true,");
+        sb.append("{\"model\":\"").append(escapeJson(model))
+          .append("\",\"stream\":").append(stream).append(",");
         if (maxTokens > 0) sb.append("\"max_tokens\":").append(maxTokens).append(",");
         if (noThink) sb.append("\"chat_template_kwargs\":{\"enable_thinking\":false},");
+        if (!tools.isEmpty()) {
+            sb.append("\"tools\":[");
+            for (int i = 0; i < tools.size(); i++) {
+                if (i > 0) sb.append(",");
+                ToolDefinition t = tools.get(i);
+                sb.append("{\"type\":\"function\",\"function\":{")
+                  .append("\"name\":\"").append(escapeJson(t.name())).append("\",")
+                  .append("\"description\":\"").append(escapeJson(t.description())).append("\",")
+                  .append("\"parameters\":").append(t.parametersJson())
+                  .append("}}");
+            }
+            sb.append("],\"tool_choice\":\"auto\",");
+        }
         sb.append("\"messages\":[");
         for (int i = 0; i < messages.size(); i++) {
             if (i > 0) sb.append(",");
             ChatMessage msg = messages.get(i);
             sb.append("{\"role\":\"").append(escapeJson(msg.role())).append("\",");
-            if (msg instanceof ChatMessage.User u && u.hasImages()) {
-                sb.append("\"content\":[");
-                for (int j = 0; j < u.imageDataUrls().size(); j++) {
-                    if (j > 0) sb.append(",");
-                    sb.append("{\"type\":\"image_url\",\"image_url\":{\"url\":\"")
-                      .append(escapeJson(u.imageDataUrls().get(j))).append("\"}}");
+            switch (msg) {
+                case ChatMessage.User u when u.hasImages() -> {
+                    sb.append("\"content\":[");
+                    for (int j = 0; j < u.imageDataUrls().size(); j++) {
+                        if (j > 0) sb.append(",");
+                        sb.append("{\"type\":\"image_url\",\"image_url\":{\"url\":\"")
+                          .append(escapeJson(u.imageDataUrls().get(j))).append("\"}}");
+                    }
+                    sb.append(",{\"type\":\"text\",\"text\":\"").append(escapeJson(u.content())).append("\"}]");
                 }
-                sb.append(",{\"type\":\"text\",\"text\":\"").append(escapeJson(u.content())).append("\"}]");
-            } else {
-                String content = switch (msg) {
-                    case ChatMessage.User u -> u.content();
-                    case ChatMessage.Assistant a -> a.content();
-                };
-                sb.append("\"content\":\"").append(escapeJson(content)).append("\"");
+                case ChatMessage.User u ->
+                    sb.append("\"content\":\"").append(escapeJson(u.content())).append("\"");
+                case ChatMessage.Assistant a ->
+                    sb.append("\"content\":\"").append(escapeJson(a.content())).append("\"");
+                case ChatMessage.ToolCallRequest t -> {
+                    sb.append("\"content\":null,\"tool_calls\":[");
+                    for (int j = 0; j < t.toolCalls().size(); j++) {
+                        if (j > 0) sb.append(",");
+                        var tc = t.toolCalls().get(j);
+                        sb.append("{\"id\":\"").append(escapeJson(tc.id())).append("\",")
+                          .append("\"type\":\"function\",\"function\":{")
+                          .append("\"name\":\"").append(escapeJson(tc.name())).append("\",")
+                          .append("\"arguments\":\"").append(escapeJson(tc.arguments())).append("\"}}");
+                    }
+                    sb.append("]");
+                }
+                case ChatMessage.ToolResult r ->
+                    sb.append("\"tool_call_id\":\"").append(escapeJson(r.toolCallId())).append("\",")
+                      .append("\"name\":\"").append(escapeJson(r.toolName())).append("\",")
+                      .append("\"content\":\"").append(escapeJson(r.content())).append("\"");
             }
             sb.append("}");
         }
         sb.append("]}");
         return sb.toString();
+    }
+
+    static NonStreamingResponse parseNonStreamingResponse(String json) {
+        String finishReason = parseNsFinishReason(json);
+        String content = parseNsContent(json);
+        List<ChatMessage.ToolCallRequest.ToolCall> toolCalls = parseNsToolCalls(json);
+        return new NonStreamingResponse(content, toolCalls, finishReason);
+    }
+
+    static String parseNsFinishReason(String json) {
+        String marker = "\"finish_reason\":\"";
+        int idx = json.indexOf(marker);
+        if (idx < 0) return "stop";
+        String value = unescapeJsonString(json, idx + marker.length());
+        return value != null && !value.isEmpty() ? value : "stop";
+    }
+
+    static String parseNsContent(String json) {
+        int msgIdx = json.indexOf("\"message\":");
+        if (msgIdx < 0) return null;
+        String marker = "\"content\":";
+        int contentIdx = json.indexOf(marker, msgIdx);
+        if (contentIdx < 0) return null;
+        int pos = contentIdx + marker.length();
+        while (pos < json.length() && json.charAt(pos) == ' ') pos++;
+        if (pos >= json.length()) return null;
+        char c = json.charAt(pos);
+        if (c == 'n') return null; // null
+        if (c == '"') return unescapeJsonString(json, pos + 1);
+        return null;
+    }
+
+    static List<ChatMessage.ToolCallRequest.ToolCall> parseNsToolCalls(String json) {
+        List<ChatMessage.ToolCallRequest.ToolCall> result = new ArrayList<>();
+        int tcIdx = json.indexOf("\"tool_calls\":");
+        if (tcIdx < 0) return result;
+        int arrStart = json.indexOf('[', tcIdx);
+        if (arrStart < 0) return result;
+        int i = arrStart + 1;
+        while (i < json.length()) {
+            while (i < json.length() && Character.isWhitespace(json.charAt(i))) i++;
+            if (i >= json.length() || json.charAt(i) == ']') break;
+            if (json.charAt(i) == '{') {
+                int objEnd = findMatchingBrace(json, i);
+                if (objEnd < 0) break;
+                String obj = json.substring(i, objEnd + 1);
+                String id = extractFirstString(obj, "\"id\":\"");
+                String name = null, arguments = null;
+                int funcIdx = obj.indexOf("\"function\":");
+                if (funcIdx >= 0) {
+                    String funcPart = obj.substring(funcIdx);
+                    name = extractFirstString(funcPart, "\"name\":\"");
+                    arguments = extractFirstString(funcPart, "\"arguments\":\"");
+                }
+                if (id != null && name != null) {
+                    result.add(new ChatMessage.ToolCallRequest.ToolCall(
+                            id, name, arguments != null ? arguments : "{}"));
+                }
+                i = objEnd + 1;
+            } else {
+                i++;
+            }
+            while (i < json.length() && (json.charAt(i) == ',' || Character.isWhitespace(json.charAt(i)))) i++;
+        }
+        return result;
+    }
+
+    private static int findMatchingBrace(String json, int start) {
+        int depth = 0;
+        for (int i = start; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '{') { depth++; }
+            else if (c == '}') { depth--; if (depth == 0) return i; }
+            else if (c == '"') {
+                i++;
+                while (i < json.length() && json.charAt(i) != '"') {
+                    if (json.charAt(i) == '\\') i++;
+                    i++;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static String extractFirstString(String json, String marker) {
+        int idx = json.indexOf(marker);
+        if (idx < 0) return null;
+        return unescapeJsonString(json, idx + marker.length());
     }
 
     static String parseSseLine(String line) {

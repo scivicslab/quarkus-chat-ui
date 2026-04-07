@@ -3,9 +3,12 @@ package com.scivicslab.chatui.app;
 import com.scivicslab.chatui.claude.ClaudeLlmProvider;
 import com.scivicslab.chatui.codex.CodexLlmProvider;
 import com.scivicslab.chatui.core.provider.LlmProvider;
+import com.scivicslab.chatui.openaicompat.AgentLoopExtension;
 import com.scivicslab.chatui.openaicompat.OpenAiCompatProvider;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.inject.Produces;
+import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.util.Arrays;
@@ -45,6 +48,9 @@ public class LlmProviderProducer {
     @ConfigProperty(name = "chat-ui.default-model")
     Optional<String> defaultModel;
 
+    @Inject
+    Instance<AgentLoopExtension> agentLoopExt;
+
     /**
      * Produces the active {@link LlmProvider} bean based on the {@code chat-ui.provider}
      * configuration property. Supported values are {@code claude}, {@code codex},
@@ -66,7 +72,8 @@ public class LlmProviderProducer {
                         .filter(s -> !s.isBlank())
                         .toList();
                 String model = defaultModel.filter(s -> !s.isBlank()).orElse("default");
-                yield new OpenAiCompatProvider(urls, model);
+                AgentLoopExtension ext = agentLoopExt.isUnsatisfied() ? null : agentLoopExt.get();
+                yield new OpenAiCompatProvider(urls, model, ext);
             }
             default -> throw new IllegalStateException(
                 "Unknown provider: '" + providerName + "'. Valid values: claude, codex, openai-compat");

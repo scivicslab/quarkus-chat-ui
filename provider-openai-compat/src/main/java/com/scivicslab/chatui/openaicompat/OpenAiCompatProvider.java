@@ -29,6 +29,7 @@ public class OpenAiCompatProvider implements LlmProvider {
     private final List<OpenAiCompatClient> clients;
     private String currentModel;
     private volatile boolean cancelled;
+    private final AgentLoopExtension agentLoopExtension;
 
     // Conversation history for context (not managed by actor — provider owns it)
     private final LinkedList<ChatMessage> history = new LinkedList<>();
@@ -41,10 +42,26 @@ public class OpenAiCompatProvider implements LlmProvider {
      * @param defaultModel the model name to use when none is explicitly requested
      */
     public OpenAiCompatProvider(List<String> serverUrls, String defaultModel) {
+        this(serverUrls, defaultModel, null);
+    }
+
+    /**
+     * Creates a provider with an optional agent-loop plugin.
+     *
+     * @param serverUrls        base URLs of the LLM servers
+     * @param defaultModel      the model name to use when none is explicitly requested
+     * @param agentLoopExtension optional plugin; {@code null} disables tool calling
+     */
+    public OpenAiCompatProvider(List<String> serverUrls, String defaultModel,
+                                AgentLoopExtension agentLoopExtension) {
         this.clients = serverUrls.stream()
                 .map(OpenAiCompatClient::new)
                 .toList();
         this.currentModel = defaultModel;
+        this.agentLoopExtension = agentLoopExtension;
+        if (agentLoopExtension != null) {
+            agentLoopExtension.initialize(this.clients);
+        }
     }
 
     /** {@inheritDoc} */
@@ -134,6 +151,12 @@ public class OpenAiCompatProvider implements LlmProvider {
         List<String> imageDataUrls = ctx.imageDataUrls() != null ? ctx.imageDataUrls() : List.of();
         history.addLast(new ChatMessage.User(prompt, imageDataUrls));
         if (history.size() > MAX_HISTORY_MESSAGES) history.removeFirst();
+
+        // Delegate to agent loop if the plugin is present and enabled
+        if (agentLoopExtension != null && agentLoopExtension.isEnabled()) {
+            agentLoopExtension.runAgentLoop(currentModel, history, emitter, ctx);
+            return;
+        }
 
         OpenAiCompatClient client = selectClient(currentModel);
         if (client == null) {
