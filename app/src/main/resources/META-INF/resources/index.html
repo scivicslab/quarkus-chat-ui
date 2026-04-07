@@ -9,7 +9,17 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
-    <div id="app">
+    <!-- Login screen (shown in multi-user mode before login) -->
+    <div id="login-screen" style="display:flex;align-items:center;justify-content:center;height:100vh;">
+        <form id="login-form" style="text-align:center;">
+            <h2 id="login-title" style="margin-bottom:16px;">Quarkus Chat UI</h2>
+            <input id="login-user" type="text" placeholder="Username" autocomplete="username"
+                   style="padding:8px 12px;font-size:16px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#eee;width:220px;">
+            <br><br>
+            <button type="submit" style="padding:8px 24px;font-size:16px;border-radius:4px;cursor:pointer;">Login</button>
+        </form>
+    </div>
+    <div id="app" style="display:none">
         <header>
             <h1 id="app-title" contenteditable="true" spellcheck="false">LLM Console - Claude</h1>
             <div id="status-bar">
@@ -35,6 +45,8 @@
                 </label>
                 <span id="session-label"></span>
                 <span id="activity-label"></span>
+                <span id="user-label" style="display:none"></span>
+                <button id="logout-btn" style="display:none" title="Logout">Logout</button>
                 <button id="save-chat-btn" title="Save conversation as Markdown">Save Chat</button>
                 <button id="clear-chat-btn" title="Clear chat display (session continues)">Clear</button>
                 <span id="connection-status" class="disconnected">disconnected</span>

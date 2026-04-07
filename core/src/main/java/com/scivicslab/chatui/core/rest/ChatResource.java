@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scivicslab.chatui.core.actor.ChatActor;
 import com.scivicslab.chatui.core.actor.LlmConsoleActorSystem;
 import com.scivicslab.chatui.core.actor.WatchdogActor;
+import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.service.UrlFetchService;
 import io.smallrye.common.annotation.Blocking;
@@ -22,13 +23,18 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -66,8 +72,13 @@ public class ChatResource {
     @Inject
     Instance<UrlFetchService> urlFetchService;
 
+    // ---- Single-user SSE state ----
     private volatile HttpServerResponse sseResponse;
     private volatile Long heartbeatTimerId;
+
+    // ---- Multi-user SSE state ----
+    private final ConcurrentHashMap<String, HttpServerResponse> sseConnections = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> heartbeatTimers = new ConcurrentHashMap<>();
 
     /**
      * Registers the SSE streaming route on the Vert.x router at startup.
@@ -79,6 +90,14 @@ public class ChatResource {
     }
 
     private void handleSseConnect(RoutingContext rc) {
+        if (actorSystem.isMultiUser()) {
+            handleMultiUserSseConnect(rc);
+        } else {
+            handleSingleUserSseConnect(rc);
+        }
+    }
+
+    private void handleSingleUserSseConnect(RoutingContext rc) {
         var prev = sseResponse;
         if (prev != null && !prev.ended()) {
             try { prev.end(); } catch (Exception ignored) {}
@@ -127,6 +146,69 @@ public class ChatResource {
         });
     }
 
+    private void handleMultiUserSseConnect(RoutingContext rc) {
+        // Resolve userId: query param first, then BasicAuth header
+        var userParams = rc.queryParam("user");
+        String queryUser = (userParams != null && !userParams.isEmpty()) ? userParams.get(0) : null;
+        String userId = (queryUser != null && !queryUser.isBlank())
+                ? queryUser : extractUserIdFromHeader(rc.request().getHeader("Authorization"));
+        if (userId == null || userId.isBlank()) {
+            rc.response().setStatusCode(401).end("Unauthorized: provide ?user= or BasicAuth header");
+            return;
+        }
+
+        // Close any previous SSE connection for this user
+        var prev = sseConnections.get(userId);
+        if (prev != null && !prev.ended()) {
+            try { prev.end(); } catch (Exception ignored) {}
+        }
+        Long prevTimer = heartbeatTimers.remove(userId);
+        if (prevTimer != null) vertx.cancelTimer(prevTimer);
+
+        var response = rc.response();
+        response.setChunked(true);
+        response.putHeader("Content-Type", "text/event-stream");
+        response.putHeader("Cache-Control", "no-cache");
+        response.putHeader("X-Accel-Buffering", "no");
+        response.write("retry: 10000\n\n");
+
+        sseConnections.put(userId, response);
+
+        MultiUserExtension ext = actorSystem.getMultiUserExtension();
+        final String uid = userId;
+
+        boolean busy = ext.isBusy(uid);
+        writeSse(response, ChatEvent.status(ext.getModel(), null, busy));
+
+        long timerId = vertx.setPeriodic(15_000, id -> {
+            var r = sseConnections.get(uid);
+            if (r != null && !r.ended()) {
+                writeSse(r, ChatEvent.heartbeat());
+            } else {
+                vertx.cancelTimer(id);
+            }
+        });
+        heartbeatTimers.put(userId, timerId);
+
+        response.closeHandler(v -> {
+            sseConnections.remove(uid, response);
+            Long tid = heartbeatTimers.remove(uid);
+            if (tid != null) vertx.cancelTimer(tid);
+        });
+
+        logger.info("Multi-user SSE connected: user=" + userId);
+    }
+
+    /** Sends an SSE event to a specific user in multi-user mode. */
+    private void emitSseMulti(String userId, ChatEvent event) {
+        var resp = sseConnections.get(userId);
+        if (resp != null && !resp.ended()) {
+            vertx.runOnContext(v -> writeSse(resp, event));
+        } else {
+            logger.warning("SSE event DROPPED (no connection for " + userId + "): type=" + event.type());
+        }
+    }
+
     private void writeSse(HttpServerResponse response, ChatEvent event) {
         try {
             String json = objectMapper.writeValueAsString(event);
@@ -158,14 +240,29 @@ public class ChatResource {
     /**
      * Submits a user prompt to the LLM for processing.
      * The response is streamed back asynchronously via the SSE connection.
-     *
-     * @param request the prompt request containing user text and optional model override
-     * @return an info event on success, or an error event if validation fails
      */
-    public ChatEvent chat(PromptRequest request) {
+    public ChatEvent chat(PromptRequest request,
+                          @QueryParam("user") String queryUser,
+                          @Context HttpHeaders headers) {
         if (request == null || request.text == null || request.text.isBlank()) {
             return ChatEvent.error("Empty prompt");
         }
+
+        if (actorSystem.isMultiUser()) {
+            String userId = resolveUserId(queryUser, headers);
+            if (userId == null) return ChatEvent.error("Unauthorized");
+            if (!sseConnections.containsKey(userId)) {
+                return ChatEvent.error("No SSE connection. Please refresh the page.");
+            }
+            MultiUserExtension ext = actorSystem.getMultiUserExtension();
+            String model = (request.model != null && !request.model.isBlank())
+                    ? request.model : ext.getModel();
+            CompletableFuture<Void> done = new CompletableFuture<>();
+            ext.startPrompt(userId, request.text, model,
+                    event -> emitSseMulti(userId, event), done);
+            return ChatEvent.info("Processing");
+        }
+
         if (sseResponse == null) {
             return ChatEvent.error("No SSE connection. Please refresh the page.");
         }
@@ -298,10 +395,14 @@ public class ChatResource {
     @Produces(MediaType.APPLICATION_JSON)
     /**
      * Cancels the currently running LLM request, if any.
-     *
-     * @return an info event confirming cancellation
      */
-    public ChatEvent cancel() {
+    public ChatEvent cancel(@QueryParam("user") String queryUser, @Context HttpHeaders headers) {
+        if (actorSystem.isMultiUser()) {
+            String userId = resolveUserId(queryUser, headers);
+            if (userId == null) return ChatEvent.error("Unauthorized");
+            actorSystem.getMultiUserExtension().cancel(userId);
+            return ChatEvent.info("Cancelled");
+        }
         actorSystem.getChatActor().tellNow(ChatActor::cancel);
         actorSystem.getQueueActor().tell(com.scivicslab.chatui.core.actor.QueueActor::clearMcpMessages);
         return ChatEvent.info("Cancelled");
@@ -337,11 +438,15 @@ public class ChatResource {
     @Path("/status")
     @Produces(MediaType.APPLICATION_JSON)
     /**
-     * Returns the current status including the active model, session ID, and busy state.
-     *
-     * @return a status event
+     * Returns the current status including the active model and busy state.
      */
-    public ChatEvent status() {
+    public ChatEvent status(@QueryParam("user") String queryUser, @Context HttpHeaders headers) {
+        if (actorSystem.isMultiUser()) {
+            String userId = resolveUserId(queryUser, headers);
+            if (userId == null) return ChatEvent.status(null, null, false);
+            MultiUserExtension ext = actorSystem.getMultiUserExtension();
+            return ChatEvent.status(ext.getModel(), null, ext.isBusy(userId));
+        }
         var ref = actorSystem.getChatActor();
         return ChatEvent.status(
             ref.ask(ChatActor::getModel).join(),
@@ -355,10 +460,13 @@ public class ChatResource {
     @Produces(MediaType.APPLICATION_JSON)
     /**
      * Lists all models available from the configured LLM provider.
-     *
-     * @return a list of model information records
      */
     public List<ModelInfo> models() {
+        if (actorSystem.isMultiUser()) {
+            return actorSystem.getMultiUserExtension().getAvailableModels().stream()
+                    .map(e -> new ModelInfo(e.name(), e.type(), e.server()))
+                    .toList();
+        }
         return actorSystem.getChatActor().ask(ChatActor::getAvailableModels).join().stream()
                 .map(e -> new ModelInfo(e.name(), e.type(), e.server()))
                 .toList();
@@ -368,11 +476,12 @@ public class ChatResource {
     @Path("/logs")
     @Produces(MediaType.APPLICATION_JSON)
     /**
-     * Retrieves the most recent server log entries buffered in the chat actor.
-     *
-     * @return a list of log events
+     * Retrieves the most recent server log entries.
      */
     public List<ChatEvent> logs() {
+        if (actorSystem.isMultiUser()) {
+            return actorSystem.getMultiUserExtension().getRecentLogs();
+        }
         return actorSystem.getChatActor().ask(ChatActor::getRecentLogs).join();
     }
 
@@ -380,12 +489,18 @@ public class ChatResource {
     @Path("/history")
     @Produces(MediaType.APPLICATION_JSON)
     /**
-     * Retrieves conversation history up to the specified limit.
-     *
-     * @param limit the maximum number of history entries to return (default 50)
-     * @return a list of history entries with role and content
+     * Retrieves conversation history for the current user up to the specified limit.
      */
-    public List<HistoryResponse> history(@QueryParam("limit") @DefaultValue("50") int limit) {
+    public List<HistoryResponse> history(@QueryParam("limit") @DefaultValue("50") int limit,
+                                         @QueryParam("user") String queryUser,
+                                         @Context HttpHeaders headers) {
+        if (actorSystem.isMultiUser()) {
+            String userId = resolveUserId(queryUser, headers);
+            if (userId == null) return List.of();
+            return actorSystem.getMultiUserExtension().getHistory(userId, limit).stream()
+                    .map(e -> new HistoryResponse(e.role(), e.content()))
+                    .toList();
+        }
         return actorSystem.getChatActor().ask(a -> a.getHistory(limit)).join().stream()
                 .map(e -> new HistoryResponse(e.role(), e.content()))
                 .toList();
@@ -397,12 +512,20 @@ public class ChatResource {
     /**
      * Returns the application configuration including title, auth state, keybind,
      * provider ID, and feature capability flags.
-     *
-     * @return the application configuration
      */
     public AppConfig config() {
-        var ref = actorSystem.getChatActor();
         LlmProvider p = actorSystem.getProvider();
+        if (actorSystem.isMultiUser()) {
+            return new AppConfig(
+                    appTitle, true, "NONE", keybind, p.id(),
+                    false, false,
+                    p.capabilities().supportsImages(),
+                    p.capabilities().supportsUrlFetch(),
+                    false,  // logs disabled in multi-user mode
+                    true
+            );
+        }
+        var ref = actorSystem.getChatActor();
         return new AppConfig(
                 appTitle,
                 ref.ask(ChatActor::isAuthenticated).join(),
@@ -412,7 +535,9 @@ public class ChatResource {
                 p.capabilities().supportsInteractivePrompts(),
                 p.capabilities().supportsSlashCommands(),
                 p.capabilities().supportsImages(),
-                p.capabilities().supportsUrlFetch()
+                p.capabilities().supportsUrlFetch(),
+                true,   // logs enabled in single-user mode
+                false
         );
     }
 
@@ -493,12 +618,40 @@ public class ChatResource {
         return new FetchResult(true, content, null);
     }
 
+    // ---- Multi-user userId resolution ----
+
+    /**
+     * Resolves the userId for multi-user mode. Query param takes precedence, then BasicAuth.
+     */
+    String resolveUserId(String queryUser, HttpHeaders headers) {
+        if (queryUser != null && !queryUser.isBlank()) return queryUser;
+        String auth = headers != null ? headers.getHeaderString("Authorization") : null;
+        return extractUserIdFromHeader(auth);
+    }
+
+    /**
+     * Extracts the username from a Basic Auth header value.
+     */
+    static String extractUserIdFromHeader(String authHeader) {
+        if (authHeader == null || !authHeader.startsWith("Basic ")) return null;
+        try {
+            String decoded = new String(
+                    Base64.getDecoder().decode(authHeader.substring(6).trim()),
+                    StandardCharsets.UTF_8);
+            int colon = decoded.indexOf(':');
+            return colon > 0 ? decoded.substring(0, colon) : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     // ---- Request/Response records ----
 
     public record AppConfig(
         String title, boolean authenticated, String authMode, String keybind,
         String providerId, boolean supportsInteractivePrompts,
-        boolean supportsSlashCommands, boolean supportsImages, boolean supportsUrlFetch
+        boolean supportsSlashCommands, boolean supportsImages, boolean supportsUrlFetch,
+        boolean logsEnabled, boolean multiUser
     ) {}
 
     public record HistoryResponse(String role, String content) {}

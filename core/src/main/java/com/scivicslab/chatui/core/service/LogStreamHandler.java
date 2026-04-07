@@ -1,6 +1,7 @@
 package com.scivicslab.chatui.core.service;
 
 import com.scivicslab.chatui.core.actor.ChatActor;
+import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.pojoactor.core.ActorRef;
 import io.quarkus.runtime.Startup;
@@ -28,6 +29,7 @@ public class LogStreamHandler extends Handler {
     private static final String OWN_LOGGER = LogStreamHandler.class.getName();
 
     private volatile ActorRef<ChatActor> chatActorRef;
+    private volatile MultiUserExtension multiUserExtension;
 
     /**
      * Attaches this handler to the root JUL logger so that all log records
@@ -38,9 +40,14 @@ public class LogStreamHandler extends Handler {
         Logger.getLogger("").addHandler(this);
     }
 
-    /** Called by LlmConsoleActorSystem once the ChatActor is ready. */
+    /** Called by LlmConsoleActorSystem once the single-user ChatActor is ready. */
     public void wireActorRef(ActorRef<ChatActor> ref) {
         this.chatActorRef = ref;
+    }
+
+    /** Called by LlmConsoleActorSystem once the MultiUserExtension is ready. */
+    public void wireMultiUserExtension(MultiUserExtension ext) {
+        this.multiUserExtension = ext;
     }
 
     /**
@@ -72,13 +79,18 @@ public class LogStreamHandler extends Handler {
     public void publish(LogRecord record) {
         if (record == null) return;
         if (OWN_LOGGER.equals(record.getLoggerName())) return;
-        var actor = chatActorRef;
-        if (actor == null) return;
         String level = record.getLevel().getName();
         String loggerName = record.getLoggerName();
         String message = formatMessage(record);
         long timestamp = record.getMillis();
-        actor.tell(a -> a.publishLog(level, loggerName, message, timestamp));
+        var actor = chatActorRef;
+        if (actor != null) {
+            actor.tell(a -> a.publishLog(level, loggerName, message, timestamp));
+        }
+        var muExt = multiUserExtension;
+        if (muExt != null) {
+            muExt.publishLog(level, loggerName, message, timestamp);
+        }
     }
 
     private String formatMessage(LogRecord record) {

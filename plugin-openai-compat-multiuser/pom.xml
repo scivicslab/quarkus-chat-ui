@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd"
+    xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.scivicslab.chatui</groupId>
+    <artifactId>quarkus-chat-ui-parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+  <artifactId>chat-ui-plugin-openai-compat-multiuser</artifactId>
+
+  <description>
+    Optional plugin that adds multi-user support for the openai-compat provider.
+    When this JAR is on the classpath the application runs in multi-user mode;
+    when it is absent the application runs in single-user mode.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>chat-ui-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>chat-ui-provider-openai-compat</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>io.smallrye</groupId>
+        <artifactId>jandex-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

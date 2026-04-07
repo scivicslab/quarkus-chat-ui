@@ -25,6 +25,10 @@
       <artifactId>chat-ui-provider-openai-compat</artifactId>
     </dependency>
     <dependency>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>chat-ui-plugin-openai-compat-multiuser</artifactId>
+    </dependency>
+    <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-junit5</artifactId>
       <scope>test</scope>
@@ -75,6 +79,74 @@
         <quarkus.native.enabled>true</quarkus.native.enabled>
       </properties>
     </profile>
+    <profile>
+      <!-- Multi-user mode E2E: starts server with chat-ui.multi-user=true, runs LoginE2E -->
+      <id>e2e-multi-user</id>
+      <build>
+        <plugins>
+          <plugin>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
+              <includes>
+                <include>**/LoginE2E.java</include>
+              </includes>
+              <systemPropertyVariables>
+                <chat-ui.e2e.base-url>http://localhost:28011</chat-ui.e2e.base-url>
+              </systemPropertyVariables>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <version>3.3.0</version>
+            <executions>
+              <execution>
+                <id>start-quarkus-multiuser-it</id>
+                <phase>pre-integration-test</phase>
+                <goals>
+                  <goal>exec</goal>
+                </goals>
+                <configuration>
+                  <executable>java</executable>
+                  <arguments>
+                    <argument>--add-opens</argument>
+                    <argument>java.base/java.lang=ALL-UNNAMED</argument>
+                    <argument>-Dquarkus.http.port=28011</argument>
+                    <argument>-Dchat-ui.provider=openai-compat</argument>
+                    <argument>-Dchat-ui.servers=http://localhost:9999</argument>
+                    <argument>-Dchat-ui.multi-user=true</argument>
+                    <argument>-jar</argument>
+                    <argument>${project.build.directory}/quarkus-app/quarkus-run.jar</argument>
+                  </arguments>
+                  <async>true</async>
+                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <version>3.1.0</version>
+            <executions>
+              <execution>
+                <id>wait-for-quarkus-multiuser-it</id>
+                <phase>pre-integration-test</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <target>
+                    <sleep seconds="10"/>
+                  </target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
     <profile>
       <id>e2e</id>
       <build>

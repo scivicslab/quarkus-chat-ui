@@ -3,6 +3,71 @@
 (function () {
     'use strict';
 
+    // --- Login (multi-user mode) ---
+    var currentUser = localStorage.getItem('chat-ui-user') || '';
+
+    function showLogin() {
+        document.getElementById('login-screen').style.display = 'flex';
+        document.getElementById('app').style.display = 'none';
+        var input = document.getElementById('login-user');
+        if (input) { input.value = currentUser; input.focus(); }
+    }
+
+    function startApp(username) {
+        currentUser = username;
+        if (username) localStorage.setItem('chat-ui-user', username);
+        document.getElementById('login-screen').style.display = 'none';
+        document.getElementById('app').style.display = '';
+        var userLabel = document.getElementById('user-label');
+        if (userLabel) { userLabel.textContent = username; userLabel.style.display = username ? '' : 'none'; }
+        var logoutBtn = document.getElementById('logout-btn');
+        if (logoutBtn) logoutBtn.style.display = username ? '' : 'none';
+        initApp();
+    }
+
+    document.getElementById('login-form').addEventListener('submit', function (e) {
+        e.preventDefault();
+        var username = document.getElementById('login-user').value.trim();
+        if (username) startApp(username);
+    });
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+        if (typeof eventSource !== 'undefined' && eventSource) { eventSource.close(); eventSource = null; }
+        localStorage.removeItem('chat-ui-user');
+        currentUser = '';
+        window.location.reload();
+    });
+
+    // Check multi-user mode from server config
+    fetch('api/config').then(function (r) { return r.json(); }).then(function (cfg) {
+        if (cfg.multiUser) {
+            if (currentUser) {
+                startApp(currentUser);
+            } else {
+                showLogin();
+            }
+        } else {
+            startApp('');
+        }
+    }).catch(function () {
+        startApp('');
+    });
+
+    var appInitialized = false;
+
+    function initApp() {
+        if (appInitialized) return;
+        appInitialized = true;
+        doInitApp();
+    }
+
+    function apiUrl(path) {
+        if (!currentUser) return path;
+        return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'user=' + encodeURIComponent(currentUser);
+    }
+
+    function doInitApp() {
+
     // --- DEBUG: dump all localStorage keys on startup ---
     (function () {
         var keys = [];
@@ -324,14 +389,26 @@
         var fenceCount = (text.match(/```/g) || []).length;
         if (fenceCount % 2 !== 0) {
             text += '\n```';
+            return text; // inside an unclosed fence — single backtick count is irrelevant
         }
-        // Count single backticks (outside of fenced blocks)
-        var withoutFences = text.replace(/```/g, '');
+        // Count single backticks with complete fenced blocks removed first.
+        // (Simple replace(/```/g,'') was wrong: it kept content inside fences,
+        //  including any backticks inside them, which inflated the count.)
+        var withoutFences = text.replace(/```[\s\S]*?```/g, '');
         var tickCount = (withoutFences.match(/`/g) || []).length;
         if (tickCount % 2 !== 0) {
             text += '`';
         }
         return text;
+    }
+
+    // Render the final (complete) text of an assistant message.
+    // Does NOT call closeOpenMarkdown — the stream is done, the text is complete.
+    function renderFinalMarkdown(text) {
+        var displayText = text
+            .replace(/<think>[\s\S]*?<\/think>/g, '')
+            .replace(/<think>[\s\S]*$/, '');
+        return marked.parse(displayText);
     }
 
     // --- Timestamp helper ---
@@ -418,7 +495,7 @@
         if (eventSource) {
             eventSource.close();
         }
-        eventSource = new EventSource('api/chat/stream');
+        eventSource = new EventSource(apiUrl('api/chat/stream'));
 
         eventSource.onopen = function () {
             connectionStatus.textContent = 'ready';
@@ -631,6 +708,10 @@
         stopThinkingTimer();
         if (currentAssistantMsg) {
             currentAssistantMsg.classList.remove('streaming');
+            // Re-render with the complete text — no closeOpenMarkdown patching needed.
+            if (currentAssistantText) {
+                currentAssistantMsg.innerHTML = renderFinalMarkdown(currentAssistantText);
+            }
 
             var footer = document.createElement('div');
             footer.className = 'message-footer';
@@ -786,7 +867,7 @@
 
     async function sendResponse(promptId, response) {
         try {
-            await fetch('api/respond', {
+            await fetch(apiUrl('api/respond'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ promptId: promptId, response: response })
@@ -943,7 +1024,7 @@
     async function executeBtw(question) {
         showBtwOverlay(question);
         try {
-            var resp = await fetch('api/btw', {
+            var resp = await fetch(apiUrl('api/btw'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ question: question, model: modelSelect.value })
@@ -1481,7 +1562,7 @@
 
     async function executeSlashCommand(text) {
         try {
-            var resp = await fetch('api/command', {
+            var resp = await fetch(apiUrl('api/command'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ text: text })
@@ -1511,7 +1592,7 @@
 
         // Submit prompt via POST; events arrive through EventSource
         try {
-            var response = await fetch('api/chat', {
+            var response = await fetch(apiUrl('api/chat'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ text: text, model: modelSelect.value })
@@ -1553,7 +1634,7 @@
 
     async function cancelRequest() {
         try {
-            await fetch('api/cancel', { method: 'POST' });
+            await fetch(apiUrl('api/cancel'), { method: 'POST' });
         } catch (e) {
             // ignore
         }
@@ -1643,7 +1724,7 @@
         predictPopup.style.display = 'block';
 
         try {
-            var resp = await fetch('api/predict', {
+            var resp = await fetch(apiUrl('api/predict'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -1817,7 +1898,7 @@
 
         // Claude models: update server-side config
         try {
-            var resp = await fetch('api/command', {
+            var resp = await fetch(apiUrl('api/command'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ text: '/model ' + selected })
@@ -1833,31 +1914,35 @@
         loadModels();
     });
 
-    // --- Load app config (title etc.) ---
+    // --- Load app config (title, keybind, auth, logs) ---
+    fetch('api/config')
+        .then(function (resp) { return resp.json(); })
+        .then(function (cfg) {
+            if (cfg.title) {
+                document.title = cfg.title;
+                var h1 = document.querySelector('header h1');
+                if (h1) h1.textContent = cfg.title;
+                var loginTitle = document.getElementById('login-title');
+                if (loginTitle) loginTitle.textContent = cfg.title;
+            }
+            if (cfg.keybind) {
+                activeKeybind = cfg.keybind;
+            }
+            if (cfg.authenticated === false) {
+                showAuthDialog();
+            }
+            if (cfg.logsEnabled === false) {
+                if (logPanel) logPanel.style.display = 'none';
+            }
+        })
+        .catch(function () {});
 
-    function loadConfig() {
-        fetch('api/config')
-            .then(function (resp) { return resp.json(); })
-            .then(function (cfg) {
-                if (cfg.title) {
-                    document.title = cfg.title;
-                    var h1 = document.querySelector('header h1');
-                    if (h1) h1.textContent = cfg.title;
-                }
-                // Apply keybind from server config
-                if (cfg.keybind) {
-                    activeKeybind = cfg.keybind;
-                    console.log('[chat-ui] keybind: ' + activeKeybind);
-                }
-                // Show API key dialog if not authenticated
-                if (cfg.authenticated === false) {
-                    showAuthDialog();
-                }
-            })
-            .catch(function () {
-                // keep default title
-            });
-    }
+    // --- Initial data load ---
+    loadModels();
+    restoreHistory();
+    restoreQueue();
+    connectSSE();
+    promptInput.focus();
 
     function showAuthDialog() {
         var overlay = document.getElementById('auth-overlay');
@@ -1985,11 +2070,5 @@
         }
     });
 
-    // --- Init: load config, models, restore history/queue, connect EventSource ---
-    loadConfig();
-    loadModels();
-    restoreHistory();
-    restoreQueue();
-    connectSSE();
-    promptInput.focus();
+    } // end doInitApp
 })();

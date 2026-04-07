@@ -1,6 +1,7 @@
 package com.scivicslab.chatui.core.actor;
 
 import com.scivicslab.chatui.core.mcp.McpClientActor;
+import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.service.LogStreamHandler;
 import com.scivicslab.pojoactor.core.ActorRef;
@@ -8,6 +9,7 @@ import com.scivicslab.pojoactor.core.ActorSystem;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
@@ -17,10 +19,14 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
+
 /**
  * CDI bean that owns the POJO-actor system for this application.
  * Creates and holds the single {@link ChatActor} instance.
  * Conditionally creates {@link WatchdogActor} based on provider capabilities.
+ *
+ * <p>When a {@link MultiUserExtension} CDI bean is present on the classpath the
+ * application runs in multi-user mode. When absent it runs in single-user mode.</p>
  */
 @ApplicationScoped
 public class LlmConsoleActorSystem {
@@ -36,6 +42,9 @@ public class LlmConsoleActorSystem {
     @Inject
     LogStreamHandler logStreamHandler;
 
+    @Inject
+    Instance<MultiUserExtension> multiUserExtInstance;
+
     private ActorSystem actorSystem;
     private ActorRef<ChatActor> chatActorRef;
     private ActorRef<WatchdogActor> watchdogRef;
@@ -46,17 +55,24 @@ public class LlmConsoleActorSystem {
     private ScheduledExecutorService queueTimer;
 
     /**
-     * Initialises the actor system, creates the chat, queue, and (optionally) watchdog actors,
-     * and starts their periodic timer tasks. Called automatically by CDI after construction.
+     * Initialises the actor system. When a {@link MultiUserExtension} is available,
+     * delegates to it (multi-user mode). Otherwise initialises the full single-user stack.
      */
     @PostConstruct
     void init() {
         actorSystem = new ActorSystem("chat-ui");
 
+        if (!multiUserExtInstance.isUnsatisfied() && multiUserExtInstance.get().isEnabled()) {
+            initMultiUser();
+        } else {
+            initSingleUser();
+        }
+    }
+
+    private void initSingleUser() {
         chatActorRef = actorSystem.actorOf("chat", new ChatActor(provider, configApiKey));
         logStreamHandler.wireActorRef(chatActorRef);
 
-        // Create QueueActor and wire periodic tick
         queueActorRef = actorSystem.actorOf("queue", new QueueActor());
         chatActorRef.tell(a -> a.setQueueActor(queueActorRef));
         queueTimer = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -69,18 +85,15 @@ public class LlmConsoleActorSystem {
                 2, 2, TimeUnit.SECONDS);
         LOG.info("QueueActor initialized with 2s tick interval");
 
-        // Create BtwActor for /btw side questions (independent of ChatActor)
         btwActorRef = actorSystem.actorOf("btw", new BtwActor(provider));
         LOG.info("BtwActor initialized");
 
-        // Create McpClientActor for asynchronous MCP requests
         mcpClientActorRef = actorSystem.actorOf("mcp-client", new McpClientActor());
         LOG.info("McpClientActor initialized");
 
         if (provider.capabilities().supportsWatchdog()) {
             watchdogRef = actorSystem.actorOf("watchdog", new WatchdogActor());
             chatActorRef.tell(a -> a.setWatchdog(watchdogRef));
-
             watchdogTimer = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "watchdog-timer");
                 t.setDaemon(true);
@@ -89,11 +102,24 @@ public class LlmConsoleActorSystem {
             watchdogTimer.scheduleAtFixedRate(
                     () -> watchdogRef.tell(w -> w.tick(chatActorRef)),
                     10, 10, TimeUnit.SECONDS);
-
-            LOG.info("LlmConsoleActorSystem initialized (provider=" + provider.id() + ", watchdog=enabled)");
+            LOG.info("LlmConsoleActorSystem initialized (single-user, provider=" + provider.id() + ", watchdog=enabled)");
         } else {
-            LOG.info("LlmConsoleActorSystem initialized (provider=" + provider.id() + ", watchdog=disabled)");
+            LOG.info("LlmConsoleActorSystem initialized (single-user, provider=" + provider.id() + ", watchdog=disabled)");
         }
+    }
+
+    private void initMultiUser() {
+        String apiKey = resolveApiKey();
+        MultiUserExtension ext = multiUserExtInstance.get();
+        ext.initialize(actorSystem, apiKey);
+        logStreamHandler.wireMultiUserExtension(ext);
+        LOG.info("LlmConsoleActorSystem initialized (multi-user, provider=" + provider.id() + ")");
+    }
+
+    private String resolveApiKey() {
+        String envKey = provider.detectEnvApiKey();
+        if (envKey != null && !envKey.isBlank()) return envKey;
+        return configApiKey.filter(k -> !k.isBlank()).orElse(null);
     }
 
     /** Shuts down timer threads and terminates the actor system. Called by CDI before destruction. */
@@ -104,45 +130,27 @@ public class LlmConsoleActorSystem {
         if (actorSystem != null) actorSystem.terminate();
     }
 
-    /**
-     * Returns the reference to the singleton chat actor.
-     *
-     * @return the chat actor reference
-     */
     public ActorRef<ChatActor> getChatActor() { return chatActorRef; }
 
-    /**
-     * Returns the reference to the watchdog actor, or {@code null} if the provider does not support it.
-     *
-     * @return the watchdog actor reference, or {@code null}
-     */
     public ActorRef<WatchdogActor> getWatchdog() { return watchdogRef; }
 
-    /**
-     * Returns the reference to the prompt queue actor.
-     *
-     * @return the queue actor reference
-     */
     public ActorRef<QueueActor> getQueueActor() { return queueActorRef; }
 
-    /**
-     * Returns the reference to the btw actor for /btw side questions.
-     *
-     * @return the btw actor reference
-     */
     public ActorRef<BtwActor> getBtwActor() { return btwActorRef; }
 
-    /**
-     * Returns the reference to the MCP client actor.
-     *
-     * @return the MCP client actor reference
-     */
     public ActorRef<McpClientActor> getMcpClientActor() { return mcpClientActorRef; }
 
+    /** Returns true when the system is running in multi-user mode. */
+    public boolean isMultiUser() {
+        return !multiUserExtInstance.isUnsatisfied() && multiUserExtInstance.get().isEnabled();
+    }
+
     /**
-     * Returns the injected LLM provider instance.
-     *
-     * @return the LLM provider
+     * Returns the active {@link MultiUserExtension}, or {@code null} in single-user mode.
      */
+    public MultiUserExtension getMultiUserExtension() {
+        return isMultiUser() ? multiUserExtInstance.get() : null;
+    }
+
     public LlmProvider getProvider() { return provider; }
 }
