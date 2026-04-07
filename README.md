@@ -41,6 +41,18 @@ The concurrency model is built on [POJO-actor](https://github.com/scivicslab/poj
 - Maven 3.9+
 - One of the supported LLM backends (see [Providers](#providers))
 
+## Download
+
+Pre-built binaries for each platform are available on the [Releases](https://github.com/scivicslab/quarkus-chat-ui/releases) page:
+
+| File | Platform |
+|------|----------|
+| `quarkus-chat-ui-<version>-linux-amd64` | Linux x86_64 |
+| `quarkus-chat-ui-<version>-linux-arm64` | Linux ARM64 |
+| `quarkus-chat-ui-<version>-macos-arm64` | macOS Apple Silicon |
+| `quarkus-chat-ui-<version>-windows-amd64.exe` | Windows x64 |
+| `quarkus-chat-ui-<version>.jar` | Any platform (requires Java 21+) |
+
 ## Build
 
 ```bash
@@ -55,7 +67,44 @@ The runnable JAR is produced at `app/target/quarkus-app/quarkus-run.jar`.
 
 ## Run
 
-### Claude Code CLI
+### Native image (Linux / macOS)
+
+Download the binary for your platform from the [Releases](https://github.com/scivicslab/quarkus-chat-ui/releases) page, then:
+
+```bash
+# Make executable (first time only)
+chmod +x quarkus-chat-ui-<version>-linux-amd64
+
+# Claude Code CLI provider
+./quarkus-chat-ui-<version>-linux-amd64 \
+    -Dchat-ui.provider=claude \
+    -Dquarkus.http.port=28010
+
+# vLLM / Ollama (OpenAI-compatible)
+./quarkus-chat-ui-<version>-linux-amd64 \
+    -Dchat-ui.provider=openai-compat \
+    -Dchat-ui.servers=http://localhost:8000 \
+    -Dquarkus.http.port=28010
+```
+
+Replace `linux-amd64` with `linux-arm64` or `macos-arm64` as appropriate.
+
+### Native image (Windows)
+
+```powershell
+# Claude Code CLI provider
+.\quarkus-chat-ui-<version>-windows-amd64.exe `
+    -Dchat-ui.provider=claude `
+    -Dquarkus.http.port=28010
+
+# vLLM / Ollama (OpenAI-compatible)
+.\quarkus-chat-ui-<version>-windows-amd64.exe `
+    -Dchat-ui.provider=openai-compat `
+    -Dchat-ui.servers=http://localhost:8000 `
+    -Dquarkus.http.port=28010
+```
+
+### JAR (Claude Code CLI)
 
 ```bash
 java -Dchat-ui.provider=claude \
@@ -65,7 +114,7 @@ java -Dchat-ui.provider=claude \
 
 Requires `ANTHROPIC_API_KEY` set in the environment (or pass `-Dchat-ui.api-key=sk-ant-…`).
 
-### OpenAI Codex CLI
+### JAR (OpenAI Codex CLI)
 
 ```bash
 java -Dchat-ui.provider=codex \
@@ -75,7 +124,7 @@ java -Dchat-ui.provider=codex \
 
 Requires `OPENAI_API_KEY` set in the environment.
 
-### vLLM / Ollama (OpenAI-compatible HTTP)
+### JAR (vLLM / Ollama — OpenAI-compatible HTTP)
 
 If you don't have a local LLM server running yet, [Ollama](https://ollama.com/) is the easiest way to get started:
 
