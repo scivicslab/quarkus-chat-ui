@@ -67,99 +67,223 @@ The runnable JAR is produced at `app/target/quarkus-app/quarkus-run.jar`.
 
 ## Run
 
-### Native image (Linux / macOS)
+In all cases, open `http://localhost:28010` in a browser after startup.  
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` must be set in the environment for Claude and Codex providers.
 
-Download the binary for your platform from the [Releases](https://github.com/scivicslab/quarkus-chat-ui/releases) page, then:
+---
+
+### 1. fat-jar
+
+The fat-jar (`quarkus-chat-ui-<version>.jar`) runs on any platform with Java 21+.
+
+#### (a) Claude Code CLI
+
+```bash
+java -Dchat-ui.provider=claude \
+     -Dquarkus.http.port=28010 \
+     -jar quarkus-chat-ui-<version>.jar
+```
+
+#### (b) OpenAI Codex CLI
+
+```bash
+java -Dchat-ui.provider=codex \
+     -Dquarkus.http.port=28010 \
+     -jar quarkus-chat-ui-<version>.jar
+```
+
+#### (c) Local LLM (vLLM / Ollama)
+
+```bash
+# Ollama (default port 11434)
+java -Dchat-ui.provider=openai-compat \
+     -Dchat-ui.servers=http://localhost:11434/v1 \
+     -Dquarkus.http.port=28010 \
+     -jar quarkus-chat-ui-<version>.jar
+
+# vLLM (default port 8000)
+java -Dchat-ui.provider=openai-compat \
+     -Dchat-ui.servers=http://localhost:8000 \
+     -Dquarkus.http.port=28010 \
+     -jar quarkus-chat-ui-<version>.jar
+```
+
+`chat-ui.servers` accepts a comma-separated list of URLs for load balancing.
+
+---
+
+### 2. Linux x86_64 (native image)
 
 ```bash
 # Make executable (first time only)
 chmod +x quarkus-chat-ui-<version>-linux-amd64
+```
 
-# Claude Code CLI provider
+#### (a) Claude Code CLI
+
+```bash
 ./quarkus-chat-ui-<version>-linux-amd64 \
     -Dchat-ui.provider=claude \
     -Dquarkus.http.port=28010
+```
 
-# vLLM / Ollama (OpenAI-compatible)
+#### (b) OpenAI Codex CLI
+
+```bash
+./quarkus-chat-ui-<version>-linux-amd64 \
+    -Dchat-ui.provider=codex \
+    -Dquarkus.http.port=28010
+```
+
+#### (c) Local LLM (vLLM / Ollama)
+
+```bash
+# Ollama
+./quarkus-chat-ui-<version>-linux-amd64 \
+    -Dchat-ui.provider=openai-compat \
+    -Dchat-ui.servers=http://localhost:11434/v1 \
+    -Dquarkus.http.port=28010
+
+# vLLM
 ./quarkus-chat-ui-<version>-linux-amd64 \
     -Dchat-ui.provider=openai-compat \
     -Dchat-ui.servers=http://localhost:8000 \
     -Dquarkus.http.port=28010
 ```
 
-Replace `linux-amd64` with `linux-arm64` or `macos-arm64` as appropriate.
+---
 
-### Native image (Windows)
+### 3. Linux ARM64 (native image)
+
+```bash
+# Make executable (first time only)
+chmod +x quarkus-chat-ui-<version>-linux-arm64
+```
+
+#### (a) Claude Code CLI
+
+```bash
+./quarkus-chat-ui-<version>-linux-arm64 \
+    -Dchat-ui.provider=claude \
+    -Dquarkus.http.port=28010
+```
+
+#### (b) OpenAI Codex CLI
+
+```bash
+./quarkus-chat-ui-<version>-linux-arm64 \
+    -Dchat-ui.provider=codex \
+    -Dquarkus.http.port=28010
+```
+
+#### (c) Local LLM (vLLM / Ollama)
+
+```bash
+# Ollama
+./quarkus-chat-ui-<version>-linux-arm64 \
+    -Dchat-ui.provider=openai-compat \
+    -Dchat-ui.servers=http://localhost:11434/v1 \
+    -Dquarkus.http.port=28010
+
+# vLLM
+./quarkus-chat-ui-<version>-linux-arm64 \
+    -Dchat-ui.provider=openai-compat \
+    -Dchat-ui.servers=http://localhost:8000 \
+    -Dquarkus.http.port=28010
+```
+
+---
+
+### 4. macOS Apple Silicon (native image)
+
+```bash
+# Make executable (first time only)
+chmod +x quarkus-chat-ui-<version>-macos-arm64
+```
+
+#### (a) Claude Code CLI
+
+```bash
+./quarkus-chat-ui-<version>-macos-arm64 \
+    -Dchat-ui.provider=claude \
+    -Dquarkus.http.port=28010
+```
+
+#### (b) OpenAI Codex CLI
+
+```bash
+./quarkus-chat-ui-<version>-macos-arm64 \
+    -Dchat-ui.provider=codex \
+    -Dquarkus.http.port=28010
+```
+
+#### (c) Local LLM (vLLM / Ollama)
+
+```bash
+# Ollama
+./quarkus-chat-ui-<version>-macos-arm64 \
+    -Dchat-ui.provider=openai-compat \
+    -Dchat-ui.servers=http://localhost:11434/v1 \
+    -Dquarkus.http.port=28010
+
+# vLLM
+./quarkus-chat-ui-<version>-macos-arm64 \
+    -Dchat-ui.provider=openai-compat \
+    -Dchat-ui.servers=http://localhost:8000 \
+    -Dquarkus.http.port=28010
+```
+
+---
+
+### 5. Windows x64 (native image, PowerShell)
+
+#### (a) Claude Code CLI
 
 ```powershell
-# Claude Code CLI provider
 .\quarkus-chat-ui-<version>-windows-amd64.exe `
     -Dchat-ui.provider=claude `
     -Dquarkus.http.port=28010
+```
 
-# vLLM / Ollama (OpenAI-compatible)
+#### (b) OpenAI Codex CLI
+
+```powershell
+.\quarkus-chat-ui-<version>-windows-amd64.exe `
+    -Dchat-ui.provider=codex `
+    -Dquarkus.http.port=28010
+```
+
+#### (c) Local LLM (vLLM / Ollama)
+
+```powershell
+# Ollama
+.\quarkus-chat-ui-<version>-windows-amd64.exe `
+    -Dchat-ui.provider=openai-compat `
+    -Dchat-ui.servers=http://localhost:11434/v1 `
+    -Dquarkus.http.port=28010
+
+# vLLM
 .\quarkus-chat-ui-<version>-windows-amd64.exe `
     -Dchat-ui.provider=openai-compat `
     -Dchat-ui.servers=http://localhost:8000 `
     -Dquarkus.http.port=28010
 ```
 
-### JAR (Claude Code CLI)
+---
+
+**Local LLM setup:** If you don't have a local LLM server yet, [Ollama](https://ollama.com/) is the easiest way to start:
 
 ```bash
-java -Dchat-ui.provider=claude \
-     -Dquarkus.http.port=28010 \
-     -jar app/target/quarkus-app/quarkus-run.jar
-```
-
-Requires `ANTHROPIC_API_KEY` set in the environment (or pass `-Dchat-ui.api-key=sk-ant-…`).
-
-### JAR (OpenAI Codex CLI)
-
-```bash
-java -Dchat-ui.provider=codex \
-     -Dquarkus.http.port=28010 \
-     -jar app/target/quarkus-app/quarkus-run.jar
-```
-
-Requires `OPENAI_API_KEY` set in the environment.
-
-### JAR (vLLM / Ollama — OpenAI-compatible HTTP)
-
-If you don't have a local LLM server running yet, [Ollama](https://ollama.com/) is the easiest way to get started:
-
-```bash
-# Install Ollama, then pull a model
 ollama pull qwen2.5-coder:7b
-
-# Ollama listens on http://localhost:11434 by default
+# then use -Dchat-ui.servers=http://localhost:11434/v1
 ```
 
-For GPU-accelerated inference, [vLLM](https://docs.vllm.ai/) serves any HuggingFace-compatible model on the same OpenAI-compatible API:
+For GPU-accelerated inference, [vLLM](https://docs.vllm.ai/) serves any HuggingFace model on the same OpenAI-compatible API:
 
 ```bash
 vllm serve Qwen/Qwen2.5-Coder-7B-Instruct --port 8000
+# then use -Dchat-ui.servers=http://localhost:8000
 ```
-
-Then start quarkus-chat-ui pointing at your server:
-
-```bash
-# Ollama
-java -Dchat-ui.provider=openai-compat \
-     -Dchat-ui.servers=http://localhost:11434/v1 \
-     -Dquarkus.http.port=28010 \
-     -jar app/target/quarkus-app/quarkus-run.jar
-
-# vLLM
-java -Dchat-ui.provider=openai-compat \
-     -Dchat-ui.servers=http://localhost:8000 \
-     -Dquarkus.http.port=28010 \
-     -jar app/target/quarkus-app/quarkus-run.jar
-```
-
-`chat-ui.servers` accepts a comma-separated list of server URLs for load balancing.
-
-Open `http://localhost:28010` in a browser.
 
 ## Providers
 
