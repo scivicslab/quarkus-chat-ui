@@ -66,6 +66,7 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private final ConcurrentHashMap<String, String> sessionCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> toolToServerUrl = new ConcurrentHashMap<>();
 
     @Override
     public boolean isEnabled() { return enabled; }
@@ -103,7 +104,9 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
                     client.sendNonStreaming(model, List.copyOf(history), ctx.noThink(), 0, tools);
 
             if (resp.finishReason().startsWith("error")) {
-                emitter.accept(ChatEvent.error("Agent loop error: " + resp.content()));
+                String detail = resp.content() != null ? resp.content() : resp.finishReason();
+                LOG.warning("Agent loop error: " + detail + " (model=" + model + ")");
+                emitter.accept(ChatEvent.error("Agent loop error: " + detail));
                 return;
             }
 
@@ -132,7 +135,13 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
                 String shortResult = result.length() > 300 ? result.substring(0, 300) + "…" : result;
                 emitter.accept(ChatEvent.thinking("[Result] " + shortResult));
 
-                history.addLast(new ChatMessage.ToolResult(tc.id(), tc.name(), result));
+                // Truncate large results to avoid overflowing the model's context window.
+                // Binary files (e.g. PDFs) returned by the filesystem tool would corrupt
+                // the JSON request body and cause vLLM to return an error.
+                String historyResult = result.length() > 10_000
+                        ? result.substring(0, 10_000) + "\n[truncated — content too large]"
+                        : result;
+                history.addLast(new ChatMessage.ToolResult(tc.id(), tc.name(), historyResult));
             }
         }
 
@@ -167,12 +176,15 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     private List<ToolDefinition> fetchAllTools() {
         String mcpUrlsConfig = mcpUrlsRaw.orElse("");
         if (mcpUrlsConfig.isBlank()) return List.of();
+        toolToServerUrl.clear();
         List<ToolDefinition> all = new ArrayList<>();
         for (String raw : mcpUrlsConfig.split(",")) {
             String url = raw.trim();
             if (url.isEmpty()) continue;
             try {
-                all.addAll(fetchToolsFromServer(url));
+                List<ToolDefinition> tools = fetchToolsFromServer(url);
+                tools.forEach(t -> toolToServerUrl.put(t.name(), url));
+                all.addAll(tools);
             } catch (Exception e) {
                 LOG.warning("Could not fetch tools from " + url + ": " + e.getMessage());
             }
@@ -232,11 +244,12 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     private String callMcpTool(String toolName, String arguments) {
         String mcpUrlsConfig = mcpUrlsRaw.orElse("");
         if (mcpUrlsConfig.isBlank()) return "No MCP server configured";
-        String firstUrl = mcpUrlsConfig.split(",")[0].trim();
+        String serverUrl = toolToServerUrl.getOrDefault(
+                toolName, mcpUrlsConfig.split(",")[0].trim());
         try {
-            return callToolOnServer(firstUrl, toolName, arguments);
+            return callToolOnServer(serverUrl, toolName, arguments);
         } catch (Exception e) {
-            LOG.warning("Tool call failed (" + toolName + "): " + e.getMessage());
+            LOG.warning("Tool call failed (" + toolName + " on " + serverUrl + "): " + e.getMessage());
             return "Error: " + e.getMessage();
         }
     }
@@ -333,6 +346,7 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
 
     private static String ensureMcpPath(String url) {
         if (url.endsWith("/mcp")) return url;
+        if (url.contains("/mcp/")) return url;  // already a sub-path like /mcp/filesystem
         if (url.endsWith("/")) return url + "mcp";
         return url + "/mcp";
     }
