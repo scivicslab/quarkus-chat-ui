@@ -137,13 +137,29 @@ public class StreamEventParser {
     }
 
     private StreamEvent parseUser(JSONObject json, String rawJson) {
-        JSONObject toolResult = json.optJSONObject("tool_use_result");
-        String summary = null;
-        if (toolResult != null) {
-            summary = toolResult.toString();
-            if (summary.length() > 200) summary = summary.substring(0, 200) + "...";
+        // Claude CLI 2.x: permission denials and tool results arrive as message.content[].type="tool_result"
+        JSONObject message = json.optJSONObject("message");
+        if (message != null) {
+            JSONArray content = message.optJSONArray("content");
+            if (content != null) {
+                for (int i = 0; i < content.length(); i++) {
+                    JSONObject item = content.optJSONObject(i);
+                    if (item != null && "tool_result".equals(item.optString("type"))) {
+                        boolean isError = item.optBoolean("is_error", false);
+                        String text = item.optString("content", "");
+                        return new StreamEvent("tool_result", text, null, -1, -1, isError, rawJson);
+                    }
+                }
+            }
         }
-        return new StreamEvent("tool_result", summary, null, -1, -1, false, rawJson);
+        // Fallback: legacy top-level tool_use_result field
+        JSONObject toolResult = json.optJSONObject("tool_use_result");
+        if (toolResult != null) {
+            String summary = toolResult.toString();
+            if (summary.length() > 200) summary = summary.substring(0, 200) + "...";
+            return new StreamEvent("tool_result", summary, null, -1, -1, false, rawJson);
+        }
+        return new StreamEvent("tool_result", null, null, -1, -1, false, rawJson);
     }
 
     private StreamEvent parseResult(JSONObject json, String rawJson) {
