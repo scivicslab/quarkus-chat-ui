@@ -18,7 +18,7 @@ import java.util.logging.Logger;
  * JUL Handler that forwards log records to {@link ChatActor}.
  *
  * <p>The actor reference is wired in by
- * {@link com.scivicslab.chatui.core.actor.LlmConsoleActorSystem} after the actor is
+ * {@link com.scivicslab.chatui.core.actor.ChatUiActorSystem} after the actor is
  * constructed, avoiding the circular-init problem that occurs when ChatActor logs during
  * construction and publish() tries to access CDI.</p>
  */
@@ -40,12 +40,12 @@ public class LogStreamHandler extends Handler {
         Logger.getLogger("").addHandler(this);
     }
 
-    /** Called by LlmConsoleActorSystem once the single-user ChatActor is ready. */
+    /** Called by ChatUiActorSystem once the single-user ChatActor is ready. */
     public void wireActorRef(ActorRef<ChatActor> ref) {
         this.chatActorRef = ref;
     }
 
-    /** Called by LlmConsoleActorSystem once the MultiUserExtension is ready. */
+    /** Called by ChatUiActorSystem once the MultiUserExtension is ready. */
     public void wireMultiUserExtension(MultiUserExtension ext) {
         this.multiUserExtension = ext;
     }

@@ -348,6 +348,25 @@ public class ChatActor {
     public void clearSseEmitter() { this.sseEmitter = null; }
 
     /**
+     * Buffers a {@link ChatEvent} in the ring buffer and forwards it to the SSE emitter.
+     *
+     * <p>Used by the autonomous event monitor to emit events that arrive outside of a
+     * user-prompted turn (e.g. ScheduleWakeup responses). Unlike {@link #publishLog}, this
+     * method accepts a pre-built {@code ChatEvent} and does not wrap it in a log envelope.</p>
+     *
+     * @param event the event to buffer and emit
+     */
+    public void emitEvent(ChatEvent event) {
+        logBuffer[logHead] = event;
+        logHead = (logHead + 1) % LOG_BUFFER_SIZE;
+        if (logCount < LOG_BUFFER_SIZE) logCount++;
+        if (sseEmitter != null) {
+            try { sseEmitter.accept(event); }
+            catch (Exception ignored) {}
+        }
+    }
+
+    /**
      * Returns the contents of the log ring buffer in chronological order.
      *
      * @return a list of the most recent log events (up to {@code LOG_BUFFER_SIZE})
@@ -359,10 +378,91 @@ public class ChatActor {
         return result;
     }
 
-    /** Wire the watchdog actor reference. Called by LlmConsoleActorSystem after construction. */
+    /** Wire the watchdog actor reference. Called by ChatUiActorSystem after construction. */
     public void setWatchdog(ActorRef<WatchdogActor> watchdog) { this.watchdog = watchdog; }
 
     public void setQueueActor(ActorRef<QueueActor> queueActor) { this.queueActor = queueActor; }
+
+    /**
+     * Starts the autonomous event monitor.
+     *
+     * <p>A persistent virtual thread polls the provider for events that arrive outside
+     * of a user-prompted turn (e.g. ScheduleWakeup responses). When an event is
+     * detected while idle, the actor transitions to {@code busy=true} and drains the
+     * remainder of that autonomous turn, forwarding all events to the SSE stream via
+     * {@link #publishLog}.</p>
+     *
+     * <p>Only started when {@code provider.capabilities().supportsAutonomousEvents()} is true.
+     * Called once by {@link ChatUiActorSystem} during initialisation.</p>
+     */
+    public void startAutonomousMonitor(ActorRef<ChatActor> self) {
+        if (!provider.capabilities().supportsAutonomousEvents()) return;
+        Thread.startVirtualThread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    if (busy) {
+                        Thread.sleep(100);
+                        continue;
+                    }
+                    Optional<ChatEvent> event = provider.pollAutonomousEvent(200);
+                    if (event.isEmpty()) continue;
+                    // Deliver the first event to the actor thread; it will drain the rest.
+                    ChatEvent first = event.get();
+                    self.tell(a -> a.onAutonomousEvent(first, self));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+    }
+
+    /**
+     * Called by the autonomous monitor when an event arrives while idle.
+     * Sets {@code busy=true}, publishes the first event, then drains the remainder
+     * of the autonomous turn in a new virtual thread until the {@code result} event.
+     */
+    public void onAutonomousEvent(ChatEvent firstEvent, ActorRef<ChatActor> self) {
+        if (busy) return; // lost the race to a concurrent user prompt — discard
+        busy = true;
+        boolean useWatchdog = watchdog != null && provider.capabilities().supportsWatchdog();
+        if (useWatchdog) watchdog.tell(WatchdogActor::onPromptStarted);
+
+        emitEvent(ChatEvent.status(provider.getCurrentModel(), provider.getSessionId(), true));
+        emitEvent(firstEvent);
+
+        // Drain the rest of the autonomous turn in a virtual thread.
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        StringBuilder assistantBuf = new StringBuilder();
+        activeThread = Thread.startVirtualThread(() -> {
+            try {
+                while (true) {
+                    Optional<ChatEvent> e;
+                    try {
+                        e = provider.pollAutonomousEvent(30_000);
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    if (e.isEmpty()) {
+                        self.tell(a -> a.emitEvent(
+                                ChatEvent.error("Autonomous turn timed out waiting for result")));
+                        break;
+                    }
+                    ChatEvent ce = e.get();
+                    if ("delta".equals(ce.type()) && ce.content() != null) {
+                        assistantBuf.append(ce.content());
+                    } else if ("result".equals(ce.type()) && !assistantBuf.isEmpty()) {
+                        String content = assistantBuf.toString();
+                        self.tell(a -> a.recordHistory("assistant", content));
+                    }
+                    self.tell(a -> a.emitEvent(ce));
+                    if ("result".equals(ce.type())) break;
+                }
+            } finally {
+                self.tell(a -> a.onPromptComplete(a::emitEvent, done, self));
+            }
+        });
+    }
 
     public record HistoryEntry(String role, String content) {}
 }

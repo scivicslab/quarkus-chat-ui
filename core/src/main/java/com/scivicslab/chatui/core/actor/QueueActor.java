@@ -77,16 +77,19 @@ public class QueueActor {
     }
 
     /**
-     * Removes all MCP-sourced messages from the queue, leaving human-typed messages intact.
+     * Removes all agent-sourced messages from the queue, leaving human-typed messages intact.
      * Called on cancel to stop ongoing agent conversations without discarding
      * messages the human has already queued up.
+     *
+     * <p>Agent messages have source values of the form {@code "agent:xxx"}
+     * (e.g. {@code "agent:localhost:28010"}).</p>
      */
-    public void clearMcpMessages() {
+    public void clearAgentMessages() {
         int before = queue.size();
-        queue.removeIf(e -> "mcp".equals(e.source()));
+        queue.removeIf(e -> e.source() != null && e.source().startsWith("agent:"));
         int removed = before - queue.size();
         if (removed > 0) {
-            LOG.info("queue: cleared " + removed + " MCP messages on cancel");
+            LOG.info("queue: cleared " + removed + " agent messages on cancel");
         }
     }
 
@@ -198,6 +201,6 @@ public class QueueActor {
             Instant enqueuedAt,
             Consumer<ChatEvent> emitter,
             CompletableFuture<Void> done,
-            String source   // "human" | "mcp"
+            String source   // "human" | "agent:xxx" (e.g. "agent:localhost:28010")
     ) {}
 }

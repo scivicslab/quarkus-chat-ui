@@ -134,6 +134,24 @@ public abstract class CliLlmProvider implements LlmProvider {
     public void cancel() { cliProcess.cancel(); }
 
     /**
+     * {@inheritDoc}
+     *
+     * <p>Polls one event from the CLI's background stdout reader queue.
+     * The event is converted from {@link StreamEvent} to {@link ChatEvent} using the
+     * same dispatch logic as prompted turns. Returns empty on timeout or if the event
+     * produces no user-visible output (e.g. internal {@code system} events).</p>
+     */
+    @Override
+    public java.util.Optional<com.scivicslab.chatui.core.rest.ChatEvent> pollAutonomousEvent(long timeoutMs)
+            throws InterruptedException {
+        com.scivicslab.chatui.cli.process.StreamEvent se = cliProcess.pollEvent(timeoutMs);
+        if (se == null) return java.util.Optional.empty();
+        java.util.List<com.scivicslab.chatui.core.rest.ChatEvent> out = new java.util.ArrayList<>(1);
+        dispatch(se, out::add, new boolean[]{false});
+        return out.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(out.get(0));
+    }
+
+    /**
      * Sends a prompt to the CLI LLM and streams response events to the emitter.
      *
      * <p>If the process is not alive, it is restarted with the last known session ID.

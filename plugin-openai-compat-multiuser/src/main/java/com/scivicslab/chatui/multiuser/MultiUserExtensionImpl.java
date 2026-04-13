@@ -21,7 +21,7 @@ import java.util.logging.Logger;
  * <p>Including this JAR on the classpath activates multi-user mode automatically
  * via CDI discovery — no configuration flag needed.</p>
  *
- * <p>{@link #initialize} is called once by {@code LlmConsoleActorSystem} after the
+ * <p>{@link #initialize} is called once by {@code ChatUiActorSystem} after the
  * actor system is ready.</p>
  */
 @ApplicationScoped

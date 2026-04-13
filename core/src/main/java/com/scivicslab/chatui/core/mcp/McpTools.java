@@ -1,13 +1,14 @@
 package com.scivicslab.chatui.core.mcp;
 
 import com.scivicslab.chatui.core.actor.ChatActor;
-import com.scivicslab.chatui.core.actor.LlmConsoleActorSystem;
+import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.chatui.core.rest.ChatResource;
 import io.quarkiverse.mcp.server.Tool;
 import io.quarkiverse.mcp.server.ToolArg;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -33,10 +34,13 @@ public class McpTools {
     private static final Logger logger = Logger.getLogger(McpTools.class.getName());
 
     @Inject
-    LlmConsoleActorSystem actorSystem;
+    ChatUiActorSystem actorSystem;
 
     @Inject
     ChatResource chatResource;
+
+    @ConfigProperty(name = "quarkus.http.port", defaultValue = "8080")
+    int httpPort;
 
     @Tool(description = "Get the current status of the chat-ui instance (model, session, busy state)")
     String getStatus() {
@@ -85,6 +89,7 @@ public class McpTools {
         var queueRef = actorSystem.getQueueActor();
         var chatRef = actorSystem.getChatActor();
 
+        String source = "agent:" + callerLabel;
         queueRef.tell(q -> q.enqueue(
             enrichedPrompt,
             model,
@@ -93,7 +98,7 @@ public class McpTools {
             chatResource::emitSse,  // emitter for SSE events
             chatRef,
             queueRef,
-            "mcp"
+            source
         ));
 
         int queueSize = queueRef.ask(com.scivicslab.chatui.core.actor.QueueActor::getQueueSize).join();
@@ -162,8 +167,7 @@ public class McpTools {
      * Gets the URL of this chat-ui instance.
      */
     private String getSelfUrl() {
-        int port = Integer.parseInt(System.getProperty("quarkus.http.port", "8080"));
-        return "http://localhost:" + port;
+        return "http://localhost:" + httpPort;
     }
 
     /**

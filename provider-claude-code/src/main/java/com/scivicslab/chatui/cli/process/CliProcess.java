@@ -8,6 +8,8 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
@@ -37,7 +39,8 @@ public class CliProcess {
     private String lastSessionId;
     private Process currentProcess;
     private OutputStream stdinStream;
-    private BufferedReader stdoutReader;
+    private volatile Thread readerThread;
+    private final LinkedBlockingQueue<StreamEvent> eventQueue = new LinkedBlockingQueue<>();
     private volatile String apiKey;
 
     /**
@@ -105,7 +108,31 @@ public class CliProcess {
         currentProcess = pb.start();
 
         stdinStream = currentProcess.getOutputStream();
-        stdoutReader = new BufferedReader(new InputStreamReader(currentProcess.getInputStream()));
+        BufferedReader stdoutReader =
+                new BufferedReader(new InputStreamReader(currentProcess.getInputStream()));
+
+        // Background thread: read stdout continuously and put parsed events into the queue.
+        // This keeps running while the process is alive, picking up both prompted and
+        // autonomous (ScheduleWakeup) turns.
+        readerThread = Thread.ofVirtual().start(() -> {
+            try {
+                String line;
+                while ((line = stdoutReader.readLine()) != null) {
+                    line = stripAnsi(line).trim();
+                    if (line.isEmpty() || !line.startsWith("{")) continue;
+                    String logLine = line;
+                    logger.info(() -> "stdout: " + logLine);
+                    StreamEvent event = parser.parse(line);
+                    if (event == null) continue;
+                    if ("result".equals(event.type()) && event.sessionId() != null) {
+                        lastSessionId = event.sessionId();
+                    }
+                    eventQueue.put(event);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (IOException ignored) {}
+        });
 
         Process proc = currentProcess;
         Thread.ofVirtual().start(() -> {
@@ -122,52 +149,61 @@ public class CliProcess {
     /**
      * Sends a prompt and streams response events to the callback.
      * The process stays alive after a turn completes.
+     *
+     * <p>Writes the user message to stdin, then reads events from the shared
+     * {@code eventQueue} (filled by the background reader thread) until a
+     * {@code result} event is received.</p>
      */
     public int sendPrompt(String prompt, StreamCallback callback) throws IOException {
-        if (currentProcess == null || !currentProcess.isAlive()) startProcess();
+        if (currentProcess == null || !currentProcess.isAlive()) {
+            eventQueue.clear();
+            startProcess();
+        }
 
         writeUserMessage(prompt);
 
-        String line;
-        while ((line = stdoutReader.readLine()) != null) {
-            line = stripAnsi(line).trim();
-            if (line.isEmpty() || !line.startsWith("{")) continue;
-
-            String logLine = line;
-            logger.info(() -> "stdout: " + logLine);
-
-            StreamEvent event = parser.parse(line);
-            if (event == null) continue;
-
-            if ("result".equals(event.type()) && event.sessionId() != null) {
-                lastSessionId = event.sessionId();
+        try {
+            while (true) {
+                StreamEvent event = eventQueue.poll(60, TimeUnit.SECONDS);
+                if (event == null) {
+                    // Timeout — process may be stalled
+                    if (callback != null) callback.onComplete(-1);
+                    return -1;
+                }
+                if (callback != null) callback.onEvent(event);
+                if ("result".equals(event.type())) return 0;
             }
-            if (callback != null) callback.onEvent(event);
-            if ("result".equals(event.type())) return 0;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            if (callback != null) callback.onComplete(-1);
+            return -1;
         }
+    }
 
-        int exitCode = 0;
-        Process proc = currentProcess;
-        if (proc != null) {
-            try { exitCode = proc.waitFor(); }
-            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        }
-        if (callback != null) callback.onComplete(exitCode);
-
-        currentProcess = null;
-        stdinStream = null;
-        stdoutReader = null;
-        return exitCode;
+    /**
+     * Polls for the next autonomous event (one not triggered by {@link #sendPrompt}).
+     * Used by the ChatActor's idle monitor to detect ScheduleWakeup responses.
+     *
+     * @param timeoutMs maximum wait in milliseconds; 0 means non-blocking
+     * @return the next event, or {@code null} if none arrived within the timeout
+     */
+    public StreamEvent pollEvent(long timeoutMs) throws InterruptedException {
+        if (timeoutMs <= 0) return eventQueue.poll();
+        return eventQueue.poll(timeoutMs, TimeUnit.MILLISECONDS);
     }
 
     /**
      * Destroys the running CLI process and resets all I/O handles.
      */
     public void cancel() {
+        if (readerThread != null) {
+            readerThread.interrupt();
+            readerThread = null;
+        }
+        eventQueue.clear();
         Process p = currentProcess;
         currentProcess = null;
         stdinStream = null;
-        stdoutReader = null;
         if (p != null && p.isAlive()) {
             p.destroy();
             logger.info(binary + " CLI process cancelled");

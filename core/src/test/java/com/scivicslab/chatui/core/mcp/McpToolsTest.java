@@ -1,7 +1,7 @@
 package com.scivicslab.chatui.core.mcp;
 
 import com.scivicslab.chatui.core.actor.ChatActor;
-import com.scivicslab.chatui.core.actor.LlmConsoleActorSystem;
+import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.QueueActor;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.provider.ProviderCapabilities;
@@ -50,7 +50,7 @@ class McpToolsTest {
         queueRef = actorSystem.actorOf("queue", queueActor);
         chatRef.tell(a -> a.setQueueActor(queueRef));
 
-        // Build a stub LlmConsoleActorSystem that returns our chatRef and queueRef
+        // Build a stub ChatUiActorSystem that returns our chatRef and queueRef
         var stubActorSystem = new StubActorSystem(chatRef, queueRef, provider);
 
         // Build a stub ChatResource that captures emitted SSE events
@@ -264,9 +264,9 @@ class McpToolsTest {
     }
 
     /**
-     * Stub LlmConsoleActorSystem that wraps pre-built ActorRefs.
+     * Stub ChatUiActorSystem that wraps pre-built ActorRefs.
      */
-    static class StubActorSystem extends LlmConsoleActorSystem {
+    static class StubActorSystem extends ChatUiActorSystem {
         private final ActorRef<ChatActor> chatRef;
         private final ActorRef<QueueActor> queueRef;
         private final LlmProvider provider;

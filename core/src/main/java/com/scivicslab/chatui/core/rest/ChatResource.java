@@ -2,7 +2,7 @@ package com.scivicslab.chatui.core.rest;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scivicslab.chatui.core.actor.ChatActor;
-import com.scivicslab.chatui.core.actor.LlmConsoleActorSystem;
+import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.WatchdogActor;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.provider.LlmProvider;
@@ -55,7 +55,7 @@ public class ChatResource {
     private static final Logger logger = Logger.getLogger(ChatResource.class.getName());
 
     @Inject
-    LlmConsoleActorSystem actorSystem;
+    ChatUiActorSystem actorSystem;
 
     @Inject
     Vertx vertx;
@@ -404,7 +404,7 @@ public class ChatResource {
             return ChatEvent.info("Cancelled");
         }
         actorSystem.getChatActor().tellNow(ChatActor::cancel);
-        actorSystem.getQueueActor().tell(com.scivicslab.chatui.core.actor.QueueActor::clearMcpMessages);
+        actorSystem.getQueueActor().tell(com.scivicslab.chatui.core.actor.QueueActor::clearAgentMessages);
         return ChatEvent.info("Cancelled");
     }
 

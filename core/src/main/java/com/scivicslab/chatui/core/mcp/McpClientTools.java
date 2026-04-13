@@ -1,6 +1,6 @@
 package com.scivicslab.chatui.core.mcp;
 
-import com.scivicslab.chatui.core.actor.LlmConsoleActorSystem;
+import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.rest.ChatResource;
 import io.quarkiverse.mcp.server.Tool;
 import io.quarkiverse.mcp.server.ToolArg;
@@ -20,7 +20,7 @@ public class McpClientTools {
     private static final Logger logger = Logger.getLogger(McpClientTools.class.getName());
 
     @Inject
-    LlmConsoleActorSystem actorSystem;
+    ChatUiActorSystem actorSystem;
 
     @Inject
     ChatResource chatResource;

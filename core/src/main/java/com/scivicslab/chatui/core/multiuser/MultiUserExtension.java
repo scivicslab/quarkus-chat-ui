@@ -16,7 +16,7 @@ import java.util.function.Consumer;
  * classpath the application runs in single-user mode. When an implementation is present
  * (e.g. {@code plugin-openai-compat-multiuser}), it is activated automatically.</p>
  *
- * <p>{@link #initialize} is called once by {@code LlmConsoleActorSystem} after the actor
+ * <p>{@link #initialize} is called once by {@code ChatUiActorSystem} after the actor
  * system is set up, passing in the shared resources the implementation needs.</p>
  */
 public interface MultiUserExtension {

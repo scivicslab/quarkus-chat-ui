@@ -297,8 +297,8 @@ class QueueActorTest {
     }
 
     @Test
-    @DisplayName("clearMcpMessages removes only mcp-sourced items, leaving human items")
-    void clearMcpMessages_removesOnlyMcpItems() throws Exception {
+    @DisplayName("clearAgentMessages removes only agent-sourced items, leaving human items")
+    void clearAgentMessages_removesOnlyAgentItems() throws Exception {
         List<ChatEvent> events = new ArrayList<>();
 
         @SuppressWarnings("unchecked")
@@ -308,21 +308,21 @@ class QueueActorTest {
 
         queueRef.tell(q -> q.enqueue("Human question", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("MCP reply A", null, "queue", 0, events::add, chatActorRef, queueRef, "mcp"))
+        queueRef.tell(q -> q.enqueue("Agent reply A", null, "queue", 0, events::add, chatActorRef, queueRef, "agent:localhost:28010"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("MCP reply B", null, "queue", 0, events::add, chatActorRef, queueRef, "mcp"))
+        queueRef.tell(q -> q.enqueue("Agent reply B", null, "queue", 0, events::add, chatActorRef, queueRef, "agent:localhost:28011"))
                 .get(5, TimeUnit.SECONDS);
 
         assertEquals(3, queueActor.getQueueSize());
 
-        queueRef.tell(QueueActor::clearMcpMessages).get(5, TimeUnit.SECONDS);
+        queueRef.tell(QueueActor::clearAgentMessages).get(5, TimeUnit.SECONDS);
 
         assertEquals(1, queueActor.getQueueSize());
     }
 
     @Test
-    @DisplayName("clearMcpMessages on all-human queue removes nothing")
-    void clearMcpMessages_allHuman_removesNothing() throws Exception {
+    @DisplayName("clearAgentMessages on all-human queue removes nothing")
+    void clearAgentMessages_allHuman_removesNothing() throws Exception {
         List<ChatEvent> events = new ArrayList<>();
 
         @SuppressWarnings("unchecked")
@@ -335,7 +335,7 @@ class QueueActorTest {
         queueRef.tell(q -> q.enqueue("Q2", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
                 .get(5, TimeUnit.SECONDS);
 
-        queueRef.tell(QueueActor::clearMcpMessages).get(5, TimeUnit.SECONDS);
+        queueRef.tell(QueueActor::clearAgentMessages).get(5, TimeUnit.SECONDS);
 
         assertEquals(2, queueActor.getQueueSize());
     }
