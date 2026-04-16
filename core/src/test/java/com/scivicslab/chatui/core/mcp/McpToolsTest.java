@@ -54,7 +54,7 @@ class McpToolsTest {
         var stubActorSystem = new StubActorSystem(chatRef, queueRef, provider);
 
         // Build a stub ChatResource that captures emitted SSE events
-        emittedEvents = new ArrayList<>();
+        emittedEvents = new java.util.concurrent.CopyOnWriteArrayList<>();
         var stubChatResource = new StubChatResource(emittedEvents, chatRef);
 
         // Construct McpTools and inject dependencies via reflection

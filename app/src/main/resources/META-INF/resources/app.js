@@ -1500,9 +1500,13 @@
             return;
         }
 
-        // Slash commands via REST (always immediate, never queued)
+        // Slash commands: try skill injection first, then fallback to REST
         if (text.startsWith('/')) {
-            executeSlashCommand(text);
+            hideSkillSuggest();
+            var spaceIdx = text.indexOf(' ');
+            var cmdName = spaceIdx > 0 ? text.slice(1, spaceIdx) : text.slice(1);
+            var cmdArgs = spaceIdx > 0 ? text.slice(spaceIdx + 1).trim() : '';
+            executeSkillCommand(cmdName, cmdArgs, text);
             return;
         }
 
@@ -1529,6 +1533,129 @@
             appendMessage('error', 'Command failed: ' + e.message);
         }
     }
+
+    // ── Skill command execution ───────────────────────────────────────────────
+
+    var skillsCache = null; // cached { skills: [{name, description}] }
+
+    function loadSkillsCache() {
+        if (skillsCache) return Promise.resolve(skillsCache);
+        return fetch('/api/extensions')
+            .then(function(r) { return r.json(); })
+            .then(function(d) { skillsCache = d; return skillsCache; });
+    }
+
+    /** Strip YAML frontmatter (--- ... ---) from markdown text. */
+    function stripFrontmatter(md) {
+        var lines = md.split('\n');
+        if (!lines.length || lines[0].trim() !== '---') return md;
+        for (var i = 1; i < lines.length; i++) {
+            if (lines[i].trim() === '---') {
+                return lines.slice(i + 1).join('\n').replace(/^\n+/, '');
+            }
+        }
+        return md;
+    }
+
+    /**
+     * Try to load cmdName as a skill. If found, inject content + args and queue
+     * as a regular prompt. If not found (404), fall back to REST slash command.
+     */
+    async function executeSkillCommand(cmdName, cmdArgs, originalText) {
+        try {
+            var resp = await fetch('/api/extensions/content?type=skills&name='
+                + encodeURIComponent(cmdName));
+            if (!resp.ok) {
+                // Not a skill — delegate to original slash command handler
+                executeSlashCommand(originalText);
+                return;
+            }
+            var raw = await resp.text();
+            var skillBody = stripFrontmatter(raw);
+            // Combine: skill instructions + separator + user arguments
+            var combined = cmdArgs
+                ? skillBody + '\n\n---\n\n' + cmdArgs
+                : skillBody;
+            addToQueue(combined);
+            if (!busy) {
+                processQueue();
+            } else {
+                renderQueue();
+                showQueue();
+            }
+        } catch (e) {
+            appendMessage('error', 'Skill load failed: ' + e.message);
+        }
+    }
+
+    // ── Skill suggest popup ───────────────────────────────────────────────────
+
+    var skillSuggest     = document.getElementById('skill-suggest');
+    var skillSuggestList = [];   // currently shown skills
+    var skillSuggestIdx  = -1;   // keyboard selection index
+
+    function renderSkillSuggest(skills, typed) {
+        skillSuggestList = skills;
+        skillSuggestIdx  = -1;
+        skillSuggest.innerHTML = skills.map(function(s, i) {
+            // Bold-highlight the typed prefix
+            var hi = '/' + escapeHtml(typed)
+                   + '<em>' + escapeHtml(s.name.slice(typed.length)) + '</em>';
+            return '<div class="skill-suggest-item" data-idx="' + i + '">'
+                + '<span class="skill-suggest-name">' + hi + '</span>'
+                + '<span class="skill-suggest-desc">'
+                + escapeHtml(s.description || '') + '</span>'
+                + '</div>';
+        }).join('');
+        skillSuggest.style.display = 'block';
+    }
+
+    function hideSkillSuggest() {
+        skillSuggest.style.display = 'none';
+        skillSuggestList = [];
+        skillSuggestIdx  = -1;
+    }
+
+    function applySkillSuggest(idx) {
+        var item = skillSuggestList[idx];
+        if (!item) return;
+        promptInput.value = '/' + item.name + ' ';
+        promptInput.focus();
+        hideSkillSuggest();
+        autoResize();
+    }
+
+    function updateSkillSuggest() {
+        var val = promptInput.value;
+        // Only trigger when the whole input starts with /  and has no space yet
+        if (!val.startsWith('/') || val.startsWith('/btw')) {
+            hideSkillSuggest();
+            return;
+        }
+        if (val.indexOf(' ') >= 0) {
+            hideSkillSuggest(); // command already completed
+            return;
+        }
+        var typed = val.slice(1); // text after /
+        loadSkillsCache().then(function(cache) {
+            var matches = (cache.skills || []).filter(function(s) {
+                return s.name.toLowerCase().startsWith(typed.toLowerCase());
+            });
+            // Hide if no matches, or the only match is an exact hit (already complete)
+            if (!matches.length
+                || (matches.length === 1 && matches[0].name.toLowerCase() === typed.toLowerCase())) {
+                hideSkillSuggest();
+                return;
+            }
+            renderSkillSuggest(matches, typed);
+        }).catch(hideSkillSuggest);
+    }
+
+    skillSuggest.addEventListener('click', function(e) {
+        var item = e.target.closest('.skill-suggest-item');
+        if (!item) return;
+        applySkillSuggest(parseInt(item.dataset.idx, 10));
+    });
 
     async function executePrompt(text) {
         // Display user message
@@ -1706,6 +1833,36 @@
     // --- Input handling (IME-safe) ---
 
     promptInput.addEventListener('keydown', function (e) {
+        // Skill suggest popup navigation
+        if (skillSuggest.style.display !== 'none' && skillSuggestList.length > 0) {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                hideSkillSuggest();
+                return;
+            }
+            if (e.key === 'ArrowDown' || (e.key === 'Tab' && !e.shiftKey)) {
+                e.preventDefault();
+                skillSuggestIdx = Math.min(skillSuggestIdx + 1, skillSuggestList.length - 1);
+                skillSuggest.querySelectorAll('.skill-suggest-item').forEach(function(el, i) {
+                    el.classList.toggle('selected', i === skillSuggestIdx);
+                });
+                return;
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                skillSuggestIdx = Math.max(skillSuggestIdx - 1, 0);
+                skillSuggest.querySelectorAll('.skill-suggest-item').forEach(function(el, i) {
+                    el.classList.toggle('selected', i === skillSuggestIdx);
+                });
+                return;
+            }
+            if (e.key === 'Enter' && !e.shiftKey && skillSuggestIdx >= 0) {
+                e.preventDefault();
+                applySkillSuggest(skillSuggestIdx);
+                return;
+            }
+        }
+
         // Prediction popup navigation
         if (predictPopup.style.display !== 'none' && predictCandidates.length > 0) {
             if (e.key === 'Escape') {
@@ -1763,6 +1920,8 @@
         if (predictPopup.style.display !== 'none') {
             hidePredictPopup();
         }
+        // Update skill suggest popup
+        updateSkillSuggest();
     });
 
     promptInput.addEventListener('blur', function () {
@@ -1770,6 +1929,9 @@
         setTimeout(function () {
             if (!predictPopup.contains(document.activeElement)) {
                 hidePredictPopup();
+            }
+            if (!skillSuggest.contains(document.activeElement)) {
+                hideSkillSuggest();
             }
         }, 200);
     });
@@ -2025,6 +2187,147 @@
             document.getElementById('btw-overlay').style.display = 'none';
         }
     });
+
+    // ── Extensions panel ──────────────────────────────────────────────────────
+    (function initExtensions() {
+        var extBtn     = document.getElementById('extensions-btn');
+        var extPanel   = document.getElementById('extensions-panel');
+        var extTabs    = document.querySelectorAll('.ext-tab');
+        var extContent = document.getElementById('ext-content');
+        var extData    = null;
+        var extActive  = 'skills';
+
+        function renderTab(tab) {
+            extActive = tab;
+            if (!extData) { extContent.innerHTML = '<div class="ext-loading">Loading…</div>'; return; }
+            var map = {
+                skills: [['Command','Description'], extData.skills,
+                          function(r) { return ['/'+r.name, r.description]; }, 'skills'],
+                agents: [['Agent','Description'], extData.agents,
+                          function(r) { return [r.name, r.description]; }, 'agents'],
+                hooks:  [['Event','Matcher','Command'], extData.hooks,
+                          function(r) { return [r.event, r.matcher||'—', r.command]; }, null],
+                mcp:    [['Name','Type','Description / Endpoint'], extData.mcpServers,
+                          function(r) { return [r.name, r.type, r.description||r.endpoint||'']; }, null]
+            };
+            var cfg = map[tab];
+            if (!cfg) return;
+            extContent.innerHTML = buildTable(cfg[0], cfg[1], cfg[2], cfg[3]);
+        }
+
+        function buildTable(headers, rows, rowFn, clickType) {
+            if (!rows || !rows.length)
+                return '<div class="ext-loading">No entries found.</div>';
+            var h = '<table class="ext-table"><thead><tr>';
+            headers.forEach(function(hd) { h += '<th>'+esc(hd)+'</th>'; });
+            h += '</tr></thead><tbody>';
+            rows.forEach(function(r) {
+                var cells = rowFn(r);
+                var rowCls = clickType ? ' class="ext-clickable"' : '';
+                var rowData = clickType
+                    ? ' data-type="'+esc(clickType)+'" data-name="'+esc(r.name||'')+'"'
+                    : '';
+                h += '<tr'+rowCls+rowData+'>';
+                cells.forEach(function(c, i) {
+                    var cls = i===0 ? 'ext-name' : (i===headers.length-1 ? 'ext-desc' : '');
+                    h += '<td'+(cls?' class="'+cls+'"':'')+'>'+esc(c||'')+'</td>';
+                });
+                h += '</tr>';
+            });
+            return h + '</tbody></table>';
+        }
+
+        function esc(s) {
+            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        function setTabCounts() {
+            if (!extData) return;
+            var c = {skills:extData.skills.length, agents:extData.agents.length,
+                     hooks:extData.hooks.length, mcp:extData.mcpServers.length};
+            var labels = {skills:'Skills',agents:'Agents',hooks:'Hooks',mcp:'MCP Servers'};
+            extTabs.forEach(function(t) {
+                var k = t.dataset.tab;
+                t.innerHTML = labels[k]+' <span class="ext-count">'+'('+( c[k]||0 )+')'+'</span>';
+            });
+        }
+
+        function loadData() {
+            if (extData) return;
+            fetch('/api/extensions')
+                .then(function(r) { return r.json(); })
+                .then(function(d) { extData = d; setTabCounts(); renderTab(extActive); })
+                .catch(function(e) {
+                    extContent.innerHTML = '<div class="ext-loading">Error: '+esc(e.message)+'</div>';
+                });
+        }
+
+        extBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            var open = extPanel.style.display !== 'none';
+            extPanel.style.display = open ? 'none' : 'flex';
+            if (!open) loadData();
+        });
+
+        extTabs.forEach(function(t) {
+            t.addEventListener('click', function() {
+                extTabs.forEach(function(x) { x.classList.remove('active'); });
+                t.classList.add('active');
+                renderTab(t.dataset.tab);
+            });
+        });
+
+        // Click on skill/agent row → open content dialog
+        extContent.addEventListener('click', function(e) {
+            var row = e.target.closest('tr[data-type]');
+            if (!row) return;
+            openExtDialog(row.dataset.type, row.dataset.name);
+        });
+
+        document.addEventListener('click', function(e) {
+            if (!document.getElementById('extensions-menu').contains(e.target))
+                extPanel.style.display = 'none';
+        });
+
+        // ── Extension content dialog ─────────────────────────────────────────
+        var extDialogOverlay = document.getElementById('ext-dialog-overlay');
+        var extDialogTitle   = document.getElementById('ext-dialog-title');
+        var extDialogBody    = document.getElementById('ext-dialog-body');
+
+        function openExtDialog(type, name) {
+            var prefix = type === 'skills' ? '/' : '';
+            extDialogTitle.textContent = prefix + name;
+            extDialogBody.innerHTML = '<div class="ext-loading">Loading…</div>';
+            extDialogOverlay.style.display = 'flex';
+            fetch('/api/extensions/content?type=' + encodeURIComponent(type)
+                  + '&name=' + encodeURIComponent(name))
+                .then(function(r) {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.text();
+                })
+                .then(function(md) {
+                    extDialogBody.innerHTML = (typeof marked !== 'undefined')
+                        ? marked.parse(md)
+                        : '<pre>' + esc(md) + '</pre>';
+                })
+                .catch(function(err) {
+                    extDialogBody.innerHTML = '<div class="ext-loading">Error: ' + esc(err.message) + '</div>';
+                });
+        }
+
+        document.getElementById('ext-dialog-close').addEventListener('click', function() {
+            extDialogOverlay.style.display = 'none';
+        });
+        extDialogOverlay.addEventListener('click', function(e) {
+            if (e.target === extDialogOverlay) extDialogOverlay.style.display = 'none';
+        });
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && extDialogOverlay.style.display !== 'none')
+                extDialogOverlay.style.display = 'none';
+        });
+    })();
+    // ── End Extensions panel ──────────────────────────────────────────────────
 
     } // end doInitApp
 })();

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Console - Claude</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="styles.css?v=29">
+    <link rel="stylesheet" href="styles.css?v=31">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -47,6 +47,20 @@
                 <span id="activity-label"></span>
                 <span id="user-label" style="display:none"></span>
                 <button id="logout-btn" style="display:none" title="Logout">Logout</button>
+                <div id="extensions-menu" class="ext-menu">
+                    <button id="extensions-btn" title="Show installed Skills, Agents, Hooks and MCP Servers">Extensions ▾</button>
+                    <div id="extensions-panel" class="ext-panel" style="display:none;">
+                        <div class="ext-tabs">
+                            <button class="ext-tab active" data-tab="skills">Skills</button>
+                            <button class="ext-tab" data-tab="agents">Agents</button>
+                            <button class="ext-tab" data-tab="hooks">Hooks</button>
+                            <button class="ext-tab" data-tab="mcp">MCP Servers</button>
+                        </div>
+                        <div id="ext-content" class="ext-content">
+                            <div class="ext-loading">Loading…</div>
+                        </div>
+                    </div>
+                </div>
                 <button id="save-chat-btn" title="Save conversation as Markdown">Save Chat</button>
                 <button id="clear-chat-btn" title="Clear chat display (session continues)">Clear</button>
                 <span id="connection-status" class="disconnected">disconnected</span>
@@ -70,6 +84,7 @@
         <footer>
             <div id="input-area" style="position:relative">
                 <div id="predict-popup" style="display:none"></div>
+                <div id="skill-suggest" style="display:none"></div>
                 <textarea id="prompt-input" placeholder="Type a message... (Shift+Enter to send, Tab to predict, /btw question for side questions)" rows="5"></textarea>
                 <div id="buttons">
                     <button id="send-btn" title="Send (Shift+Enter)">Send</button>
@@ -98,6 +113,16 @@
             <p id="auth-error" style="color:var(--error-text,#f44);display:none"></p>
         </div>
     </div>
-    <script src="app.js?v=38"></script>
+    <!-- Extensions content dialog -->
+    <div id="ext-dialog-overlay" style="display:none">
+        <div id="ext-dialog">
+            <div id="ext-dialog-header">
+                <span id="ext-dialog-title"></span>
+                <button id="ext-dialog-close" title="Close">&#x00D7;</button>
+            </div>
+            <div id="ext-dialog-body"></div>
+        </div>
+    </div>
+    <script src="app.js?v=40"></script>
 </body>
 </html>
