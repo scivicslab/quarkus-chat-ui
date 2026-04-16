@@ -10,7 +10,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -24,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Pure JUnit 5 tests for QueueActor.
  *
  * <p>Uses a real ActorSystem with a minimal stub ChatActor to verify
- * enqueue, dequeue, cancel_and_send, wait-with-timeout, and clearMcpMessages behavior.</p>
+ * enqueue, dequeue, cancel_and_send, and clearAgentMessages behavior.</p>
  */
 class QueueActorTest {
 
@@ -54,23 +53,49 @@ class QueueActorTest {
     }
 
     @Test
-    @DisplayName("queue mode: enqueue adds item and emits info message")
-    void queueMode_addsItemAndEmitsInfo() throws Exception {
+    @DisplayName("queue mode: idle ChatActor dispatches prompt immediately")
+    void queueMode_idleChatActor_dispatchesImmediately() throws Exception {
         List<ChatEvent> events = new ArrayList<>();
 
         @SuppressWarnings("unchecked")
         ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
 
         queueRef.tell(q -> q.enqueue(
-                "Hello", "gpt-4", "queue", 0,
-                events::add, chatActorRef, queueRef, "human"
+                "Hello", "gpt-4", "queue",
+                events::add, chatActorRef, "human"
         )).get(5, TimeUnit.SECONDS);
+
+        // Give the cross-actor tell a moment to process
+        Thread.sleep(200);
+
+        List<String> prompts = chatRef.ask(StubChatActor::getReceivedPrompts).get(5, TimeUnit.SECONDS);
+        assertEquals(1, prompts.size());
+        assertEquals("Hello", prompts.get(0));
+        // Queue is empty after immediate dispatch
+        assertEquals(0, queueActor.getQueueSize());
+    }
+
+    @Test
+    @DisplayName("queue mode: busy ChatActor keeps item in queue")
+    void queueMode_busyChatActor_keepsInQueue() throws Exception {
+        List<ChatEvent> events = new ArrayList<>();
+
+        @SuppressWarnings("unchecked")
+        ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
+
+        chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
+
+        queueRef.tell(q -> q.enqueue(
+                "Hello", "gpt-4", "queue",
+                events::add, chatActorRef, "human"
+        )).get(5, TimeUnit.SECONDS);
+
+        Thread.sleep(200);
 
         assertEquals(1, queueActor.getQueueSize());
         assertTrue(queueActor.hasPending());
-        assertEquals(1, events.size());
-        assertEquals("info", events.get(0).type());
-        assertTrue(events.get(0).content().contains("Queued"));
+        List<String> prompts = chatRef.ask(StubChatActor::getReceivedPrompts).get(5, TimeUnit.SECONDS);
+        assertTrue(prompts.isEmpty());
     }
 
     @Test
@@ -82,16 +107,18 @@ class QueueActorTest {
         @SuppressWarnings("unchecked")
         ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
 
+        chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
+
         // Enqueue a regular item first
         queueRef.tell(q -> q.enqueue(
-                "First", "gpt-4", "queue", 0,
-                events1::add, chatActorRef, queueRef, "human"
+                "First", "gpt-4", "queue",
+                events1::add, chatActorRef, "human"
         )).get(5, TimeUnit.SECONDS);
 
         // Enqueue cancel_and_send — should go to front
         queueRef.tell(q -> q.enqueue(
-                "Urgent", "gpt-4", "cancel_and_send", 0,
-                events2::add, chatActorRef, queueRef, "human"
+                "Urgent", "gpt-4", "cancel_and_send",
+                events2::add, chatActorRef, "human"
         )).get(5, TimeUnit.SECONDS);
 
         assertEquals(2, queueActor.getQueueSize());
@@ -106,25 +133,6 @@ class QueueActorTest {
     }
 
     @Test
-    @DisplayName("wait mode: enqueue adds item with timeout info")
-    void waitMode_addsItemWithTimeoutInfo() throws Exception {
-        List<ChatEvent> events = new ArrayList<>();
-
-        @SuppressWarnings("unchecked")
-        ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
-
-        queueRef.tell(q -> q.enqueue(
-                "Wait prompt", "gpt-4", "wait", 30,
-                events::add, chatActorRef, queueRef, "human"
-        )).get(5, TimeUnit.SECONDS);
-
-        assertEquals(1, queueActor.getQueueSize());
-        assertEquals(1, events.size());
-        assertTrue(events.get(0).content().contains("Waiting"));
-        assertTrue(events.get(0).content().contains("30"));
-    }
-
-    @Test
     @DisplayName("onPromptComplete dequeues and sends when ChatActor is idle")
     void onPromptComplete_dequeuesWhenIdle() throws Exception {
         List<ChatEvent> events = new ArrayList<>();
@@ -132,21 +140,22 @@ class QueueActorTest {
         @SuppressWarnings("unchecked")
         ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
 
-        // Enqueue a prompt
+        // Make busy so enqueue does not auto-dispatch
+        chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
+
         queueRef.tell(q -> q.enqueue(
-                "Hello", "gpt-4", "queue", 0,
-                events::add, chatActorRef, queueRef, "human"
+                "Hello", "gpt-4", "queue",
+                events::add, chatActorRef, "human"
         )).get(5, TimeUnit.SECONDS);
 
         assertEquals(1, queueActor.getQueueSize());
 
-        // ChatActor is not busy (stub default), so onPromptComplete should trigger dequeue
+        // Make idle, then signal completion
+        chatRef.tell(StubChatActor::makeIdle).get(5, TimeUnit.SECONDS);
         queueRef.tell(q -> q.onPromptComplete(chatActorRef)).get(5, TimeUnit.SECONDS);
 
-        // Give the cross-actor tell a moment to process
         Thread.sleep(200);
 
-        // The stub records prompts it received
         List<String> prompts = chatRef.ask(StubChatActor::getReceivedPrompts).get(5, TimeUnit.SECONDS);
         assertEquals(1, prompts.size());
         assertEquals("Hello", prompts.get(0));
@@ -162,16 +171,18 @@ class QueueActorTest {
         @SuppressWarnings("unchecked")
         ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
 
-        queueRef.tell(q -> q.enqueue("First", null, "queue", 0, events1::add, chatActorRef, queueRef, "human"))
+        chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
+
+        queueRef.tell(q -> q.enqueue("First", null, "queue", events1::add, chatActorRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Second", null, "queue", 0, events2::add, chatActorRef, queueRef, "human"))
+        queueRef.tell(q -> q.enqueue("Second", null, "queue", events2::add, chatActorRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Third", null, "queue", 0, events3::add, chatActorRef, queueRef, "human"))
+        queueRef.tell(q -> q.enqueue("Third", null, "queue", events3::add, chatActorRef, "human"))
                 .get(5, TimeUnit.SECONDS);
 
         assertEquals(3, queueActor.getQueueSize());
 
-        // Dequeue first
+        chatRef.tell(StubChatActor::makeIdle).get(5, TimeUnit.SECONDS);
         queueRef.tell(q -> q.onPromptComplete(chatActorRef)).get(5, TimeUnit.SECONDS);
         Thread.sleep(200);
 
@@ -189,17 +200,15 @@ class QueueActorTest {
         @SuppressWarnings("unchecked")
         ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
 
-        // Make ChatActor busy so dequeue doesn't happen immediately
         chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
 
-        queueRef.tell(q -> q.enqueue("Normal", null, "queue", 0, eventsA::add, chatActorRef, queueRef, "human"))
+        queueRef.tell(q -> q.enqueue("Normal", null, "queue", eventsA::add, chatActorRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Urgent", null, "cancel_and_send", 0, eventsB::add, chatActorRef, queueRef, "human"))
+        queueRef.tell(q -> q.enqueue("Urgent", null, "cancel_and_send", eventsB::add, chatActorRef, "human"))
                 .get(5, TimeUnit.SECONDS);
 
         assertEquals(2, queueActor.getQueueSize());
 
-        // Make ChatActor idle again, then dequeue
         chatRef.tell(StubChatActor::makeIdle).get(5, TimeUnit.SECONDS);
         queueRef.tell(q -> q.onPromptComplete(chatActorRef)).get(5, TimeUnit.SECONDS);
         Thread.sleep(200);
@@ -208,92 +217,6 @@ class QueueActorTest {
         List<String> prompts = chatRef.ask(StubChatActor::getReceivedPrompts).get(5, TimeUnit.SECONDS);
         assertEquals(1, prompts.size());
         assertEquals("Urgent", prompts.get(0));
-    }
-
-    @Test
-    @DisplayName("tick does nothing when queue is empty")
-    void tick_emptyQueue_doesNothing() throws Exception {
-        @SuppressWarnings("unchecked")
-        ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
-
-        // Should not throw or cause any side effects
-        queueRef.tell(q -> q.tick(chatActorRef)).get(5, TimeUnit.SECONDS);
-
-        List<String> prompts = chatRef.ask(StubChatActor::getReceivedPrompts).get(5, TimeUnit.SECONDS);
-        assertTrue(prompts.isEmpty());
-    }
-
-    @Test
-    @DisplayName("tick dequeues when ChatActor is idle")
-    void tick_idleChatActor_dequeues() throws Exception {
-        List<ChatEvent> events = new ArrayList<>();
-
-        @SuppressWarnings("unchecked")
-        ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
-
-        queueRef.tell(q -> q.enqueue("Tick test", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
-                .get(5, TimeUnit.SECONDS);
-
-        queueRef.tell(q -> q.tick(chatActorRef)).get(5, TimeUnit.SECONDS);
-        Thread.sleep(300);
-
-        List<String> prompts = chatRef.ask(StubChatActor::getReceivedPrompts).get(5, TimeUnit.SECONDS);
-        assertEquals(1, prompts.size());
-        assertEquals("Tick test", prompts.get(0));
-    }
-
-    @Test
-    @DisplayName("tick does not dequeue when ChatActor is busy")
-    void tick_busyChatActor_doesNotDequeue() throws Exception {
-        List<ChatEvent> events = new ArrayList<>();
-
-        @SuppressWarnings("unchecked")
-        ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
-
-        chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
-
-        queueRef.tell(q -> q.enqueue("Blocked", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
-                .get(5, TimeUnit.SECONDS);
-
-        queueRef.tell(q -> q.tick(chatActorRef)).get(5, TimeUnit.SECONDS);
-        Thread.sleep(200);
-
-        List<String> prompts = chatRef.ask(StubChatActor::getReceivedPrompts).get(5, TimeUnit.SECONDS);
-        assertTrue(prompts.isEmpty());
-        assertEquals(1, queueActor.getQueueSize());
-    }
-
-    @Test
-    @DisplayName("wait mode with expired timeout cancels and emits timeout info")
-    void waitMode_expiredTimeout_cancelsAndEmitsInfo() throws Exception {
-        List<ChatEvent> events = new ArrayList<>();
-
-        @SuppressWarnings("unchecked")
-        ActorRef<ChatActor> chatActorRef = (ActorRef<ChatActor>) (ActorRef<?>) chatRef;
-
-        chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
-
-        queueRef.tell(q -> q.enqueue("Timed out", null, "wait", 1, events::add, chatActorRef, queueRef, "human"))
-                .get(5, TimeUnit.SECONDS);
-
-        // Wait so the 1-second timeout has clearly expired
-        Thread.sleep(1100);
-
-        // Reset cancel flag to check if tick triggers cancel
-        chatRef.tell(StubChatActor::resetCancelled).get(5, TimeUnit.SECONDS);
-
-        queueRef.tell(q -> q.tick(chatActorRef)).get(5, TimeUnit.SECONDS);
-        Thread.sleep(200);
-
-        // Should have cancelled the current prompt
-        Boolean cancelled = chatRef.ask(StubChatActor::wasCancelled).get(5, TimeUnit.SECONDS);
-        assertTrue(cancelled);
-
-        // Should have emitted a timeout info event
-        boolean hasTimeoutMsg = events.stream()
-                .anyMatch(e -> "info".equals(e.type()) && e.content() != null
-                        && e.content().contains("timeout expired"));
-        assertTrue(hasTimeoutMsg, "Expected a timeout expired info event");
     }
 
     @Test
@@ -306,11 +229,11 @@ class QueueActorTest {
 
         chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
 
-        queueRef.tell(q -> q.enqueue("Human question", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
+        queueRef.tell(q -> q.enqueue("Human question", null, "queue", events::add, chatActorRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Agent reply A", null, "queue", 0, events::add, chatActorRef, queueRef, "agent:localhost:28010"))
+        queueRef.tell(q -> q.enqueue("Agent reply A", null, "queue", events::add, chatActorRef, "agent:localhost:28010"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Agent reply B", null, "queue", 0, events::add, chatActorRef, queueRef, "agent:localhost:28011"))
+        queueRef.tell(q -> q.enqueue("Agent reply B", null, "queue", events::add, chatActorRef, "agent:localhost:28011"))
                 .get(5, TimeUnit.SECONDS);
 
         assertEquals(3, queueActor.getQueueSize());
@@ -330,9 +253,9 @@ class QueueActorTest {
 
         chatRef.tell(StubChatActor::makeBusy).get(5, TimeUnit.SECONDS);
 
-        queueRef.tell(q -> q.enqueue("Q1", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
+        queueRef.tell(q -> q.enqueue("Q1", null, "queue", events::add, chatActorRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Q2", null, "queue", 0, events::add, chatActorRef, queueRef, "human"))
+        queueRef.tell(q -> q.enqueue("Q2", null, "queue", events::add, chatActorRef, "human"))
                 .get(5, TimeUnit.SECONDS);
 
         queueRef.tell(QueueActor::clearAgentMessages).get(5, TimeUnit.SECONDS);
@@ -366,6 +289,12 @@ class QueueActorTest {
         @Override
         public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
                                 ActorRef<ChatActor> self, CompletableFuture<Void> done) {
+            startPrompt(prompt, model, emitter, self, done, null);
+        }
+
+        @Override
+        public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
+                                ActorRef<ChatActor> self, CompletableFuture<Void> done, String resultKey) {
             receivedPrompts.add(prompt);
             // Immediately complete — no real LLM call
             done.complete(null);

@@ -9,9 +9,13 @@ import com.scivicslab.pojoactor.core.ActorRef;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.logging.Level;
@@ -21,11 +25,11 @@ import java.util.logging.Logger;
  * Actor owning the entire chat session state.
  *
  * <p>All fields are plain (no volatile / synchronized) — thread safety is guaranteed
- * by the actor's sequential message processing. The one exception is {@code activeThread},
- * which is marked volatile so that {@code cancel()} can interrupt it from any thread.</p>
+ * by the actor's sequential message processing.</p>
  *
- * <p>Heavy work (LLM I/O) runs on a spawned virtual thread so the actor remains idle
- * and responsive during a prompt (e.g., for {@code cancel()} or {@code publishLog()}).</p>
+ * <p>Heavy work (LLM I/O) is delegated to a child {@code ActorRef<LlmProvider>}
+ * via {@code providerRef.ask()}, keeping this actor's message queue free and responsive
+ * during a prompt (e.g., for {@code cancel()} or {@code publishLog()}).</p>
  *
  * <p>Provider-specific logic lives entirely in the {@link LlmProvider} implementation.
  * This actor only orchestrates the prompt lifecycle and manages shared state.</p>
@@ -39,11 +43,12 @@ public class ChatActor {
     private final LlmProvider provider;
     private final AuthMode authMode;
 
+    /** Child actor that owns the blocking LLM I/O thread. Set by {@link #init}. */
+    private ActorRef<LlmProvider> providerRef;
+
     private boolean busy;
     private String apiKey;
     private final LinkedList<HistoryEntry> conversationHistory = new LinkedList<>();
-
-    private volatile Thread activeThread;
 
     private ActorRef<WatchdogActor> watchdog;
     private ActorRef<QueueActor> queueActor;
@@ -52,6 +57,19 @@ public class ChatActor {
     private int logHead = 0;
     private int logCount = 0;
     private Consumer<ChatEvent> sseEmitter;
+
+    // ---- MCP result accumulation ----
+    // Keyed by UUID assigned at submitPrompt time. LRU-evicts oldest when >50 entries.
+    private final Map<String, String> completedResults = new LinkedHashMap<>() {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
+            return size() > 50;
+        }
+    };
+    // UUIDs that have been registered (via submitPrompt) but not yet started processing
+    private final Set<String> pendingResultKeys = new HashSet<>();
+    // UUID of the prompt currently being processed, or null
+    private String activeResultKey;
 
     /**
      * Creates a new ChatActor bound to the given LLM provider.
@@ -188,11 +206,25 @@ public class ChatActor {
     // ---- Chat lifecycle ----
 
     /**
-     * Begins an asynchronous prompt. Spawns a virtual thread for blocking LLM I/O,
-     * keeping the actor idle for other messages (cancel, log, etc.).
+     * Begins an asynchronous prompt. Dispatches blocking LLM I/O onto the managed
+     * {@code ioPool}, returning immediately so the actor can process other messages
+     * (cancel, log, etc.) while the request is in flight.
      */
     public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
                             ActorRef<ChatActor> self, CompletableFuture<Void> done) {
+        startPrompt(prompt, model, emitter, self, done, null);
+    }
+
+    /**
+     * Begins an asynchronous prompt with optional result accumulation.
+     *
+     * <p>When {@code resultKey} is non-null (MCP-submitted prompts), the full assistant
+     * response text is accumulated and stored in {@code completedResults} under that key
+     * so that {@link #getCompletedResult(String)} can return it after completion.</p>
+     */
+    public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
+                            ActorRef<ChatActor> self, CompletableFuture<Void> done,
+                            String resultKey) {
         if (busy) {
             emitter.accept(ChatEvent.error("Already processing a prompt. Please wait or cancel."));
             done.complete(null);
@@ -206,50 +238,67 @@ public class ChatActor {
         }
 
         busy = true;
+        recordHistory("user", prompt);
+        if (resultKey != null) {
+            pendingResultKeys.remove(resultKey);
+            activeResultKey = resultKey;
+        }
         boolean useWatchdog = watchdog != null && provider.capabilities().supportsWatchdog();
         if (useWatchdog) watchdog.tell(WatchdogActor::onPromptStarted);
 
         final String snapApiKey = apiKey;
-        if (model != null && !model.isBlank()) provider.setModel(model);
 
-        activeThread = Thread.startVirtualThread(() -> {
+        // Delegate blocking I/O to the provider child actor on the managed thread pool
+        // (real threads). Actor message loops run on virtual threads, so long-running
+        // blocking I/O must be dispatched to the managed pool.
+        // This actor returns immediately and remains free for other messages (cancel, log).
+        // whenComplete() queues onPromptComplete() back onto this actor when done.
+        providerRef.ask(p -> {
             try {
+                if (model != null && !model.isBlank()) p.setModel(model);
+
                 Runnable heartbeat = useWatchdog
                         ? () -> watchdog.tell(WatchdogActor::onActivity)
                         : () -> {};
 
                 ProviderContext ctx = new ProviderContext(snapApiKey, List.of(), false, heartbeat);
 
-                self.tell(a -> a.recordHistory("user", prompt));
-
-                // Wrap emitter to intercept assistant content for history
+                // Wrap emitter to intercept assistant content for history and optional result capture
                 StringBuilder assistantBuf = new StringBuilder();
+                StringBuilder resultBuf = (resultKey != null) ? new StringBuilder() : null;
                 Consumer<ChatEvent> wrappedEmitter = event -> {
                     if ("delta".equals(event.type()) && event.content() != null) {
                         assistantBuf.append(event.content());
-                    } else if ("result".equals(event.type()) && !assistantBuf.isEmpty()) {
-                        String content = assistantBuf.toString();
-                        self.tell(a -> a.recordHistory("assistant", content));
+                        if (resultBuf != null) resultBuf.append(event.content());
+                    } else if ("result".equals(event.type())) {
+                        if (!assistantBuf.isEmpty()) {
+                            String content = assistantBuf.toString();
+                            self.tell(b -> b.recordHistory("assistant", content));
+                        }
+                        if (resultBuf != null) {
+                            String captured = resultBuf.toString();
+                            self.tell(b -> b.storeCompletedResult(resultKey, captured));
+                        }
                     }
                     emitter.accept(event);
                 };
 
-                emitter.accept(ChatEvent.status(provider.getCurrentModel(), provider.getSessionId(), true));
-                provider.sendPrompt(prompt, provider.getCurrentModel(), wrappedEmitter, ctx);
+                emitter.accept(ChatEvent.status(p.getCurrentModel(), p.getSessionId(), true));
+                p.sendPrompt(prompt, p.getCurrentModel(), wrappedEmitter, ctx);
 
             } catch (Exception e) {
                 logger.log(Level.WARNING, "Provider sendPrompt failed", e);
                 emitter.accept(ChatEvent.error("Error: " + e.getMessage()));
-            } finally {
-                self.tell(a -> a.onPromptComplete(emitter, done, self));
             }
-        });
+            return null;
+        }, providerRef.system().getManagedThreadPool())
+        .whenComplete((r, ex) -> self.tell(b -> b.onPromptComplete(emitter, done, self)));
     }
 
-    /** Called by the worker virtual thread when LLM processing finishes. */
+    /** Called when LLM processing finishes; queued back onto the actor via {@code self.tell()}. */
     public void onPromptComplete(Consumer<ChatEvent> emitter, CompletableFuture<Void> done, ActorRef<ChatActor> self) {
         busy = false;
-        activeThread = null;
+        activeResultKey = null;
         boolean useWatchdog = watchdog != null && provider.capabilities().supportsWatchdog();
         if (useWatchdog) watchdog.tell(WatchdogActor::onPromptFinished);
 
@@ -265,13 +314,12 @@ public class ChatActor {
     /**
      * Cancels the currently running prompt, if any.
      *
-     * <p>Signals the provider to abort and interrupts the worker virtual thread
-     * so that blocking I/O is terminated promptly.</p>
+     * <p>Uses {@code tellNow()} to bypass the provider actor's queue so that the
+     * cancel signal reaches the provider immediately, even while {@code sendPrompt()}
+     * is blocking the queue.</p>
      */
     public void cancel() {
-        provider.cancel();
-        Thread t = activeThread;
-        if (t != null) t.interrupt();
+        if (providerRef != null) providerRef.tellNow(LlmProvider::cancel);
     }
 
     /**
@@ -384,6 +432,43 @@ public class ChatActor {
     public void setQueueActor(ActorRef<QueueActor> queueActor) { this.queueActor = queueActor; }
 
     /**
+     * Creates the {@code provider} child actor.
+     * Must be called once after this actor's own {@link ActorRef} is available.
+     */
+    public void init(ActorRef<ChatActor> self) {
+        this.providerRef = self.createChild("provider", provider);
+    }
+
+    // ---- MCP result tracking ----
+
+    /** Registers a UUID so that getResultStatus() returns "processing" until the prompt completes. */
+    public void registerPendingResultKey(String key) {
+        pendingResultKeys.add(key);
+    }
+
+    /** Stores the accumulated LLM response text for a completed MCP prompt. */
+    public void storeCompletedResult(String key, String text) {
+        pendingResultKeys.remove(key);
+        completedResults.put(key, text);
+        logger.info("MCP result stored: key=" + key + " length=" + text.length());
+    }
+
+    /**
+     * Returns the status of an MCP result key: "completed", "processing", or "unknown".
+     * "unknown" means the key was never registered with this actor.
+     */
+    public String getResultStatus(String key) {
+        if (completedResults.containsKey(key)) return "completed";
+        if (pendingResultKeys.contains(key) || key.equals(activeResultKey)) return "processing";
+        return "unknown";
+    }
+
+    /** Returns the stored LLM response text for the given MCP result key, or null if not found. */
+    public String getCompletedResult(String key) {
+        return completedResults.get(key);
+    }
+
+    /**
      * Starts the autonomous event monitor.
      *
      * <p>A persistent virtual thread polls the provider for events that arrive outside
@@ -430,38 +515,38 @@ public class ChatActor {
         emitEvent(ChatEvent.status(provider.getCurrentModel(), provider.getSessionId(), true));
         emitEvent(firstEvent);
 
-        // Drain the rest of the autonomous turn in a virtual thread.
+        // Delegate autonomous event drain to the provider child actor on the managed
+        // thread pool (real threads — blocking I/O must not run on virtual threads).
+        // whenComplete() queues onPromptComplete() back onto this actor when the drain ends.
         CompletableFuture<Void> done = new CompletableFuture<>();
         StringBuilder assistantBuf = new StringBuilder();
-        activeThread = Thread.startVirtualThread(() -> {
-            try {
-                while (true) {
-                    Optional<ChatEvent> e;
-                    try {
-                        e = provider.pollAutonomousEvent(30_000);
-                    } catch (InterruptedException ex) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                    if (e.isEmpty()) {
-                        self.tell(a -> a.emitEvent(
-                                ChatEvent.error("Autonomous turn timed out waiting for result")));
-                        break;
-                    }
-                    ChatEvent ce = e.get();
-                    if ("delta".equals(ce.type()) && ce.content() != null) {
-                        assistantBuf.append(ce.content());
-                    } else if ("result".equals(ce.type()) && !assistantBuf.isEmpty()) {
-                        String content = assistantBuf.toString();
-                        self.tell(a -> a.recordHistory("assistant", content));
-                    }
-                    self.tell(a -> a.emitEvent(ce));
-                    if ("result".equals(ce.type())) break;
+        providerRef.ask(p -> {
+            while (true) {
+                Optional<ChatEvent> e;
+                try {
+                    e = p.pollAutonomousEvent(30_000);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
-            } finally {
-                self.tell(a -> a.onPromptComplete(a::emitEvent, done, self));
+                if (e.isEmpty()) {
+                    self.tell(b -> b.emitEvent(
+                            ChatEvent.error("Autonomous turn timed out waiting for result")));
+                    break;
+                }
+                ChatEvent ce = e.get();
+                if ("delta".equals(ce.type()) && ce.content() != null) {
+                    assistantBuf.append(ce.content());
+                } else if ("result".equals(ce.type()) && !assistantBuf.isEmpty()) {
+                    String content = assistantBuf.toString();
+                    self.tell(b -> b.recordHistory("assistant", content));
+                }
+                self.tell(b -> b.emitEvent(ce));
+                if ("result".equals(ce.type())) break;
             }
-        });
+            return null;
+        }, providerRef.system().getManagedThreadPool())
+        .whenComplete((r, ex) -> self.tell(b -> b.onPromptComplete(b::emitEvent, done, self)));
     }
 
     public record HistoryEntry(String role, String content) {}

@@ -33,6 +33,10 @@
       <artifactId>chat-ui-plugin-openai-compat-agent</artifactId>
     </dependency>
     <dependency>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>chat-ui-plugin-mcp-server</artifactId>
+    </dependency>
+    <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-junit5</artifactId>
       <scope>test</scope>

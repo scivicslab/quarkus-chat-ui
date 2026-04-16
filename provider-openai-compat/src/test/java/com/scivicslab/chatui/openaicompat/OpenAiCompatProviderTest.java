@@ -6,7 +6,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -149,6 +152,44 @@ class OpenAiCompatProviderTest {
             provider.cancel();
             provider.cancel();
             // No exception means success
+        }
+
+        @Test
+        @DisplayName("cancel() interrupts the thread registered as sendingThread")
+        void cancel_interruptsSendingThread() throws Exception {
+            AtomicBoolean interrupted = new AtomicBoolean(false);
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch done = new CountDownLatch(1);
+
+            Thread fakeSender = new Thread(() -> {
+                started.countDown();
+                try {
+                    Thread.sleep(10_000); // wait until interrupted
+                } catch (InterruptedException e) {
+                    interrupted.set(true);
+                } finally {
+                    done.countDown();
+                }
+            });
+            fakeSender.setDaemon(true);
+            fakeSender.start();
+            started.await();
+
+            // Inject the thread into the provider as if sendPrompt() was running
+            Field f = OpenAiCompatProvider.class.getDeclaredField("sendingThread");
+            f.setAccessible(true);
+            f.set(provider, fakeSender);
+
+            provider.cancel();
+            done.await();
+
+            assertTrue(interrupted.get(), "cancel() must interrupt the sending thread");
+        }
+
+        @Test
+        @DisplayName("cancel() with no active request does not throw")
+        void cancel_withNoSendingThread_doesNotThrow() {
+            assertDoesNotThrow(() -> provider.cancel());
         }
     }
 

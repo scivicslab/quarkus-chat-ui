@@ -72,9 +72,7 @@ public class ChatResource {
     @Inject
     Instance<UrlFetchService> urlFetchService;
 
-    // ---- Single-user SSE state ----
-    private volatile HttpServerResponse sseResponse;
-    private volatile Long heartbeatTimerId;
+    // Single-user SSE state is now owned by SseActor — no mutable fields here.
 
     // ---- Multi-user SSE state ----
     private final ConcurrentHashMap<String, HttpServerResponse> sseConnections = new ConcurrentHashMap<>();
@@ -98,52 +96,24 @@ public class ChatResource {
     }
 
     private void handleSingleUserSseConnect(RoutingContext rc) {
-        var prev = sseResponse;
-        if (prev != null && !prev.ended()) {
-            try { prev.end(); } catch (Exception ignored) {}
-        }
-        if (heartbeatTimerId != null) {
-            vertx.cancelTimer(heartbeatTimerId);
-        }
-
         var response = rc.response();
         response.setChunked(true);
         response.putHeader("Content-Type", "text/event-stream");
         response.putHeader("Cache-Control", "no-cache");
         response.putHeader("X-Accel-Buffering", "no");
 
-        sseResponse = response;
-
+        // Build the initial status event synchronously (blocking handler — .join() is safe here)
         var actor = actorSystem.getChatActor();
-        actor.tell(a -> a.setSseEmitter(this::emitSse));
+        ChatEvent statusEvent = ChatEvent.status(
+                actor.ask(ChatActor::getModel).join(),
+                actor.ask(ChatActor::getSessionId).join(),
+                actor.ask(ChatActor::isBusy).join()
+        );
 
-        var watchdog = actorSystem.getWatchdog();
-        if (watchdog != null) watchdog.tell(w -> w.setSseEmitter(this::emitSse));
-
-        writeSse(response, ChatEvent.status(
-            actor.ask(ChatActor::getModel).join(),
-            actor.ask(ChatActor::getSessionId).join(),
-            actor.ask(ChatActor::isBusy).join()
-        ));
-
-        heartbeatTimerId = vertx.setPeriodic(15_000, id -> {
-            var r = sseResponse;
-            if (r != null && !r.ended()) {
-                writeSse(r, ChatEvent.heartbeat());
-            } else {
-                vertx.cancelTimer(id);
-            }
-        });
-
-        response.closeHandler(v -> {
-            actor.tell(a -> a.clearSseEmitter());
-            if (watchdog != null) watchdog.tell(w -> w.clearSseEmitter());
-            if (heartbeatTimerId != null) {
-                vertx.cancelTimer(heartbeatTimerId);
-                heartbeatTimerId = null;
-            }
-            if (sseResponse == response) sseResponse = null;
-        });
+        // Delegate the entire SSE lifecycle to SseActor. All mutable SSE state
+        // (response reference, heartbeat timer) now lives inside the actor and is
+        // managed through its sequential message queue — no race conditions possible.
+        actorSystem.getSseActor().tell(a -> a.onConnect(response, statusEvent));
     }
 
     private void handleMultiUserSseConnect(RoutingContext rc) {
@@ -225,11 +195,11 @@ public class ChatResource {
      * @param event the chat event to send
      */
     public void emitSse(ChatEvent event) {
-        var resp = sseResponse;
-        if (resp != null && !resp.ended()) {
-            vertx.runOnContext(v -> writeSse(resp, event));
+        var sseActor = actorSystem.getSseActor();
+        if (sseActor != null) {
+            sseActor.tell(a -> a.emit(event));
         } else {
-            logger.warning("SSE event DROPPED (no connection): type=" + event.type());
+            logger.warning("SSE event DROPPED (no SSE actor): type=" + event.type());
         }
     }
 
@@ -263,7 +233,7 @@ public class ChatResource {
             return ChatEvent.info("Processing");
         }
 
-        if (sseResponse == null) {
+        if (actorSystem.getSseActor() == null) {
             return ChatEvent.error("No SSE connection. Please refresh the page.");
         }
         var chatRef = actorSystem.getChatActor();
@@ -271,8 +241,8 @@ public class ChatResource {
                 ? request.model : chatRef.ask(ChatActor::getModel).join();
         var queueRef = actorSystem.getQueueActor();
         queueRef.tell(q -> q.enqueue(
-                request.text, model, "queue", 0,
-                this::emitSse, chatRef, queueRef, "human"));
+                request.text, model, "queue",
+                this::emitSse, chatRef, "human"));
         return ChatEvent.info("Processing");
     }
 
@@ -317,16 +287,20 @@ public class ChatResource {
      */
     public StatusResponse getStatus(@PathParam("sessionId") String sessionId) {
         var ref = actorSystem.getChatActor();
-        String currentSessionId = ref.ask(ChatActor::getSessionId).join();
 
+        // Check if this is an MCP result key (UUID-based tracking)
+        String resultStatus = ref.ask(a -> a.getResultStatus(sessionId)).join();
+        if (!"unknown".equals(resultStatus)) {
+            return new StatusResponse(sessionId, resultStatus, null);
+        }
+
+        // Fall back to provider session ID logic
+        String currentSessionId = ref.ask(ChatActor::getSessionId).join();
         if (sessionId == null || !sessionId.equals(currentSessionId)) {
             return new StatusResponse(sessionId, "unknown", null);
         }
-
         boolean isBusy = ref.ask(ChatActor::isBusy).join();
-        String status = isBusy ? "processing" : "completed";
-
-        return new StatusResponse(sessionId, status, null);
+        return new StatusResponse(sessionId, isBusy ? "processing" : "completed", null);
     }
 
     @GET
@@ -340,9 +314,21 @@ public class ChatResource {
      */
     public ResultResponse getResult(@PathParam("sessionId") String sessionId) {
         var ref = actorSystem.getChatActor();
-        String currentSessionId = ref.ask(ChatActor::getSessionId).join();
 
+        // First check for a stored MCP result keyed by this session ID (UUID)
+        String completedText = ref.ask(a -> a.getCompletedResult(sessionId)).join();
+        if (completedText != null) {
+            return new ResultResponse(sessionId, completedText, null);
+        }
+
+        // Fall back to provider session ID logic for browser-submitted prompts
+        String currentSessionId = ref.ask(ChatActor::getSessionId).join();
         if (sessionId == null || !sessionId.equals(currentSessionId)) {
+            // Check if it's a pending/active MCP key
+            String status = ref.ask(a -> a.getResultStatus(sessionId)).join();
+            if ("processing".equals(status)) {
+                return new ResultResponse(sessionId, null, "Processing still in progress");
+            }
             return new ResultResponse(sessionId, null, "Unknown session ID");
         }
 
@@ -350,7 +336,6 @@ public class ChatResource {
         if (isBusy) {
             return new ResultResponse(sessionId, null, "Processing still in progress");
         }
-
         return new ResultResponse(sessionId, "Completed. Results streamed via SSE.", null);
     }
 

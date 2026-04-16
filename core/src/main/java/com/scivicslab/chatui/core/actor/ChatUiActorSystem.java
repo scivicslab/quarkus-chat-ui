@@ -1,11 +1,13 @@
 package com.scivicslab.chatui.core.actor;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scivicslab.chatui.core.mcp.McpClientActor;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.service.LogStreamHandler;
 import com.scivicslab.pojoactor.core.ActorRef;
 import com.scivicslab.pojoactor.core.ActorSystem;
+import io.vertx.core.Vertx;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -45,14 +47,20 @@ public class ChatUiActorSystem {
     @Inject
     Instance<MultiUserExtension> multiUserExtInstance;
 
+    @Inject
+    Vertx vertx;
+
+    @Inject
+    ObjectMapper objectMapper;
+
     private ActorSystem actorSystem;
     private ActorRef<ChatActor> chatActorRef;
     private ActorRef<WatchdogActor> watchdogRef;
     private ActorRef<QueueActor> queueActorRef;
     private ActorRef<BtwActor> btwActorRef;
     private ActorRef<McpClientActor> mcpClientActorRef;
+    private ActorRef<SseActor> sseActorRef;
     private ScheduledExecutorService watchdogTimer;
-    private ScheduledExecutorService queueTimer;
 
     /**
      * Initialises the actor system. When a {@link MultiUserExtension} is available,
@@ -71,19 +79,17 @@ public class ChatUiActorSystem {
 
     private void initSingleUser() {
         chatActorRef = actorSystem.actorOf("chat", new ChatActor(provider, configApiKey));
+        chatActorRef.tell(a -> a.init(chatActorRef));
         logStreamHandler.wireActorRef(chatActorRef);
+
+        SseActor sseActor = new SseActor(vertx, objectMapper);
+        sseActorRef = actorSystem.actorOf("sse", sseActor);
+        sseActorRef.tell(a -> a.init(sseActorRef, chatActorRef, null)); // watchdog wired below
+        LOG.info("SseActor initialized");
 
         queueActorRef = actorSystem.actorOf("queue", new QueueActor());
         chatActorRef.tell(a -> a.setQueueActor(queueActorRef));
-        queueTimer = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "queue-timer");
-            t.setDaemon(true);
-            return t;
-        });
-        queueTimer.scheduleAtFixedRate(
-                () -> queueActorRef.tell(q -> q.tick(chatActorRef)),
-                2, 2, TimeUnit.SECONDS);
-        LOG.info("QueueActor initialized with 2s tick interval");
+        LOG.info("QueueActor initialized");
 
         btwActorRef = actorSystem.actorOf("btw", new BtwActor(provider));
         LOG.info("BtwActor initialized");
@@ -94,6 +100,8 @@ public class ChatUiActorSystem {
         if (provider.capabilities().supportsWatchdog()) {
             watchdogRef = actorSystem.actorOf("watchdog", new WatchdogActor());
             chatActorRef.tell(a -> a.setWatchdog(watchdogRef));
+            // Re-wire SseActor with the now-known watchdog ref
+            sseActorRef.tell(a -> a.init(sseActorRef, chatActorRef, watchdogRef));
             watchdogTimer = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "watchdog-timer");
                 t.setDaemon(true);
@@ -130,7 +138,6 @@ public class ChatUiActorSystem {
     /** Shuts down timer threads and terminates the actor system. Called by CDI before destruction. */
     @PreDestroy
     void shutdown() {
-        if (queueTimer != null) queueTimer.shutdownNow();
         if (watchdogTimer != null) watchdogTimer.shutdownNow();
         if (actorSystem != null) actorSystem.terminate();
     }
@@ -144,6 +151,8 @@ public class ChatUiActorSystem {
     public ActorRef<BtwActor> getBtwActor() { return btwActorRef; }
 
     public ActorRef<McpClientActor> getMcpClientActor() { return mcpClientActorRef; }
+
+    public ActorRef<SseActor> getSseActor() { return sseActorRef; }
 
     /** Returns true when the system is running in multi-user mode. */
     public boolean isMultiUser() {

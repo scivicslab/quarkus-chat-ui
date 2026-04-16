@@ -15,6 +15,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -85,28 +86,29 @@ public class McpTools {
         // Enrich prompt with position awareness (provider-agnostic solution)
         String enrichedPrompt = buildEnrichedPrompt(prompt, _caller);
 
-        // Use QueueActor to handle busy state gracefully
+        // Generate a UUID that the caller uses to poll status and retrieve the result.
+        String resultKey = UUID.randomUUID().toString();
+
         var queueRef = actorSystem.getQueueActor();
         var chatRef = actorSystem.getChatActor();
+
+        // Register the key as pending so getResultStatus() returns "processing" immediately.
+        chatRef.tell(a -> a.registerPendingResultKey(resultKey));
 
         String source = "agent:" + callerLabel;
         queueRef.tell(q -> q.enqueue(
             enrichedPrompt,
             model,
-            "queue",  // default queue mode
-            0,        // no timeout
-            chatResource::emitSse,  // emitter for SSE events
+            "queue",
+            chatResource::emitSse,
             chatRef,
-            queueRef,
-            source
+            source,
+            resultKey
         ));
 
-        int queueSize = queueRef.ask(com.scivicslab.chatui.core.actor.QueueActor::getQueueSize).join();
-        if (queueSize > 1) {
-            return String.format("Queued at position %d. Your message will be sent when the current prompt finishes.", queueSize);
-        } else {
-            return "Message accepted. Processing will begin shortly.";
-        }
+        // Return the UUID so the caller can use getPromptStatus(resultKey) and
+        // getPromptResult(resultKey) to track progress and retrieve the result.
+        return resultKey;
     }
 
     @Tool(description = "Get the processing status of a submitted prompt")

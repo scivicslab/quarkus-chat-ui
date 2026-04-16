@@ -40,6 +40,7 @@ public class CliProcess {
     private Process currentProcess;
     private OutputStream stdinStream;
     private volatile Thread readerThread;
+    private volatile Thread sendingThread;
     private final LinkedBlockingQueue<StreamEvent> eventQueue = new LinkedBlockingQueue<>();
     private volatile String apiKey;
 
@@ -162,6 +163,7 @@ public class CliProcess {
 
         writeUserMessage(prompt);
 
+        sendingThread = Thread.currentThread();
         try {
             while (true) {
                 StreamEvent event = eventQueue.poll(60, TimeUnit.SECONDS);
@@ -177,6 +179,8 @@ public class CliProcess {
             Thread.currentThread().interrupt();
             if (callback != null) callback.onComplete(-1);
             return -1;
+        } finally {
+            sendingThread = null;
         }
     }
 
@@ -200,6 +204,8 @@ public class CliProcess {
             readerThread.interrupt();
             readerThread = null;
         }
+        Thread t = sendingThread;
+        if (t != null) t.interrupt();
         eventQueue.clear();
         Process p = currentProcess;
         currentProcess = null;

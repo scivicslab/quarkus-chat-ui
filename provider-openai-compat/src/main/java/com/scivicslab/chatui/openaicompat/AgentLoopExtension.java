@@ -52,4 +52,11 @@ public interface AgentLoopExtension {
      */
     void runAgentLoop(String model, LinkedList<ChatMessage> history,
                       Consumer<ChatEvent> emitter, ProviderContext ctx);
+
+    /**
+     * Cancels the currently running agent loop, if any.
+     * Called from {@link com.scivicslab.chatui.openaicompat.OpenAiCompatProvider#cancel()}.
+     * Safe to call when no loop is running (no-op).
+     */
+    void cancel();
 }

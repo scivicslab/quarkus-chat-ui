@@ -32,7 +32,11 @@ public interface LlmProvider {
 
     /**
      * Sends a prompt and streams events to the emitter.
-     * Called from a virtual thread — blocking is allowed.
+     *
+     * <p>This method is blocking. It is called via
+     * {@code providerRef.ask(p -> p.sendPrompt(...), actorSystem.getManagedThreadPool())}
+     * so that the blocking I/O runs on a managed platform thread, not on an actor's
+     * virtual thread.</p>
      *
      * @param prompt  user prompt text
      * @param model   model name to use

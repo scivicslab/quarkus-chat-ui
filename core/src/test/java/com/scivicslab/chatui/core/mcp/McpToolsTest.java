@@ -113,12 +113,12 @@ class McpToolsTest {
     class SubmitPromptTests {
 
         @Test
-        @DisplayName("returns queued or accepted message")
+        @DisplayName("returns a UUID that callers use to track status and retrieve results")
         void successfulSubmit() {
             String result = mcpTools.submitPrompt("test prompt", "", null);
 
-            assertTrue(result.contains("Message accepted") || result.contains("Queued"),
-                    "Expected 'Message accepted' or 'Queued' in: " + result);
+            assertTrue(result.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+                    "Expected UUID, got: " + result);
         }
 
         @Test
@@ -156,9 +156,9 @@ class McpToolsTest {
 
             String result = mcpTools.submitPrompt("second prompt", "", null);
 
-            // With QueueActor, busy state doesn't return error - it accepts the message
-            assertTrue(result.contains("Queued") || result.contains("position") || result.contains("Message accepted"),
-                    "Expected message to be queued or accepted, got: " + result);
+            // submitPrompt always returns a UUID regardless of busy state
+            assertTrue(result.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+                    "Expected UUID, got: " + result);
 
             // Clean up
             chatRef.tell(ChatActor::cancel);

@@ -3,8 +3,6 @@ package com.scivicslab.chatui.core.actor;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.pojoactor.core.ActorRef;
 
-import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.concurrent.CompletableFuture;
@@ -14,15 +12,12 @@ import java.util.logging.Logger;
 /**
  * Actor that manages message queueing when the ChatActor is busy processing a prompt.
  *
- * <p>Supports three modes:</p>
+ * <p>Supports two modes:</p>
  * <ul>
  *   <li><b>queue</b> - Accept the message, hold it, and send it when ChatActor becomes idle.
- *       Returns immediately with a "Queued" confirmation.</li>
+ *       If ChatActor is already idle, dispatches immediately.</li>
  *   <li><b>cancel_and_send</b> - Cancel the current prompt, add the new message to the front
  *       of the queue, and send it once ChatActor becomes idle.</li>
- *   <li><b>wait</b> - Wait up to {@code timeoutSeconds} for ChatActor to become idle.
- *       If it becomes idle in time, send the message. If timeout expires, cancel the current
- *       prompt and then send.</li>
  * </ul>
  *
  * <p>This is a plain POJO actor — no CDI annotations, no synchronized blocks.
@@ -35,45 +30,75 @@ public class QueueActor {
     private final Deque<QueueItem> queue = new ArrayDeque<>();
 
     /**
+     * Enqueues a prompt. Convenience overload without resultKey (resultKey defaults to null).
+     */
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatActor> chatActorRef,
+                        String source) {
+        enqueue(prompt, model, mode, emitter, chatActorRef, source, null);
+    }
+
+    /**
      * Main entry point for enqueuing a prompt when ChatActor may be busy.
+     *
+     * <p>After adding to the queue, immediately asks ChatActor if it is idle.
+     * If idle, dispatches the next item without waiting for a tick.</p>
      *
      * @param prompt       the prompt text
      * @param model        the model to use (may be null)
-     * @param mode         one of "queue", "cancel_and_send", "wait"
-     * @param timeoutSeconds timeout in seconds (only used for "wait" mode)
+     * @param mode         one of "queue", "cancel_and_send"
      * @param emitter      callback to send ChatEvent responses to the client
      * @param chatActorRef reference to the ChatActor
-     * @param self         reference to this QueueActor (for scheduling dequeue)
+     * @param source       "human" or "agent:xxx"
+     * @param resultKey    UUID for MCP result tracking, or null for human prompts
      */
     public void enqueue(String prompt, String model, String mode,
-                        int timeoutSeconds, Consumer<ChatEvent> emitter,
-                        ActorRef<ChatActor> chatActorRef, ActorRef<QueueActor> self,
-                        String source) {
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatActor> chatActorRef,
+                        String source, String resultKey) {
 
         CompletableFuture<Void> done = new CompletableFuture<>();
+        enqueue(prompt, model, mode, emitter, chatActorRef, source, resultKey, done);
+    }
+
+    /**
+     * Enqueues a prompt with a caller-supplied {@code done} future.
+     *
+     * <p>Use this overload when the caller needs to block until the prompt completes
+     * (e.g. MCP {@code tools/call} handler waiting for the LLM result).</p>
+     *
+     * @param done externally created future that is completed when ChatActor finishes the prompt
+     */
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatActor> chatActorRef,
+                        String source, String resultKey,
+                        CompletableFuture<Void> done) {
 
         switch (mode) {
             case "cancel_and_send" -> {
-                QueueItem item = new QueueItem(prompt, model, mode, 0, Instant.now(), emitter, done, source);
+                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey);
                 queue.addFirst(item);
                 chatActorRef.tell(ChatActor::cancel);
                 emitter.accept(ChatEvent.info("Current prompt cancelled. Your message is queued."));
                 LOG.info("cancel_and_send: cancelled current prompt, queued at front (queue size=" + queue.size() + ")");
             }
-            case "wait" -> {
-                QueueItem item = new QueueItem(prompt, model, mode, timeoutSeconds, Instant.now(), emitter, done, source);
-                queue.addLast(item);
-                emitter.accept(ChatEvent.info("Waiting up to " + timeoutSeconds + "s for ChatActor to become idle."));
-                LOG.info("wait: queued with timeout=" + timeoutSeconds + "s (queue size=" + queue.size() + ")");
-            }
             default -> {
                 // "queue" mode (default)
-                QueueItem item = new QueueItem(prompt, model, mode, 0, Instant.now(), emitter, done, source);
+                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey);
                 queue.addLast(item);
                 emitter.accept(ChatEvent.info("Queued. Your message will be sent when the current prompt finishes."));
                 LOG.info("queue: queued prompt (queue size=" + queue.size() + ")");
             }
         }
+
+        // Attempt immediate dispatch if ChatActor is already idle
+        chatActorRef.ask(ChatActor::isBusy).thenAccept(busy -> {
+            if (!busy) {
+                chatActorRef.tell(chat -> dequeueAndSend(chat, chatActorRef));
+            }
+        });
     }
 
     /**
@@ -91,29 +116,6 @@ public class QueueActor {
         if (removed > 0) {
             LOG.info("queue: cleared " + removed + " agent messages on cancel");
         }
-    }
-
-    /**
-     * Called periodically (e.g. every 2 seconds) to check if ChatActor is idle
-     * and process the next item in the queue.
-     *
-     * <p>Also checks timeouts on "wait" mode items. If a wait item has expired,
-     * it cancels the current ChatActor prompt so that the next tick can dispatch it.</p>
-     *
-     * @param chatActorRef reference to the ChatActor
-     */
-    public void tick(ActorRef<ChatActor> chatActorRef) {
-        if (queue.isEmpty()) return;
-
-        // Check timeouts on wait-mode items before attempting dequeue
-        checkWaitTimeouts(chatActorRef);
-
-        // Ask ChatActor if it is idle; if so, dequeue and send
-        chatActorRef.ask(ChatActor::isBusy).thenAccept(busy -> {
-            if (!busy) {
-                chatActorRef.tell(chat -> dequeueAndSend(chat, chatActorRef));
-            }
-        });
     }
 
     /**
@@ -146,8 +148,7 @@ public class QueueActor {
 
     /**
      * Dequeues the next item and tells ChatActor to start the prompt.
-     * This method is called within ChatActor's message context (via tell),
-     * so isBusy() is safe to read directly.
+     * Runs within ChatActor's message context (via tell), so isBusy() is safe to read directly.
      */
     private void dequeueAndSend(ChatActor chat, ActorRef<ChatActor> chatActorRef) {
         if (queue.isEmpty()) return;
@@ -159,30 +160,7 @@ public class QueueActor {
         LOG.info("Dequeuing prompt (remaining=" + queue.size() + "): "
                 + truncate(item.prompt(), 80));
 
-        chat.startPrompt(item.prompt(), item.model(), item.emitter(), chatActorRef, item.done());
-    }
-
-    /**
-     * Checks "wait" mode items for timeout expiration.
-     * If the first wait item in the queue has timed out, cancel the current prompt
-     * so the next tick/onPromptComplete can dispatch it.
-     */
-    private void checkWaitTimeouts(ActorRef<ChatActor> chatActorRef) {
-        for (QueueItem item : queue) {
-            if (!"wait".equals(item.mode())) continue;
-            if (item.timeoutSeconds() <= 0) continue;
-
-            Duration elapsed = Duration.between(item.enqueuedAt(), Instant.now());
-            if (elapsed.getSeconds() >= item.timeoutSeconds()) {
-                LOG.info("wait timeout expired (" + item.timeoutSeconds()
-                        + "s). Cancelling current prompt.");
-                item.emitter().accept(ChatEvent.info(
-                        "Wait timeout expired after " + item.timeoutSeconds()
-                                + "s. Cancelling current prompt."));
-                chatActorRef.tell(ChatActor::cancel);
-                break; // Only cancel once per tick
-            }
-        }
+        chat.startPrompt(item.prompt(), item.model(), item.emitter(), chatActorRef, item.done(), item.resultKey());
     }
 
     private static String truncate(String s, int maxLen) {
@@ -196,11 +174,9 @@ public class QueueActor {
     public record QueueItem(
             String prompt,
             String model,
-            String mode,
-            int timeoutSeconds,
-            Instant enqueuedAt,
             Consumer<ChatEvent> emitter,
             CompletableFuture<Void> done,
-            String source   // "human" | "agent:xxx" (e.g. "agent:localhost:28010")
+            String source,     // "human" | "agent:xxx" (e.g. "agent:localhost:28010")
+            String resultKey   // UUID for MCP result tracking, null for human prompts
     ) {}
 }

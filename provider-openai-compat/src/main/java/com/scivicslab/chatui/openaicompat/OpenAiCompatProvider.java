@@ -29,6 +29,7 @@ public class OpenAiCompatProvider implements LlmProvider {
     private final List<OpenAiCompatClient> clients;
     private String currentModel;
     private volatile boolean cancelled;
+    private volatile Thread sendingThread;
     private final AgentLoopExtension agentLoopExtension;
 
     // Conversation history for context (not managed by actor — provider owns it)
@@ -137,6 +138,8 @@ public class OpenAiCompatProvider implements LlmProvider {
     @Override
     public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
         cancelled = false;
+        sendingThread = Thread.currentThread();
+        try {
         if (model != null && !model.isBlank()) currentModel = model;
 
         // If model is still a placeholder, try to resolve it from the server
@@ -205,6 +208,9 @@ public class OpenAiCompatProvider implements LlmProvider {
                 trimHistory();
             }
         }
+        } finally {
+            sendingThread = null;
+        }
     }
 
     /**
@@ -213,6 +219,9 @@ public class OpenAiCompatProvider implements LlmProvider {
     @Override
     public void cancel() {
         cancelled = true;
+        Thread t = sendingThread;
+        if (t != null) t.interrupt();
+        if (agentLoopExtension != null) agentLoopExtension.cancel();
     }
 
     private void trimHistory() {
