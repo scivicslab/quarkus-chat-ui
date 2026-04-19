@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.core.mcp;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scivicslab.chatui.core.actor.ChatActor;
 import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.rest.ChatEvent;
@@ -39,6 +40,9 @@ public class McpTools {
 
     @Inject
     ChatResource chatResource;
+
+    @Inject
+    ObjectMapper objectMapper;
 
     @ConfigProperty(name = "quarkus.http.port", defaultValue = "8080")
     int httpPort;
@@ -95,6 +99,20 @@ public class McpTools {
         // Register the key as pending so getResultStatus() returns "processing" immediately.
         chatRef.tell(a -> a.registerPendingResultKey(resultKey));
 
+        // If _caller is an HTTP URL different from self, auto-callback when LLM completes.
+        String callerUrl = extractUrl(_caller);
+        String selfUrl = getSelfUrl();
+        boolean shouldCallback = callerUrl != null
+                && callerUrl.startsWith("http")
+                && !callerUrl.equals(selfUrl);
+
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        if (shouldCallback) {
+            final String finalCallerUrl = callerUrl;
+            final String finalResultKey = resultKey;
+            done.thenRunAsync(() -> sendCallback(finalCallerUrl, finalResultKey, selfUrl));
+        }
+
         String source = "agent:" + callerLabel;
         queueRef.tell(q -> q.enqueue(
             enrichedPrompt,
@@ -103,7 +121,8 @@ public class McpTools {
             chatResource::emitSse,
             chatRef,
             source,
-            resultKey
+            resultKey,
+            done
         ));
 
         // Return the UUID so the caller can use getPromptStatus(resultKey) and
@@ -131,6 +150,43 @@ public class McpTools {
     }
 
     /**
+     * Sends the LLM result back to the caller's /api/receive-reply endpoint.
+     * Called asynchronously after the done future completes, so the result
+     * should already be stored in ChatActor's completedResults map.
+     * Best-effort: logs a warning on failure but does not retry.
+     */
+    private void sendCallback(String callerUrl, String resultKey, String selfUrl) {
+        try {
+            // Result should be stored by now, but poll briefly to be safe.
+            String result = null;
+            var chatRef = actorSystem.getChatActor();
+            for (int i = 0; i < 15; i++) {
+                result = chatRef.ask(a -> a.getCompletedResult(resultKey)).join();
+                if (result != null) break;
+                Thread.sleep(200);
+            }
+            if (result == null) {
+                logger.warning("Callback: no result found for key=" + resultKey + ", skipping");
+                return;
+            }
+            String jsonBody = objectMapper.writeValueAsString(
+                    java.util.Map.of("from", selfUrl, "text", result));
+            var client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(5)).build();
+            var request = HttpRequest.newBuilder()
+                    .uri(URI.create(callerUrl + "/api/receive-reply"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                    .timeout(Duration.ofSeconds(10))
+                    .build();
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            logger.info("Callback sent to " + callerUrl + ": HTTP " + response.statusCode());
+        } catch (Exception e) {
+            logger.warning("Callback failed to " + callerUrl + ": " + e.getMessage());
+        }
+    }
+
+    /**
      * Builds an enriched prompt with position awareness for MCP messages.
      * Solves 3 challenges:
      * 1. Self-awareness: LLM knows its own URL
@@ -145,24 +201,41 @@ public class McpTools {
         String selfUrl = getSelfUrl();
         String callerUrl = extractUrl(_caller);
         String callerLabel = formatCallerLabel(_caller);
+        boolean callerIsReachable = callerUrl != null && callerUrl.startsWith("http");
 
-        return String.format(
-            "[Context]\n" +
-            "You are running on: %s\n" +
-            "Received via MCP from: %s\n\n" +
-            "[Message]\n" +
-            "%s\n\n" +
-            "[How to Reply]\n" +
-            "Use callMcpServer tool:\n" +
-            "- serverUrl: %s\n" +
-            "- toolName: submitPrompt\n" +
-            "- arguments: {\"prompt\":\"your reply\",\"model\":\"sonnet\",\"_caller\":\"%s\"}",
-            selfUrl,      // Self-awareness
-            callerLabel,  // Sender recognition
-            prompt,
-            callerUrl,    // Reply method
-            selfUrl
-        );
+        if (callerIsReachable) {
+            return String.format(
+                "[Context]\n" +
+                "You are running on: %s\n" +
+                "Received via MCP from: %s\n\n" +
+                "[Message]\n" +
+                "%s\n\n" +
+                "[How to Reply]\n" +
+                "Use callMcpServer tool:\n" +
+                "- serverUrl: %s\n" +
+                "- toolName: submitPrompt\n" +
+                "- arguments: {\"prompt\":\"your reply\",\"model\":\"sonnet\",\"_caller\":\"%s\"}",
+                selfUrl,      // Self-awareness
+                callerLabel,  // Sender recognition
+                prompt,
+                callerUrl,    // Reply method
+                selfUrl
+            );
+        } else {
+            // Caller is not an HTTP endpoint (e.g. a workflow engine or gateway).
+            // Omit "How to Reply" to prevent the LLM from attempting to reply back
+            // via MCP, which would cause a self-loop or a failed tool call.
+            return String.format(
+                "[Context]\n" +
+                "You are running on: %s\n" +
+                "Received via MCP from: %s\n\n" +
+                "[Message]\n" +
+                "%s",
+                selfUrl,
+                callerLabel,
+                prompt
+            );
+        }
     }
 
     /**

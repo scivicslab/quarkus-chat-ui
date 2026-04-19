@@ -27,7 +27,12 @@ import java.util.function.Consumer;
  */
 public interface AgentLoopExtension {
 
-    /** Returns {@code true} if the agent loop is active (i.e. the feature flag is on). */
+    /**
+     * Returns {@code true} if the agent loop is configured and ready to run
+     * (i.e. at least one MCP URL is set).
+     * When the provider is {@code openai-compat}, this must return {@code true}
+     * or startup will fail.
+     */
     boolean isEnabled();
 
     /**

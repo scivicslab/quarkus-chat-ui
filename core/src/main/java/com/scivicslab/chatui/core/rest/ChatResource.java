@@ -571,6 +571,59 @@ public class ChatResource {
     }
 
     @POST
+    @Path("/sub-queue/push")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    /**
+     * Pushes a new SubQueueActor onto the stack. All traffic is routed to it until popped.
+     * Supports nesting: each push adds one level. Only active in single-user mode.
+     */
+    public java.util.Map<String, Object> pushSubQueue(SubQueueRequest request) {
+        if (actorSystem.isMultiUser()) {
+            return java.util.Map.of("error", "SubQueue not supported in multi-user mode");
+        }
+        String jobId = (request != null && request.jobId != null && !request.jobId.isBlank())
+                ? request.jobId : java.util.UUID.randomUUID().toString();
+        actorSystem.pushSubQueue(jobId);
+        return java.util.Map.of("jobId", jobId, "status", "pushed");
+    }
+
+    @POST
+    @Path("/sub-queue/pop")
+    @Produces(MediaType.APPLICATION_JSON)
+    /**
+     * Pops the top SubQueueActor, restoring the previous queue level.
+     * Only active in single-user mode.
+     */
+    public java.util.Map<String, Object> popSubQueue() {
+        if (actorSystem.isMultiUser()) {
+            return java.util.Map.of("error", "SubQueue not supported in multi-user mode");
+        }
+        actorSystem.popSubQueue();
+        return java.util.Map.of("status", "popped");
+    }
+
+    @POST
+    @Path("/receive-reply")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    /**
+     * Receives a reply from another agent sent via the automatic callback mechanism.
+     * Displays the reply in the chat UI as an mcp_user event without triggering LLM.
+     *
+     * @param request the reply containing the sender URL and reply text
+     * @return an info event on success, or an error event on failure
+     */
+    public ChatEvent receiveReply(ReplyRequest request) {
+        if (request == null || request.text == null || request.text.isBlank()) {
+            return ChatEvent.error("Empty reply");
+        }
+        String fromLabel = (request.from != null && !request.from.isBlank()) ? request.from : "unknown";
+        emitSse(ChatEvent.mcpUser("[Reply from " + fromLabel + "] " + request.text));
+        return ChatEvent.info("Reply received");
+    }
+
+    @POST
     @Path("/fetch-url")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
@@ -671,5 +724,14 @@ public class ChatResource {
     public static class BtwRequest {
         public String question;
         public String model;
+    }
+
+    public static class ReplyRequest {
+        public String from;
+        public String text;
+    }
+
+    public static class SubQueueRequest {
+        public String jobId;
     }
 }

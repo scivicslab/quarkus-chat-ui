@@ -73,6 +73,11 @@ public class LlmProviderProducer {
                         .toList();
                 String model = defaultModel.filter(s -> !s.isBlank()).orElse("default");
                 AgentLoopExtension ext = agentLoopExt.isUnsatisfied() ? null : agentLoopExt.get();
+                if (ext == null || !ext.isEnabled()) {
+                    throw new IllegalStateException(
+                        "openai-compat provider requires agent-loop to be configured. " +
+                        "Set chat-ui.agent-loop.mcp-urls in application.properties.");
+                }
                 yield new OpenAiCompatProvider(urls, model, ext);
             }
             default -> throw new IllegalStateException(

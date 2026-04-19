@@ -256,12 +256,13 @@ public class AgentLoopActor {
     private List<ToolDefinition> fetchToolsFromServer(String serverUrl) throws Exception {
         String mcpUrl = ensureMcpPath(serverUrl);
         String sessionId = getOrCreateSession(mcpUrl);
-        HttpRequest request = HttpRequest.newBuilder()
+        var builder = HttpRequest.newBuilder()
                 .uri(URI.create(mcpUrl))
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .header("Mcp-Session-Id", sessionId)
+                .header("Accept", "application/json, text/event-stream");
+        if (!sessionId.isEmpty()) builder.header("Mcp-Session-Id", sessionId);
+        HttpRequest request = builder
                 .POST(HttpRequest.BodyPublishers.ofString(
                         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}"))
                 .build();
@@ -305,12 +306,13 @@ public class AgentLoopActor {
         String callBody = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
                 + "\"params\":{\"name\":\"" + escapeJsonString(toolName) + "\","
                 + "\"arguments\":" + arguments + "}}";
-        HttpRequest request = HttpRequest.newBuilder()
+        var builder = HttpRequest.newBuilder()
                 .uri(URI.create(mcpUrl))
                 .timeout(mcpCallTimeout)
                 .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .header("Mcp-Session-Id", sessionId)
+                .header("Accept", "application/json, text/event-stream");
+        if (!sessionId.isEmpty()) builder.header("Mcp-Session-Id", sessionId);
+        HttpRequest request = builder
                 .POST(HttpRequest.BodyPublishers.ofString(callBody))
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -354,16 +356,18 @@ public class AgentLoopActor {
                 .uri(URI.create(mcpEndpoint))
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
+                .header("Accept", "application/json, text/event-stream")
                 .POST(HttpRequest.BodyPublishers.ofString(initBody))
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        String sessionId = response.headers().firstValue("Mcp-Session-Id").orElse(null);
-        if (sessionId == null) {
-            throw new RuntimeException("No Mcp-Session-Id header from " + mcpEndpoint);
-        }
+        // Session ID is optional — some servers (e.g. MCP Gateway) don't require sessions
+        String sessionId = response.headers().firstValue("Mcp-Session-Id").orElse("");
         sessionCache.put(mcpEndpoint, sessionId);
-        LOG.info("MCP session established: " + sessionId + " at " + mcpEndpoint);
+        if (!sessionId.isEmpty()) {
+            LOG.info("MCP session established: " + sessionId + " at " + mcpEndpoint);
+        } else {
+            LOG.info("MCP server at " + mcpEndpoint + " does not use sessions (stateless)");
+        }
         return sessionId;
     }
 

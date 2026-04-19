@@ -15,7 +15,6 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
@@ -32,10 +31,9 @@ import java.util.logging.Logger;
  * <p>cancel() is called via tellNow(), which bypasses the actor's message queue
  * and sets cancelled=true immediately — no Thread.interrupt() needed.</p>
  *
- * <p>Required config:
+ * <p>Config (optional — defaults built in):
  * <pre>
- *   chat-ui.agent-loop.enabled=true
- *   chat-ui.agent-loop.mcp-urls=http://localhost:9000
+ *   chat-ui.agent-loop.mcp-urls=http://localhost:28081   (default)
  * </pre>
  * Optional:
  * <pre>
@@ -49,11 +47,8 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
 
     private static final Logger LOG = Logger.getLogger(AgentLoopExtensionImpl.class.getName());
 
-    @ConfigProperty(name = "chat-ui.agent-loop.enabled", defaultValue = "false")
-    boolean enabled;
-
-    @ConfigProperty(name = "chat-ui.agent-loop.mcp-urls")
-    Optional<String> mcpUrlsRaw;
+    @ConfigProperty(name = "chat-ui.agent-loop.mcp-urls", defaultValue = "http://localhost:28081")
+    String mcpUrlsRaw;
 
     @ConfigProperty(name = "chat-ui.agent-loop.max-iterations", defaultValue = "10")
     int maxIterations;
@@ -76,13 +71,15 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     private volatile ActorRef<AgentLoopActor> activeLoop;
 
     @Override
-    public boolean isEnabled() { return enabled; }
+    public boolean isEnabled() {
+        return !mcpUrlsRaw.isBlank();
+    }
 
     @Override
     public void initialize(List<OpenAiCompatClient> clients) {
         this.clients = List.copyOf(clients);
         LOG.info("AgentLoop initialized with " + clients.size() + " client(s), "
-                + "mcp-urls=" + mcpUrlsRaw.orElse("(none)") + ", max-iterations=" + maxIterations);
+                + "mcp-urls=" + mcpUrlsRaw + ", max-iterations=" + maxIterations);
     }
 
     // ── cancel (called via OpenAiCompatProvider.cancel()) ────────────────────
@@ -132,7 +129,7 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private List<String> parseMcpUrls() {
-        String raw = mcpUrlsRaw.orElse("");
+        String raw = mcpUrlsRaw;
         if (raw.isBlank()) return List.of();
         return Arrays.stream(raw.split(","))
                 .map(String::trim)

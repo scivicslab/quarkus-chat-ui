@@ -62,6 +62,9 @@ public class ChatUiActorSystem {
     private ActorRef<SseActor> sseActorRef;
     private ScheduledExecutorService watchdogTimer;
 
+    // SubQueue stack for batch job isolation (single-user mode only)
+    private final java.util.Deque<ActorRef<QueueActor>> subQueueStack = new java.util.ArrayDeque<>();
+
     /**
      * Initialises the actor system. When a {@link MultiUserExtension} is available,
      * delegates to it (multi-user mode). Otherwise initialises the full single-user stack.
@@ -142,11 +145,38 @@ public class ChatUiActorSystem {
         if (actorSystem != null) actorSystem.terminate();
     }
 
+    /**
+     * Pushes a new SubQueueActor onto the stack, making it the active queue.
+     * All subsequent prompts (from any source) are routed to this SubQueue.
+     * Safe for nested batch jobs — each push adds a new level.
+     */
+    public synchronized void pushSubQueue(String jobId) {
+        String actorName = "queue-job-" + jobId.substring(0, Math.min(8, jobId.length()));
+        ActorRef<QueueActor> sub = actorSystem.actorOf(actorName, new QueueActor());
+        subQueueStack.push(sub);
+        chatActorRef.tell(a -> a.setQueueActor(sub));
+        LOG.info("SubQueue pushed for job " + jobId + " (depth=" + subQueueStack.size() + ")");
+    }
+
+    /**
+     * Pops the top SubQueueActor, restoring the previous queue (or base queue if stack is empty).
+     */
+    public synchronized void popSubQueue() {
+        if (!subQueueStack.isEmpty()) {
+            subQueueStack.pop();
+        }
+        ActorRef<QueueActor> active = subQueueStack.isEmpty() ? queueActorRef : subQueueStack.peek();
+        chatActorRef.tell(a -> a.setQueueActor(active));
+        LOG.info("SubQueue popped (depth=" + subQueueStack.size() + ")");
+    }
+
     public ActorRef<ChatActor> getChatActor() { return chatActorRef; }
 
     public ActorRef<WatchdogActor> getWatchdog() { return watchdogRef; }
 
-    public ActorRef<QueueActor> getQueueActor() { return queueActorRef; }
+    public synchronized ActorRef<QueueActor> getQueueActor() {
+        return subQueueStack.isEmpty() ? queueActorRef : subQueueStack.peek();
+    }
 
     public ActorRef<BtwActor> getBtwActor() { return btwActorRef; }
 
