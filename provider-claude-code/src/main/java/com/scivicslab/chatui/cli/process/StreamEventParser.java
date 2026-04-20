@@ -147,7 +147,9 @@ public class StreamEventParser {
                     if (item != null && "tool_result".equals(item.optString("type"))) {
                         boolean isError = item.optBoolean("is_error", false);
                         String text = item.optString("content", "");
-                        return new StreamEvent("tool_result", text, null, -1, -1, isError, rawJson);
+                        String toolUseId = item.optString("tool_use_id", null);
+                        return new StreamEvent("tool_result", text, null, -1, -1, isError, rawJson,
+                                toolUseId, null, null);
                     }
                 }
             }

@@ -32,7 +32,9 @@ public class GatewayRegistrar {
     String title;
 
     void onStart(@Observes StartupEvent event) {
-        if (gatewayUrl.isEmpty() || gatewayUrl.get().isBlank()) {
+        String resolvedUrl = gatewayUrl.filter(s -> !s.isBlank())
+                .orElseGet(() -> System.getenv("MCP_GATEWAY_URL"));
+        if (resolvedUrl == null || resolvedUrl.isBlank()) {
             logger.fine("No gateway URL configured, skipping registration");
             return;
         }
@@ -47,7 +49,7 @@ public class GatewayRegistrar {
                 HttpClient client = HttpClient.newBuilder()
                         .connectTimeout(Duration.ofSeconds(3)).build();
                 HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(gatewayUrl.get() + "/api/servers"))
+                        .uri(URI.create(resolvedUrl + "/api/servers"))
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(body))
                         .timeout(Duration.ofSeconds(5))

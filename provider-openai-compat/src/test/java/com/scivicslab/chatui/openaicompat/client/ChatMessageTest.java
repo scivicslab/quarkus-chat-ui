@@ -45,6 +45,7 @@ class ChatMessageTest {
             case ChatMessage.Assistant a -> a.role();
             case ChatMessage.ToolCallRequest t -> t.role();
             case ChatMessage.ToolResult r -> r.role();
+            case ChatMessage.System s -> s.role();
         };
         assertEquals("user", role);
     }

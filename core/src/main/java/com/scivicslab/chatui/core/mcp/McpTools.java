@@ -1,6 +1,5 @@
 package com.scivicslab.chatui.core.mcp;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scivicslab.chatui.core.actor.ChatActor;
 import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.rest.ChatEvent;
@@ -12,14 +11,8 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -40,9 +33,6 @@ public class McpTools {
 
     @Inject
     ChatResource chatResource;
-
-    @Inject
-    ObjectMapper objectMapper;
 
     @ConfigProperty(name = "quarkus.http.port", defaultValue = "8080")
     int httpPort;
@@ -99,19 +89,7 @@ public class McpTools {
         // Register the key as pending so getResultStatus() returns "processing" immediately.
         chatRef.tell(a -> a.registerPendingResultKey(resultKey));
 
-        // If _caller is an HTTP URL different from self, auto-callback when LLM completes.
-        String callerUrl = extractUrl(_caller);
-        String selfUrl = getSelfUrl();
-        boolean shouldCallback = callerUrl != null
-                && callerUrl.startsWith("http")
-                && !callerUrl.equals(selfUrl);
-
         CompletableFuture<Void> done = new CompletableFuture<>();
-        if (shouldCallback) {
-            final String finalCallerUrl = callerUrl;
-            final String finalResultKey = resultKey;
-            done.thenRunAsync(() -> sendCallback(finalCallerUrl, finalResultKey, selfUrl));
-        }
 
         String source = "agent:" + callerLabel;
         queueRef.tell(q -> q.enqueue(
@@ -147,43 +125,6 @@ public class McpTools {
             return String.format("Error: %s", response.error());
         }
         return response.result();
-    }
-
-    /**
-     * Sends the LLM result back to the caller's /api/receive-reply endpoint.
-     * Called asynchronously after the done future completes, so the result
-     * should already be stored in ChatActor's completedResults map.
-     * Best-effort: logs a warning on failure but does not retry.
-     */
-    private void sendCallback(String callerUrl, String resultKey, String selfUrl) {
-        try {
-            // Result should be stored by now, but poll briefly to be safe.
-            String result = null;
-            var chatRef = actorSystem.getChatActor();
-            for (int i = 0; i < 15; i++) {
-                result = chatRef.ask(a -> a.getCompletedResult(resultKey)).join();
-                if (result != null) break;
-                Thread.sleep(200);
-            }
-            if (result == null) {
-                logger.warning("Callback: no result found for key=" + resultKey + ", skipping");
-                return;
-            }
-            String jsonBody = objectMapper.writeValueAsString(
-                    java.util.Map.of("from", selfUrl, "text", result));
-            var client = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(5)).build();
-            var request = HttpRequest.newBuilder()
-                    .uri(URI.create(callerUrl + "/api/receive-reply"))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                    .timeout(Duration.ofSeconds(10))
-                    .build();
-            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
-            logger.info("Callback sent to " + callerUrl + ": HTTP " + response.statusCode());
-        } catch (Exception e) {
-            logger.warning("Callback failed to " + callerUrl + ": " + e.getMessage());
-        }
     }
 
     /**
@@ -282,40 +223,4 @@ public class McpTools {
         }
     }
 
-    /**
-     * Formats _caller into a readable label (legacy HATEOAS version).
-     * Fetches the URL to get caller metadata (name, remoteAddress, etc.)
-     */
-    @SuppressWarnings("unused")
-    private String formatCaller(String callerUrl) {
-        if (callerUrl == null || callerUrl.isBlank()) {
-            return "";
-        }
-        if (!callerUrl.startsWith("http")) {
-            return " from " + callerUrl;
-        }
-        try {
-            var client = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(2)).build();
-            var request = HttpRequest.newBuilder()
-                    .uri(URI.create(callerUrl))
-                    .timeout(Duration.ofSeconds(2))
-                    .GET().build();
-            var resp = client.send(request, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() == 200) {
-                var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                var obj = mapper.readTree(resp.body());
-                String name = obj.has("caller") ? obj.get("caller").asText() : "unknown";
-                boolean registered = obj.has("registered") && obj.get("registered").asBoolean();
-                if (registered && obj.has("callerUrl")) {
-                    return " from " + name + " (" + obj.get("callerUrl").asText() + ")";
-                }
-                String addr = obj.has("remoteAddress") ? obj.get("remoteAddress").asText() : "";
-                return " from " + name + (addr.isEmpty() ? "" : "@" + addr);
-            }
-        } catch (Exception e) {
-            logger.fine("Failed to fetch caller metadata: " + e.getMessage());
-        }
-        return " from " + callerUrl;
-    }
 }

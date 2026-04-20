@@ -61,6 +61,7 @@ public class AgentLoopActor {
     private List<OpenAiCompatClient> clients;
     private List<String> mcpUrls;
     private int maxIterations;
+    private int maxTools;
     private int iteration;
     private long startTime;
     private List<ToolDefinition> tools;
@@ -94,7 +95,7 @@ public class AgentLoopActor {
                       Consumer<ChatEvent> emitter, ProviderContext ctx,
                       CompletableFuture<Void> done,
                       List<OpenAiCompatClient> clients, List<String> mcpUrls, int maxIterations,
-                      ActorRef<AgentLoopActor> self) {
+                      int maxTools, ActorRef<AgentLoopActor> self) {
         this.model = model;
         this.history = history;
         this.emitter = emitter;
@@ -103,6 +104,7 @@ public class AgentLoopActor {
         this.clients = clients;
         this.mcpUrls = mcpUrls;
         this.maxIterations = maxIterations;
+        this.maxTools = maxTools;
         this.iteration = 0;
         this.startTime = System.currentTimeMillis();
         this.cancelled = false;
@@ -149,11 +151,25 @@ public class AgentLoopActor {
             return;
         }
 
-        // Capture snapshot before going off-thread (history may grow on actor thread later)
-        List<ChatMessage> snapshot = List.copyOf(history);
+        // Capture snapshot before going off-thread (history may grow on actor thread later).
+        // Prepend system prompt so the LLM knows it has tools and should use them.
+        List<ChatMessage> snapshot = new ArrayList<>();
+        if (!tools.isEmpty()) {
+            snapshot.add(new ChatMessage.System(
+                "You are a helpful AI assistant with access to tools. " +
+                "IMPORTANT: You MUST use tools to accomplish tasks — never say you cannot access tools or agents. " +
+                "Step 1: Call find_tools(query=\"...\") with a relevant keyword to discover available tools. " +
+                "Step 2: Call the discovered tool to complete the task. " +
+                "To communicate with another AI agent or chat-ui instance (e.g. chat-ui-28002), " +
+                "use find_tools(query=\"call agent\") to discover the call_agent tool, " +
+                "then call call_agent(agent=\"chat-ui-28002\", prompt=\"your message\")."));
+        }
+        snapshot.addAll(history);
         List<ToolDefinition> currentTools = List.copyOf(tools);
 
-        self.ask(a -> client.sendNonStreaming(model, snapshot, ctx.noThink(), 0, currentTools),
+        // Always disable thinking in agent loop — tool-routing calls don't benefit from CoT
+        // and thinking tokens make each iteration significantly slower.
+        self.ask(a -> client.sendNonStreaming(model, snapshot, true, 0, currentTools),
                  self.system().getManagedThreadPool())
             .thenAccept(resp -> self.tell(a -> a.onLlmResponse(resp, self)));
     }
@@ -231,9 +247,39 @@ public class AgentLoopActor {
                     ? r.result().substring(0, 10_000) + "\n[truncated — content too large]"
                     : r.result();
             history.addLast(new ChatMessage.ToolResult(r.id(), r.name(), histResult));
+
+            // Expand tool list when find_tools returns definitions
+            if ("find_tools".equals(r.name())) {
+                String serverUrl = toolToServerUrl.getOrDefault(r.name(),
+                        mcpUrls.isEmpty() ? null : mcpUrls.get(0));
+                expandDiscoveredTools(r.result(), serverUrl);
+            }
         }
 
         sendNextRequest(self);  // next iteration
+    }
+
+    private void expandDiscoveredTools(String json, String serverUrl) {
+        if (serverUrl == null || json == null || json.isBlank()) return;
+        try {
+            JSONArray arr = new JSONArray(json);
+            int added = 0;
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject t = arr.getJSONObject(i);
+                String name = t.getString("name");
+                if (toolToServerUrl.containsKey(name)) continue; // already known
+                String desc = t.optString("description", "");
+                String schema = t.has("inputSchema")
+                        ? t.getJSONObject("inputSchema").toString()
+                        : "{\"type\":\"object\",\"properties\":{}}";
+                tools.add(new ToolDefinition(name, desc, schema));
+                toolToServerUrl.put(name, serverUrl);
+                added++;
+            }
+            if (added > 0) LOG.info("Discovered " + added + " tool(s) via find_tools");
+        } catch (Exception e) {
+            LOG.warning("Failed to parse find_tools result: " + e.getMessage());
+        }
     }
 
     // ── Tool fetching (runs on ioPool) ────────────────────────────────────────
@@ -241,16 +287,33 @@ public class AgentLoopActor {
     private ToolFetchResult fetchAllTools() {
         Map<String, String> mapping = new ConcurrentHashMap<>();
         List<ToolDefinition> all = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
         for (String url : mcpUrls) {
             try {
                 List<ToolDefinition> fetched = fetchToolsFromServer(url);
-                fetched.forEach(t -> mapping.put(t.name(), url));
-                all.addAll(fetched);
+                // If server exposes find_tools, use lazy/discovery mode:
+                // only include find_tools itself; other tools are discovered on demand.
+                boolean lazyMode = fetched.stream().anyMatch(t -> "find_tools".equals(t.name()));
+                for (ToolDefinition t : fetched) {
+                    if (lazyMode && !"find_tools".equals(t.name())) continue;
+                    if (seen.add(t.name())) {
+                        mapping.put(t.name(), url);
+                        all.add(t);
+                    }
+                }
+                if (lazyMode) {
+                    LOG.info("Discovery mode for " + url + " — starting with find_tools only");
+                }
             } catch (Exception e) {
                 LOG.warning("Could not fetch tools from " + url + ": " + e.getMessage());
             }
         }
-        return new ToolFetchResult(all, mapping);
+        // Cap non-lazy tools to avoid oversized prompts
+        if (maxTools > 0 && all.size() > maxTools) {
+            LOG.info("Capping tools from " + all.size() + " to " + maxTools);
+            all = new ArrayList<>(all.subList(0, maxTools));
+        }
+        return new ToolFetchResult(new ArrayList<>(all), mapping);
     }
 
     private List<ToolDefinition> fetchToolsFromServer(String serverUrl) throws Exception {

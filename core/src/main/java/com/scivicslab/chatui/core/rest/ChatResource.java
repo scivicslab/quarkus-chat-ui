@@ -240,9 +240,11 @@ public class ChatResource {
         String model = (request.model != null && !request.model.isBlank())
                 ? request.model : chatRef.ask(ChatActor::getModel).join();
         var queueRef = actorSystem.getQueueActor();
+        boolean noThink = request.noThink;
         queueRef.tell(q -> q.enqueue(
                 request.text, model, "queue",
-                this::emitSse, chatRef, "human"));
+                this::emitSse, chatRef, "human", null,
+                new java.util.concurrent.CompletableFuture<>(), noThink));
         return ChatEvent.info("Processing");
     }
 
@@ -500,6 +502,7 @@ public class ChatResource {
      */
     public AppConfig config() {
         LlmProvider p = actorSystem.getProvider();
+        boolean thinkToggle = "openai-compat".equals(p.id());
         if (actorSystem.isMultiUser()) {
             return new AppConfig(
                     appTitle, true, "NONE", keybind, p.id(),
@@ -507,7 +510,7 @@ public class ChatResource {
                     p.capabilities().supportsImages(),
                     p.capabilities().supportsUrlFetch(),
                     false,  // logs disabled in multi-user mode
-                    true
+                    true, thinkToggle
             );
         }
         var ref = actorSystem.getChatActor();
@@ -522,7 +525,7 @@ public class ChatResource {
                 p.capabilities().supportsImages(),
                 p.capabilities().supportsUrlFetch(),
                 true,   // logs enabled in single-user mode
-                false
+                false, thinkToggle
         );
     }
 
@@ -689,7 +692,7 @@ public class ChatResource {
         String title, boolean authenticated, String authMode, String keybind,
         String providerId, boolean supportsInteractivePrompts,
         boolean supportsSlashCommands, boolean supportsImages, boolean supportsUrlFetch,
-        boolean logsEnabled, boolean multiUser
+        boolean logsEnabled, boolean multiUser, boolean supportsThinkToggle
     ) {}
 
     public record HistoryResponse(String role, String content) {}
@@ -702,6 +705,7 @@ public class ChatResource {
     public static class PromptRequest {
         public String text;
         public String model;
+        public boolean noThink;
     }
 
     public static class CommandRequest {

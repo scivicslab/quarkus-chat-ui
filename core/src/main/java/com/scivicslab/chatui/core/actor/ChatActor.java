@@ -212,7 +212,13 @@ public class ChatActor {
      */
     public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
                             ActorRef<ChatActor> self, CompletableFuture<Void> done) {
-        startPrompt(prompt, model, emitter, self, done, null);
+        startPrompt(prompt, model, emitter, self, done, null, false);
+    }
+
+    public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
+                            ActorRef<ChatActor> self, CompletableFuture<Void> done,
+                            String resultKey) {
+        startPrompt(prompt, model, emitter, self, done, resultKey, false);
     }
 
     /**
@@ -224,7 +230,7 @@ public class ChatActor {
      */
     public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
                             ActorRef<ChatActor> self, CompletableFuture<Void> done,
-                            String resultKey) {
+                            String resultKey, boolean noThink) {
         if (busy) {
             emitter.accept(ChatEvent.error("Already processing a prompt. Please wait or cancel."));
             done.complete(null);
@@ -261,7 +267,7 @@ public class ChatActor {
                         ? () -> watchdog.tell(WatchdogActor::onActivity)
                         : () -> {};
 
-                ProviderContext ctx = new ProviderContext(snapApiKey, List.of(), false, heartbeat);
+                ProviderContext ctx = new ProviderContext(snapApiKey, List.of(), noThink, heartbeat);
 
                 // Wrap emitter to intercept assistant content for history and optional result capture
                 StringBuilder assistantBuf = new StringBuilder();

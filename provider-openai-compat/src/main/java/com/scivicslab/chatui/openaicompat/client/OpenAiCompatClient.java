@@ -319,6 +319,8 @@ public class OpenAiCompatClient {
                     sb.append("\"tool_call_id\":\"").append(escapeJson(r.toolCallId())).append("\",")
                       .append("\"name\":\"").append(escapeJson(r.toolName())).append("\",")
                       .append("\"content\":\"").append(escapeJson(r.content())).append("\"");
+                case ChatMessage.System s ->
+                    sb.append("\"content\":\"").append(escapeJson(s.content())).append("\"");
             }
             sb.append("}");
         }

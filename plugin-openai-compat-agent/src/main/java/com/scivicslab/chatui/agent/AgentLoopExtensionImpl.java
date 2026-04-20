@@ -56,6 +56,9 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     @ConfigProperty(name = "chat-ui.agent-loop.mcp-timeout", defaultValue = "120")
     int mcpTimeoutSeconds;
 
+    @ConfigProperty(name = "chat-ui.agent-loop.max-tools", defaultValue = "20")
+    int maxTools;
+
     private List<OpenAiCompatClient> clients = List.of();
 
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -113,7 +116,7 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
         CompletableFuture<Void> done = new CompletableFuture<>();
 
         ref.tell(a -> a.start(model, history, emitter, ctx, done,
-                clients, mcpUrls, maxIterations, ref));
+                clients, mcpUrls, maxIterations, maxTools, ref));
 
         try {
             done.get();  // blocks virtual thread until loop completes or is cancelled

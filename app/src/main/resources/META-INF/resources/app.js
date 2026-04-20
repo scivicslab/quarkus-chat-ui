@@ -1678,7 +1678,7 @@
             var response = await fetch(apiUrl('api/chat'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: text, model: modelSelect.value })
+                body: JSON.stringify({ text: text, model: modelSelect.value, noThink: !(document.getElementById('think-check') || {checked: true}).checked })
             });
             if (!response.ok) {
                 stopThinkingTimer();
@@ -2051,6 +2051,10 @@
             }
             if (cfg.logsEnabled === false) {
                 if (logPanel) logPanel.style.display = 'none';
+            }
+            var thinkLabel = document.getElementById('think-label');
+            if (thinkLabel) {
+                thinkLabel.style.display = cfg.supportsThinkToggle ? '' : 'none';
             }
         })
         .catch(function () {});

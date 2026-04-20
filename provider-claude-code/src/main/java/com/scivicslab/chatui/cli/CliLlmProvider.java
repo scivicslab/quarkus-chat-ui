@@ -227,7 +227,15 @@ public abstract class CliLlmProvider implements LlmProvider {
             }
             case "tool_result" -> {
                 DebugLogger.log("[EMIT] Sending tool_result to SSE");
-                if (event.isError() && event.content() != null && !event.content().isBlank()) {
+                if (event.isError() && "Exit plan mode?".equals(
+                        event.content() != null ? event.content().trim() : "")) {
+                    String promptId = event.promptId() != null
+                            ? event.promptId()
+                            : java.util.UUID.randomUUID().toString();
+                    registerPermissionRequest(promptId);
+                    emitter.accept(ChatEvent.prompt(promptId, "Exit plan mode?", "exit_plan_mode",
+                            List.of("Yes", "No")));
+                } else if (event.isError() && event.content() != null && !event.content().isBlank()) {
                     emitter.accept(ChatEvent.error(event.content()));
                 } else {
                     emitter.accept(ChatEvent.thinking("Tool completed."));

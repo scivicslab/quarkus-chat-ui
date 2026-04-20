@@ -75,10 +75,18 @@ public class QueueActor {
                         ActorRef<ChatActor> chatActorRef,
                         String source, String resultKey,
                         CompletableFuture<Void> done) {
+        enqueue(prompt, model, mode, emitter, chatActorRef, source, resultKey, done, false);
+    }
+
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatActor> chatActorRef,
+                        String source, String resultKey,
+                        CompletableFuture<Void> done, boolean noThink) {
 
         switch (mode) {
             case "cancel_and_send" -> {
-                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey);
+                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey, noThink);
                 queue.addFirst(item);
                 chatActorRef.tell(ChatActor::cancel);
                 emitter.accept(ChatEvent.info("Current prompt cancelled. Your message is queued."));
@@ -86,7 +94,7 @@ public class QueueActor {
             }
             default -> {
                 // "queue" mode (default)
-                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey);
+                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey, noThink);
                 queue.addLast(item);
                 emitter.accept(ChatEvent.info("Queued. Your message will be sent when the current prompt finishes."));
                 LOG.info("queue: queued prompt (queue size=" + queue.size() + ")");
@@ -160,7 +168,7 @@ public class QueueActor {
         LOG.info("Dequeuing prompt (remaining=" + queue.size() + "): "
                 + truncate(item.prompt(), 80));
 
-        chat.startPrompt(item.prompt(), item.model(), item.emitter(), chatActorRef, item.done(), item.resultKey());
+        chat.startPrompt(item.prompt(), item.model(), item.emitter(), chatActorRef, item.done(), item.resultKey(), item.noThink());
     }
 
     private static String truncate(String s, int maxLen) {
@@ -177,6 +185,7 @@ public class QueueActor {
             Consumer<ChatEvent> emitter,
             CompletableFuture<Void> done,
             String source,     // "human" | "agent:xxx" (e.g. "agent:localhost:28010")
-            String resultKey   // UUID for MCP result tracking, null for human prompts
+            String resultKey,  // UUID for MCP result tracking, null for human prompts
+            boolean noThink
     ) {}
 }

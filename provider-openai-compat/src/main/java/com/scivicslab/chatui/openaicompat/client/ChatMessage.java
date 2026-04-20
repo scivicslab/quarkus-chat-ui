@@ -47,4 +47,9 @@ public sealed interface ChatMessage {
     record ToolResult(String toolCallId, String toolName, String content) implements ChatMessage {
         @Override public String role() { return "tool"; }
     }
+
+    /** System-level instruction injected at the start of every request. */
+    record System(String content) implements ChatMessage {
+        @Override public String role() { return "system"; }
+    }
 }
