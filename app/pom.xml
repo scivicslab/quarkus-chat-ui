@@ -6,7 +6,7 @@
   <parent>
     <groupId>com.scivicslab.chatui</groupId>
     <artifactId>quarkus-chat-ui-parent</artifactId>
-    <version>2.0.0</version>
+    <version>2.0.1</version>
   </parent>
   <artifactId>chat-ui-app</artifactId>
 
@@ -79,6 +79,8 @@
 
   <properties>
     <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
+    <quarkus.package.jar.add-runner-suffix>false</quarkus.package.jar.add-runner-suffix>
+    <quarkus.package.output-name>quarkus-chat-ui-${project.version}</quarkus.package.output-name>
   </properties>
 
   <profiles>
@@ -123,7 +125,7 @@
                     <argument>-Dchat-ui.provider=claude</argument>
                     <argument>-Dquarkus.http.port=28015</argument>
                     <argument>-jar</argument>
-                    <argument>${project.build.directory}/chat-ui-app-${project.version}-runner.jar</argument>
+                    <argument>${project.build.directory}/quarkus-chat-ui-${project.version}.jar</argument>
                   </arguments>
                   <async>true</async>
                   <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
@@ -401,7 +403,7 @@
                     <argument>-Dchat-ui.servers=http://localhost:19080</argument>
                     <argument>-Dquarkus.http.port=28016</argument>
                     <argument>-jar</argument>
-                    <argument>${project.build.directory}/chat-ui-app-${project.version}-runner.jar</argument>
+                    <argument>${project.build.directory}/quarkus-chat-ui-${project.version}.jar</argument>
                   </arguments>
                   <async>true</async>
                   <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
@@ -470,7 +472,7 @@
                     <argument>-Dchat-ui.multi-user=true</argument>
                     <argument>-Dquarkus.http.port=28017</argument>
                     <argument>-jar</argument>
-                    <argument>${project.build.directory}/chat-ui-app-${project.version}-runner.jar</argument>
+                    <argument>${project.build.directory}/quarkus-chat-ui-${project.version}.jar</argument>
                   </arguments>
                   <async>true</async>
                   <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>

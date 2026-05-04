@@ -2,6 +2,7 @@ package com.scivicslab.chatui.core.mcp;
 
 import com.scivicslab.chatui.core.actor.ChatActor;
 import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
+import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.chatui.core.rest.ChatResource;
 import io.quarkiverse.mcp.server.Tool;
@@ -13,6 +14,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import java.net.URI;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -27,6 +29,10 @@ import java.util.stream.Collectors;
 public class McpTools {
 
     private static final Logger logger = Logger.getLogger(McpTools.class.getName());
+
+    // Result store for MCP-submitted prompts (works in both single- and multi-user mode)
+    private final ConcurrentHashMap<String, String> mcpStatus = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> mcpResults = new ConcurrentHashMap<>();
 
     @Inject
     ChatUiActorSystem actorSystem;
