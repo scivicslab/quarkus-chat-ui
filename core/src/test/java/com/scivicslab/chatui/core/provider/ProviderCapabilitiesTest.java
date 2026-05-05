@@ -17,11 +17,10 @@ class ProviderCapabilitiesTest {
         assertFalse(c.supportsImages());
         assertFalse(c.supportsUrlFetch());
         assertFalse(c.supportsSlashCommands());
-        assertFalse(c.supportsAutonomousEvents());
     }
 
     @Test
-    @DisplayName("CLI has interactive prompts, session restore, watchdog, slash commands, autonomous events enabled")
+    @DisplayName("CLI has interactive prompts, session restore, watchdog, slash commands enabled")
     void cli_cliCapabilitiesEnabled() {
         ProviderCapabilities c = ProviderCapabilities.CLI;
         assertTrue(c.supportsInteractivePrompts());
@@ -30,7 +29,6 @@ class ProviderCapabilitiesTest {
         assertFalse(c.supportsImages());
         assertFalse(c.supportsUrlFetch());
         assertTrue(c.supportsSlashCommands());
-        assertTrue(c.supportsAutonomousEvents());
     }
 
     @Test
@@ -43,19 +41,17 @@ class ProviderCapabilitiesTest {
         assertTrue(c.supportsImages());
         assertTrue(c.supportsUrlFetch());
         assertFalse(c.supportsSlashCommands());
-        assertFalse(c.supportsAutonomousEvents());
     }
 
     @Test
     @DisplayName("custom capabilities record constructed correctly")
     void custom_constructedCorrectly() {
-        ProviderCapabilities c = new ProviderCapabilities(true, false, false, true, false, false, false);
+        ProviderCapabilities c = new ProviderCapabilities(true, false, false, true, false, false);
         assertTrue(c.supportsInteractivePrompts());
         assertFalse(c.supportsSessionRestore());
         assertFalse(c.supportsWatchdog());
         assertTrue(c.supportsImages());
         assertFalse(c.supportsUrlFetch());
         assertFalse(c.supportsSlashCommands());
-        assertFalse(c.supportsAutonomousEvents());
     }
 }

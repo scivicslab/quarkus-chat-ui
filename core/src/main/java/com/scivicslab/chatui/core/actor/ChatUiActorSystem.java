@@ -102,6 +102,7 @@ public class ChatUiActorSystem {
 
         if (provider.capabilities().supportsWatchdog()) {
             watchdogRef = actorSystem.actorOf("watchdog", new WatchdogActor());
+            watchdogRef.tell(w -> w.setQueueActor(queueActorRef));
             chatActorRef.tell(a -> a.setWatchdog(watchdogRef));
             // Re-wire SseActor with the now-known watchdog ref
             sseActorRef.tell(a -> a.init(sseActorRef, chatActorRef, watchdogRef));
@@ -118,10 +119,6 @@ public class ChatUiActorSystem {
             LOG.info("ChatUiActorSystem initialized (single-user, provider=" + provider.id() + ", watchdog=disabled)");
         }
 
-        if (provider.capabilities().supportsAutonomousEvents()) {
-            chatActorRef.tell(a -> a.startAutonomousMonitor(chatActorRef));
-            LOG.info("Autonomous event monitor started (provider=" + provider.id() + ")");
-        }
     }
 
     private void initMultiUser() {

@@ -73,20 +73,6 @@ public interface LlmProvider {
     default ProviderCapabilities capabilities() { return ProviderCapabilities.DEFAULT; }
 
     /**
-     * Polls for the next autonomous event (one not triggered by {@link #sendPrompt}).
-     * Used by ChatActor's idle monitor to detect ScheduleWakeup responses.
-     *
-     * <p>Only called when {@code capabilities().supportsAutonomousEvents()} is true.
-     * Returns empty if no event arrives within {@code timeoutMs}.</p>
-     *
-     * @param timeoutMs maximum wait in milliseconds
-     * @return the next autonomous ChatEvent, or empty on timeout
-     */
-    default Optional<ChatEvent> pollAutonomousEvent(long timeoutMs) throws InterruptedException {
-        return Optional.empty();
-    }
-
-    /**
      * Detects an API key from environment variables specific to this provider.
      * Returns null if no relevant env var is set.
      * Override in each provider (e.g., ANTHROPIC_API_KEY, OPENAI_API_KEY).

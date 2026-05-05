@@ -17,20 +17,14 @@ public record ProviderCapabilities(
     /** Provider can fetch and inject URL content (/api/fetch-url). */
     boolean supportsUrlFetch,
     /** Provider supports slash commands (/model, /session, /clear). */
-    boolean supportsSlashCommands,
-    /**
-     * Provider can emit autonomous events (e.g. ScheduleWakeup responses) between
-     * user-prompted turns. When true, ChatActor starts an idle monitor that polls
-     * {@link LlmProvider#pollAutonomousEvent} and forwards events to the SSE stream.
-     */
-    boolean supportsAutonomousEvents
+    boolean supportsSlashCommands
 ) {
     public static final ProviderCapabilities DEFAULT = new ProviderCapabilities(
-            false, false, false, false, false, false, false);
+            false, false, false, false, false, false);
 
     public static final ProviderCapabilities CLI = new ProviderCapabilities(
-            true, true, true, false, false, true, true);
+            true, true, true, false, false, true);
 
     public static final ProviderCapabilities OPENAI_COMPAT = new ProviderCapabilities(
-            false, false, false, true, true, false, false);
+            false, false, false, true, true, false);
 }

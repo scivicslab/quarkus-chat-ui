@@ -36,6 +36,7 @@ public class WatchdogActor {
     private boolean stallNotified;
     private boolean stallRecovered;
     private Consumer<ChatEvent> sseEmitter;
+    private ActorRef<QueueActor> queueActor;
 
     /** Creates a watchdog with the default stall threshold of 90 seconds. */
     public WatchdogActor() {
@@ -108,10 +109,14 @@ public class WatchdogActor {
             stallNotified = true;
             long seconds = elapsed.getSeconds();
             String message = "LLM has not responded for " + seconds
-                    + " seconds. This may indicate a context overflow or network issue. "
-                    + "Consider sending a new message to resume.";
+                    + " seconds. Sending a recovery prompt automatically.";
             LOG.warning("Watchdog: stall detected (" + seconds + "s without activity)");
             emitEvent(ChatEvent.info(message));
+            if (queueActor != null && sseEmitter != null) {
+                queueActor.tell(q -> q.enqueue(
+                    "Continue. What are you currently doing? Report your status briefly.",
+                    null, "queue", sseEmitter, chatActor, "agent:watchdog", null));
+            }
         }
     }
 
@@ -123,6 +128,9 @@ public class WatchdogActor {
     public void setSseEmitter(Consumer<ChatEvent> emitter) { this.sseEmitter = emitter; }
     /** Unregisters the current SSE emitter. */
     public void clearSseEmitter() { this.sseEmitter = null; }
+
+    /** Wires the QueueActor so the watchdog can inject a recovery prompt on stall. */
+    public void setQueueActor(ActorRef<QueueActor> ref) { this.queueActor = ref; }
 
     /**
      * Returns whether a prompt is currently being monitored.
