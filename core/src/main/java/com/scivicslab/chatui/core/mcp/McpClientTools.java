@@ -27,10 +27,10 @@ public class McpClientTools {
 
     @Tool(description = "Send a message to another chat-ui instance via MCP. "
             + "Use this to reply to messages you received via MCP. "
-            + "Example: callMcpServer(serverUrl='http://localhost:28010', toolName='submitPrompt', "
+            + "Example: callMcpServer(serverUrl='http://localhost:28900', toolName='submitPrompt', "
             + "arguments='{\"prompt\":\"your message\",\"model\":\"sonnet\",\"_caller\":\"http://localhost:28011\"}')")
     String callMcpServer(
-            @ToolArg(description = "Target instance URL (e.g., http://localhost:28010)") String serverUrl,
+            @ToolArg(description = "Target instance URL (e.g., http://localhost:28900)") String serverUrl,
             @ToolArg(description = "Tool name (use 'submitPrompt' for messages)") String toolName,
             @ToolArg(description = "JSON arguments for the tool") String arguments,
             @ToolArg(description = "Your instance URL (e.g., http://localhost:28011)") String _caller

@@ -115,7 +115,7 @@ public class QueueActor {
      * messages the human has already queued up.
      *
      * <p>Agent messages have source values of the form {@code "agent:xxx"}
-     * (e.g. {@code "agent:localhost:28010"}).</p>
+     * (e.g. {@code "agent:localhost:28900"}).</p>
      */
     public void clearAgentMessages() {
         int before = queue.size();
@@ -184,7 +184,7 @@ public class QueueActor {
             String model,
             Consumer<ChatEvent> emitter,
             CompletableFuture<Void> done,
-            String source,     // "human" | "agent:xxx" (e.g. "agent:localhost:28010")
+            String source,     // "human" | "agent:xxx" (e.g. "agent:localhost:28900")
             String resultKey,  // UUID for MCP result tracking, null for human prompts
             boolean noThink
     ) {}

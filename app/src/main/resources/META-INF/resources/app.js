@@ -523,6 +523,9 @@
             case 'info':
                 appendMessage('info', event.content);
                 break;
+            case 'translation':
+                appendMessage('translation', event.content);
+                break;
             case 'mcp_user':
                 appendMcpUserMessage(event.content);
                 break;

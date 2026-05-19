@@ -43,7 +43,7 @@ class McpMessageDisplayE2E extends E2eTestBase {
     /**
      * Sends a message via MCP protocol to the target chat-ui instance.
      *
-     * @param targetUrl the base URL of the target chat-ui (e.g., http://localhost:28010)
+     * @param targetUrl the base URL of the target chat-ui (e.g., http://localhost:28900)
      * @param message   the message content to send
      * @param caller    the caller identifier (e.g., http://localhost:28011)
      * @return the HTTP response body

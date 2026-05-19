@@ -14,7 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
  * Base class for E2E integration tests using Java Playwright.
  *
  * <p>Tests connect to an externally running quarkus-chat-ui instance.
- * The base URL defaults to {@code http://localhost:28010} and can be
+ * The base URL defaults to {@code http://localhost:28900} and can be
  * overridden via the {@code chat-ui.e2e.base-url} system property.</p>
  *
  * <p>Each test method gets a fresh {@link BrowserContext} (isolated
@@ -23,7 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
  */
 abstract class E2eTestBase {
 
-    private static final String DEFAULT_BASE_URL = "http://localhost:28010";
+    private static final String DEFAULT_BASE_URL = "http://localhost:28900";
 
     static Playwright playwright;
     static Browser browser;

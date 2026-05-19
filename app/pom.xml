@@ -6,7 +6,7 @@
   <parent>
     <groupId>com.scivicslab.chatui</groupId>
     <artifactId>quarkus-chat-ui-parent</artifactId>
-    <version>2.1.0</version>
+    <version>2.2.0</version>
   </parent>
   <artifactId>chat-ui-app</artifactId>
 
@@ -328,10 +328,10 @@
                   <arguments>
                     <argument>--add-opens</argument>
                     <argument>java.base/java.lang=ALL-UNNAMED</argument>
-                    <argument>-Dquarkus.http.port=28010</argument>
+                    <argument>-Dquarkus.http.port=28900</argument>
                     <argument>-Dchat-ui.provider=openai-compat</argument>
                     <argument>-jar</argument>
-                    <argument>${project.build.directory}/quarkus-app/quarkus-run.jar</argument>
+                    <argument>${project.build.directory}/quarkus-chat-ui-${project.version}.jar</argument>
                   </arguments>
                   <async>true</async>
                   <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>

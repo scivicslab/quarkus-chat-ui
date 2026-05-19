@@ -12,6 +12,7 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.net.URI;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -42,6 +43,15 @@ public class McpTools {
 
     @ConfigProperty(name = "quarkus.http.port", defaultValue = "8080")
     int httpPort;
+
+    @ConfigProperty(name = "chat-ui.provider", defaultValue = "claude")
+    String providerName;
+
+    // Subprocess-type LLM backends (Claude Code CLI, Codex CLI) are spawned as OS
+    // processes and read their input from stdin. Their safety policies inspect the
+    // prompt body for MCP-origin markers (e.g. "[Context] Received via MCP from: ...")
+    // and refuse to respond. For these backends the wrapping must be stripped.
+    private static final Set<String> SUBPROCESS_PROVIDERS = Set.of("claude", "codex");
 
     @Tool(description = "Get the current status of the chat-ui instance (model, session, busy state)")
     String getStatus() {
@@ -83,8 +93,11 @@ public class McpTools {
                 ? formatCallerLabel(_caller) : "unknown";
         chatResource.emitSse(ChatEvent.mcpUser("[MCP from " + callerLabel + "] " + prompt));
 
-        // Enrich prompt with position awareness (provider-agnostic solution)
-        String enrichedPrompt = buildEnrichedPrompt(prompt, _caller);
+        // For subprocess-type backends (claude, codex), bypass enrichment and pass the
+        // raw prompt: these LLMs refuse anything that looks like an MCP-relayed message.
+        String enrichedPrompt = isSubprocessProvider()
+                ? prompt
+                : buildEnrichedPrompt(prompt, _caller);
 
         // Generate a UUID that the caller uses to poll status and retrieve the result.
         String resultKey = UUID.randomUUID().toString();
@@ -131,6 +144,11 @@ public class McpTools {
             return String.format("Error: %s", response.error());
         }
         return response.result();
+    }
+
+    private boolean isSubprocessProvider() {
+        return providerName != null
+                && SUBPROCESS_PROVIDERS.contains(providerName.toLowerCase().trim());
     }
 
     /**
@@ -194,7 +212,7 @@ public class McpTools {
 
     /**
      * Extracts base URL from _caller parameter.
-     * Example: "http://localhost:28010/api/sessions/abc" -> "http://localhost:28010"
+     * Example: "http://localhost:28900/api/sessions/abc" -> "http://localhost:28900"
      */
     private String extractUrl(String caller) {
         if (caller == null) {
@@ -214,7 +232,7 @@ public class McpTools {
 
     /**
      * Formats _caller into a short label for display.
-     * Example: "http://localhost:28010" -> "localhost:28010"
+     * Example: "http://localhost:28900" -> "localhost:28900"
      */
     private String formatCallerLabel(String caller) {
         if (caller == null) {

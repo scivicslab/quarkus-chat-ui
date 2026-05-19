@@ -182,6 +182,7 @@ public class ChatResource {
     private void writeSse(HttpServerResponse response, ChatEvent event) {
         try {
             String json = objectMapper.writeValueAsString(event);
+            logger.info("[SSE_OUT] " + json);
             response.write("data: " + json + "\n\n");
         } catch (Exception e) {
             logger.log(Level.WARNING, "Failed to write SSE event: type=" + event.type(), e);

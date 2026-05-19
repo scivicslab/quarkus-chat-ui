@@ -63,7 +63,7 @@ The runnable JAR is produced at `app/target/quarkus-app/quarkus-run.jar`.
 
 ## Run
 
-In all cases, open `http://localhost:28010` in a browser after startup.  
+In all cases, open `http://localhost:28900` in a browser after startup.  
 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` must be set in the environment for Claude and Codex providers.
 
 ---
@@ -76,7 +76,7 @@ The fat-jar (`quarkus-chat-ui-<version>.jar`) runs on any platform with Java 21+
 
 ```bash
 java -Dchat-ui.provider=claude \
-     -Dquarkus.http.port=28010 \
+     -Dquarkus.http.port=28900 \
      -jar quarkus-chat-ui-<version>.jar
 ```
 
@@ -84,7 +84,7 @@ java -Dchat-ui.provider=claude \
 
 ```bash
 java -Dchat-ui.provider=codex \
-     -Dquarkus.http.port=28010 \
+     -Dquarkus.http.port=28900 \
      -jar quarkus-chat-ui-<version>.jar
 ```
 
@@ -94,13 +94,13 @@ java -Dchat-ui.provider=codex \
 # Ollama (default port 11434)
 java -Dchat-ui.provider=openai-compat \
      -Dchat-ui.servers=http://localhost:11434/v1 \
-     -Dquarkus.http.port=28010 \
+     -Dquarkus.http.port=28900 \
      -jar quarkus-chat-ui-<version>.jar
 
 # vLLM (default port 8000)
 java -Dchat-ui.provider=openai-compat \
      -Dchat-ui.servers=http://localhost:8000 \
-     -Dquarkus.http.port=28010 \
+     -Dquarkus.http.port=28900 \
      -jar quarkus-chat-ui-<version>.jar
 ```
 
@@ -164,7 +164,7 @@ Each instance exposes itself as an HTTP MCP server at `/mcp`. Available tools:
 Register as an MCP server in Claude Code CLI:
 
 ```bash
-claude mcp add --transport http chat-ui-28010 http://localhost:28010/mcp
+claude mcp add --transport http chat-ui-28900 http://localhost:28900/mcp
 ```
 
 ## Testing

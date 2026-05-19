@@ -231,7 +231,7 @@ class QueueActorTest {
 
         queueRef.tell(q -> q.enqueue("Human question", null, "queue", events::add, chatActorRef, "human"))
                 .get(5, TimeUnit.SECONDS);
-        queueRef.tell(q -> q.enqueue("Agent reply A", null, "queue", events::add, chatActorRef, "agent:localhost:28010"))
+        queueRef.tell(q -> q.enqueue("Agent reply A", null, "queue", events::add, chatActorRef, "agent:localhost:28900"))
                 .get(5, TimeUnit.SECONDS);
         queueRef.tell(q -> q.enqueue("Agent reply B", null, "queue", events::add, chatActorRef, "agent:localhost:28011"))
                 .get(5, TimeUnit.SECONDS);
