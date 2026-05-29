@@ -382,20 +382,20 @@ header h1[contenteditable]:focus {
 }
 
 .message.translation {
-    background: rgba(166, 227, 161, 0.08);
-    border: 1px solid rgba(166, 227, 161, 0.3);
-    align-self: flex-start;
+    background: var(--user-bg);
+    border: 1px solid var(--accent-green);
+    align-self: flex-end;
     font-size: 12px;
-    color: rgba(166, 227, 161, 0.8);
+    color: var(--accent-green);
     font-style: italic;
     white-space: pre-wrap;
+    opacity: 0.85;
 }
 
 .message.translation::before {
     content: "EN: ";
     font-style: normal;
     font-weight: 600;
-    opacity: 0.7;
 }
 
 .message-footer {

@@ -47,8 +47,8 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
 
     private static final Logger LOG = Logger.getLogger(AgentLoopExtensionImpl.class.getName());
 
-    @ConfigProperty(name = "chat-ui.agent-loop.mcp-urls", defaultValue = "http://localhost:28081")
-    String mcpUrlsRaw;
+    @ConfigProperty(name = "chat-ui.agent-loop.mcp-urls")
+    java.util.Optional<String> mcpUrlsRaw;
 
     @ConfigProperty(name = "chat-ui.agent-loop.max-iterations", defaultValue = "10")
     int maxIterations;
@@ -75,14 +75,14 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
 
     @Override
     public boolean isEnabled() {
-        return !mcpUrlsRaw.isBlank();
+        return mcpUrlsRaw.isPresent() && !mcpUrlsRaw.get().isBlank();
     }
 
     @Override
     public void initialize(List<OpenAiCompatClient> clients) {
         this.clients = List.copyOf(clients);
         LOG.info("AgentLoop initialized with " + clients.size() + " client(s), "
-                + "mcp-urls=" + mcpUrlsRaw + ", max-iterations=" + maxIterations);
+                + "mcp-urls=" + mcpUrlsRaw.orElse("(none)") + ", max-iterations=" + maxIterations);
     }
 
     // ── cancel (called via OpenAiCompatProvider.cancel()) ────────────────────
@@ -132,9 +132,8 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private List<String> parseMcpUrls() {
-        String raw = mcpUrlsRaw;
-        if (raw.isBlank()) return List.of();
-        return Arrays.stream(raw.split(","))
+        if (mcpUrlsRaw.isEmpty() || mcpUrlsRaw.get().isBlank()) return List.of();
+        return Arrays.stream(mcpUrlsRaw.get().split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .toList();

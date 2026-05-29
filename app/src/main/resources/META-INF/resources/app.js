@@ -524,7 +524,7 @@
                 appendMessage('info', event.content);
                 break;
             case 'translation':
-                appendMessage('translation', event.content);
+                insertTranslation(event.content);
                 break;
             case 'mcp_user':
                 appendMcpUserMessage(event.content);
@@ -900,6 +900,26 @@
                 if (notificationBar.children.length === 0) notificationBar.style.display = 'none';
             }, 500);
         }, 10000);
+    }
+
+    // Insert a translation bubble directly below the user message, before the
+    // assistant "Waiting for response..." placeholder that was already added to the DOM.
+    function insertTranslation(text) {
+        var div = document.createElement('div');
+        div.className = 'message translation';
+        div.textContent = text;
+        // currentAssistantMsg is the "Waiting for response..." div that sits right
+        // after the user message. Inserting before it places the translation between
+        // the user message and the assistant placeholder — exactly where it belongs.
+        if (currentAssistantMsg && currentAssistantMsg.parentNode === chatArea) {
+            chatArea.insertBefore(div, currentAssistantMsg);
+        } else {
+            chatArea.appendChild(div);
+        }
+        chatHistory.push({ role: 'translation', text: text });
+        saveHistory();
+        scrollToBottom();
+        trimChatArea();
     }
 
     function appendMessage(className, text) {

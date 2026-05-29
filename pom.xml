@@ -5,7 +5,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.scivicslab.chatui</groupId>
   <artifactId>quarkus-chat-ui-parent</artifactId>
-  <version>2.2.0</version>
+  <version>2.3.0</version>
   <packaging>pom</packaging>
 
   <modules>
@@ -17,6 +17,7 @@
     <module>plugin-openai-compat-multiuser</module>
     <module>plugin-openai-compat-agent</module>
     <module>plugin-fs-tools</module>
+    <module>plugin-translate</module>
     <module>app</module>
   </modules>
 
@@ -98,6 +99,11 @@
       <dependency>
         <groupId>com.scivicslab.chatui</groupId>
         <artifactId>chat-ui-plugin-fs-tools</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.scivicslab.chatui</groupId>
+        <artifactId>chat-ui-plugin-translate</artifactId>
         <version>${project.version}</version>
       </dependency>
     </dependencies>

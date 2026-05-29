@@ -5,6 +5,7 @@ import com.scivicslab.chatui.core.actor.ChatActor;
 import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.WatchdogActor;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
+import com.scivicslab.chatui.core.plugin.PromptPreprocessor;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.service.UrlFetchService;
 import io.smallrye.common.annotation.Blocking;
@@ -71,6 +72,9 @@ public class ChatResource {
 
     @Inject
     Instance<UrlFetchService> urlFetchService;
+
+    @Inject
+    Instance<PromptPreprocessor> promptPreprocessors;
 
     // Single-user SSE state is now owned by SseActor — no mutable fields here.
 
@@ -242,8 +246,17 @@ public class ChatResource {
                 ? request.model : chatRef.ask(ChatActor::getModel).join();
         var queueRef = actorSystem.getQueueActor();
         boolean noThink = request.noThink;
+
+        // Apply optional prompt preprocessor (e.g., translate to English).
+        // If no preprocessor is on the classpath this is a no-op.
+        String promptText = request.text;
+        if (!promptPreprocessors.isUnsatisfied()) {
+            promptText = promptPreprocessors.get().process(promptText, this::emitSse);
+        }
+        final String finalPrompt = promptText;
+
         queueRef.tell(q -> q.enqueue(
-                request.text, model, "queue",
+                finalPrompt, model, "queue",
                 this::emitSse, chatRef, "human", null,
                 new java.util.concurrent.CompletableFuture<>(), noThink));
         return ChatEvent.info("Processing");
@@ -254,29 +267,34 @@ public class ChatResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
     /**
-     * Submits a user prompt to the LLM asynchronously.
-     * Returns immediately with a session ID. The response is streamed via SSE.
+     * Submits a user prompt to the LLM asynchronously via QueueActor.
+     * Returns immediately with a UUID result key. Use GET /api/chat/status/{key}
+     * and GET /api/chat/result/{key} to poll for completion and retrieve the result.
      *
      * @param request the prompt request containing user text and optional model override
-     * @return a submit response with session ID and status, or an error
+     * @return a submit response with UUID result key and status, or an error
      */
     public SubmitResponse submit(PromptRequest request) {
         if (request == null || request.text == null || request.text.isBlank()) {
             return new SubmitResponse(null, "error", "Empty prompt");
         }
-        var ref = actorSystem.getChatActor();
-        if (ref.ask(ChatActor::isBusy).join()) {
-            return new SubmitResponse(null, "busy", "LLM is currently processing another prompt");
-        }
+        var chatRef = actorSystem.getChatActor();
+        var queueRef = actorSystem.getQueueActor();
         String model = (request.model != null && !request.model.isBlank())
-                ? request.model : ref.ask(ChatActor::getModel).join();
-        ref.tell(a -> a.startPrompt(request.text, model, this::emitSse, ref, new CompletableFuture<>()));
+                ? request.model : chatRef.ask(ChatActor::getModel).join();
 
-        // Wait briefly for session ID to be set
-        try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        // Display the prompt as a user message in the chat area
+        emitSse(ChatEvent.mcpUser(request.text));
 
-        String sessionId = ref.ask(ChatActor::getSessionId).join();
-        return new SubmitResponse(sessionId, "submitted", null);
+        String resultKey = java.util.UUID.randomUUID().toString();
+        chatRef.tell(a -> a.registerPendingResultKey(resultKey));
+
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        queueRef.tell(q -> q.enqueue(
+                request.text, model, "queue",
+                this::emitSse, chatRef, "agent:api", resultKey, done));
+
+        return new SubmitResponse(resultKey, "submitted", null);
     }
 
     @GET

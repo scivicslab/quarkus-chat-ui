@@ -20,11 +20,11 @@ class SlashCommandHandlerTest {
      * Only config and lastSessionId are relevant to SlashCommandHandler.
      */
     private static class StubCliProcess extends CliProcess {
-        private final String lastSessionId;
+        private String stubLastSessionId;
 
         StubCliProcess(CliConfig config, String lastSessionId) {
             super("stub-binary", "STUB_API_KEY", config);
-            this.lastSessionId = lastSessionId;
+            this.stubLastSessionId = lastSessionId;
         }
 
         StubCliProcess(CliConfig config) {
@@ -33,7 +33,12 @@ class SlashCommandHandlerTest {
 
         @Override
         public String getLastSessionId() {
-            return lastSessionId;
+            return stubLastSessionId;
+        }
+
+        @Override
+        public void clearLastSessionId() {
+            stubLastSessionId = null;
         }
     }
 
@@ -184,6 +189,17 @@ class SlashCommandHandlerTest {
             ChatEvent event = events.getFirst();
             assertEquals("info", event.type());
             assertTrue(event.content().contains("Session cleared"));
+        }
+
+        @Test
+        @DisplayName("/clear also resets lastSessionId so the UI shows no stale session")
+        void clear_resetsLastSessionId() {
+            StubCliProcess processWithSession = new StubCliProcess(config, "session-abc-123");
+            SlashCommandHandler h = new SlashCommandHandler(processWithSession);
+
+            h.handle("/clear", events::add);
+
+            assertNull(processWithSession.getLastSessionId());
         }
 
         @Test

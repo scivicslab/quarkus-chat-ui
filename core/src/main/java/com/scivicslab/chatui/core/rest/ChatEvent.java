@@ -175,6 +175,18 @@ public record ChatEvent(
     }
 
     /**
+     * Creates a translation event displaying an English translation of the user's prompt.
+     * Rendered in the UI with a green "EN: " prefix badge.
+     *
+     * @param content the English translation text
+     * @return a new translation event
+     */
+    public static ChatEvent translation(String content) {
+        return new ChatEvent("translation", content, null, null, null, null, null,
+                             null, null, null, null, null, null);
+    }
+
+    /**
      * Creates a btw_delta event carrying a partial text chunk from a /btw side question response.
      *
      * @param content the partial text content

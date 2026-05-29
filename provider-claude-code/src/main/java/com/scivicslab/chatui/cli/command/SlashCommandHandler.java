@@ -67,7 +67,9 @@ public class SlashCommandHandler {
     }
 
     private void handleClear(Consumer<ChatEvent> sender) {
+        cliProcess.cancel();
         cliProcess.setConfig(cliProcess.getConfig().withSessionId(null));
+        cliProcess.clearLastSessionId();
         sender.accept(ChatEvent.info("Session cleared. Starting fresh conversation."));
     }
 

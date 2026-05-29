@@ -86,6 +86,12 @@ public class CliProcess {
     public String getLastSessionId() { return lastSessionId; }
 
     /**
+     * Clears the last known session ID. Called on /clear so the UI shows no session
+     * until the next prompt establishes a new one.
+     */
+    public void clearLastSessionId() { this.lastSessionId = null; }
+
+    /**
      * Checks whether the underlying OS process is still running.
      *
      * @return {@code true} if the process is alive
@@ -168,7 +174,14 @@ public class CliProcess {
             while (true) {
                 StreamEvent event = eventQueue.poll(60, TimeUnit.SECONDS);
                 if (event == null) {
-                    // Timeout — process may be stalled
+                    if (currentProcess != null && currentProcess.isAlive()) {
+                        // Process is alive but slow (e.g. 529 retries in progress) — keep waiting.
+                        // Do NOT return here: the response will eventually arrive and must reach the callback.
+                        logger.info(binary + " CLI: no event in 60s but process is alive — continuing to wait...");
+                        continue;
+                    }
+                    // Process has died — give up and discard any stale queued events.
+                    eventQueue.clear();
                     if (callback != null) callback.onComplete(-1);
                     return -1;
                 }
