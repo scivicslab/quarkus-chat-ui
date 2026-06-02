@@ -123,6 +123,7 @@ public class StreamEventParser {
                 case "tool_use" -> {
                     String toolName = block.optString("name", "");
                     if ("AskUserQuestion".equals(toolName)) return parseEmbeddedAskUser(block, rawJson);
+                    if ("ExitPlanMode".equals(toolName)) return parseExitPlanMode(block, rawJson);
                     toolNames.add(toolName);
                 }
             }
@@ -183,6 +184,35 @@ public class StreamEventParser {
         }
         return new StreamEvent("error", json.optString("error", json.optString("message", "Unknown error")),
                 null, -1, -1, true, rawJson);
+    }
+
+    /**
+     * Parses an {@code ExitPlanMode} tool_use block into an interactive plan-approval prompt.
+     *
+     * <p>When Claude enters plan mode (via the {@code EnterPlanMode} tool) and finishes
+     * planning, it calls {@code ExitPlanMode} with the proposed plan in either the
+     * {@code plan} or {@code summary} input field. In stream-json mode the CLI does not
+     * block for approval — it auto-denies the tool with an "Exit plan mode?" tool_result
+     * and ends the turn. This method surfaces the plan text so the UI can display it and
+     * ask the user to approve; on approval the caller starts a fresh turn telling Claude
+     * to proceed.</p>
+     *
+     * @param toolUseBlock the {@code ExitPlanMode} tool_use block
+     * @param rawJson      the original JSON line
+     * @return a prompt event of type {@code "exit_plan_mode"} carrying the plan text
+     */
+    private StreamEvent parseExitPlanMode(JSONObject toolUseBlock, String rawJson) {
+        String id = toolUseBlock.optString("id", UUID.randomUUID().toString());
+        JSONObject input = toolUseBlock.optJSONObject("input");
+        String plan = input != null
+                ? input.optString("plan", input.optString("summary", ""))
+                : "";
+        if (plan.isBlank()) plan = "Claude has finished planning. Proceed with the plan?";
+        List<String> options = new ArrayList<>();
+        options.add("Yes, proceed");
+        options.add("No, keep planning");
+        logger.info("ExitPlanMode prompt (id=" + id + ")");
+        return StreamEvent.prompt(id, plan, "exit_plan_mode", options, rawJson);
     }
 
     private StreamEvent parseEmbeddedAskUser(JSONObject toolUseBlock, String rawJson) {

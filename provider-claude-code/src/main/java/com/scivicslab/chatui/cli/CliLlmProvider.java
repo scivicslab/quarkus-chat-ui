@@ -35,6 +35,8 @@ public abstract class CliLlmProvider implements LlmProvider {
     protected final Path sessionFile;
     private final java.util.Set<String> pendingPermissionIds =
             java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+    private final java.util.Set<String> pendingPlanApprovalIds =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
     /**
      * Creates a new CLI-based LLM provider.
@@ -129,6 +131,23 @@ public abstract class CliLlmProvider implements LlmProvider {
         pendingPermissionIds.add(toolUseId);
     }
 
+    /** Records an ExitPlanMode prompt id so the answer is routed as a new turn, not a tool result. */
+    public void registerPlanApproval(String promptId) {
+        pendingPlanApprovalIds.add(promptId);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public boolean isPlanApproval(String promptId) {
+        return promptId != null && pendingPlanApprovalIds.contains(promptId);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void clearPlanApproval(String promptId) {
+        pendingPlanApprovalIds.remove(promptId);
+    }
+
     /** Cancels the currently running CLI process, if any. */
     @Override
     public void cancel() { cliProcess.cancel(); }
@@ -209,14 +228,13 @@ public abstract class CliLlmProvider implements LlmProvider {
             }
             case "tool_result" -> {
                 DebugLogger.log("[EMIT] Sending tool_result to SSE");
+                // The plan-approval prompt is emitted from the ExitPlanMode tool_use block
+                // (see StreamEventParser.parseExitPlanMode). The CLI then auto-denies the
+                // tool with an "Exit plan mode?" tool_result — swallow it so it does not
+                // surface as a spurious error.
                 if (event.isError() && "Exit plan mode?".equals(
                         event.content() != null ? event.content().trim() : "")) {
-                    String promptId = event.promptId() != null
-                            ? event.promptId()
-                            : java.util.UUID.randomUUID().toString();
-                    registerPermissionRequest(promptId);
-                    emitter.accept(ChatEvent.prompt(promptId, "Exit plan mode?", "exit_plan_mode",
-                            List.of("Yes", "No")));
+                    DebugLogger.log("[EMIT] Swallowing ExitPlanMode auto-denial");
                 } else if (event.isError() && event.content() != null && !event.content().isBlank()) {
                     emitter.accept(ChatEvent.error(event.content()));
                 } else {
@@ -247,6 +265,8 @@ public abstract class CliLlmProvider implements LlmProvider {
                 DebugLogger.log("[EMIT] Sending prompt to SSE");
                 if ("permission".equals(event.promptType()) && event.promptId() != null) {
                     registerPermissionRequest(event.promptId());
+                } else if ("exit_plan_mode".equals(event.promptType()) && event.promptId() != null) {
+                    registerPlanApproval(event.promptId());
                 }
                 emitter.accept(ChatEvent.prompt(
                         event.promptId(), event.content(), event.promptType(), event.options()));

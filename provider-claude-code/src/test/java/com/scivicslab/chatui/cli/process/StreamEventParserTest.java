@@ -602,4 +602,56 @@ class StreamEventParserTest {
             assertEquals("Write", e.content());
         }
     }
+
+    // --- ExitPlanMode (plan-approval prompt) ---
+
+    @Nested
+    @DisplayName("ExitPlanMode plan-approval prompt")
+    class ExitPlanModePrompt {
+
+        @Test
+        @DisplayName("ExitPlanMode with 'plan' field becomes an exit_plan_mode prompt carrying the plan")
+        void parse_exitPlanMode_planField() {
+            String json = """
+                {"type":"assistant","message":{"model":"claude-opus-4-6",
+                 "content":[{"type":"tool_use","id":"toolu_plan1","name":"ExitPlanMode",
+                 "input":{"plan":"# Plan\\n- step one\\n- step two"}}]}}
+                """.trim();
+            StreamEvent e = parser.parse(json);
+            assertTrue(e.isPrompt());
+            assertEquals("exit_plan_mode", e.promptType());
+            assertEquals("toolu_plan1", e.promptId());
+            assertTrue(e.content().contains("step one"));
+            assertEquals(2, e.options().size());
+        }
+
+        @Test
+        @DisplayName("ExitPlanMode falls back to the 'summary' field when 'plan' is absent")
+        void parse_exitPlanMode_summaryField() {
+            String json = """
+                {"type":"assistant","message":{"model":"claude-haiku-4-5",
+                 "content":[{"type":"tool_use","id":"toolu_plan2","name":"ExitPlanMode",
+                 "input":{"summary":"Write hi to ./ptest.txt"}}]}}
+                """.trim();
+            StreamEvent e = parser.parse(json);
+            assertTrue(e.isPrompt());
+            assertEquals("exit_plan_mode", e.promptType());
+            assertEquals("toolu_plan2", e.promptId());
+            assertEquals("Write hi to ./ptest.txt", e.content());
+        }
+
+        @Test
+        @DisplayName("ExitPlanMode with no plan text still produces a non-blank prompt")
+        void parse_exitPlanMode_emptyInput() {
+            String json = """
+                {"type":"assistant","message":{"model":"m",
+                 "content":[{"type":"tool_use","id":"toolu_plan3","name":"ExitPlanMode",
+                 "input":{}}]}}
+                """.trim();
+            StreamEvent e = parser.parse(json);
+            assertTrue(e.isPrompt());
+            assertEquals("exit_plan_mode", e.promptType());
+            assertFalse(e.content().isBlank());
+        }
+    }
 }

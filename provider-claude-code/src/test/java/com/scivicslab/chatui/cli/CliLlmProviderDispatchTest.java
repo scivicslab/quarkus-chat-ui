@@ -94,6 +94,40 @@ class CliLlmProviderDispatchTest {
 
     // --- Capabilities ---
 
+    // --- Plan-approval routing (ExitPlanMode) ---
+
+    @Nested
+    @DisplayName("Plan-approval registration and routing")
+    class PlanApprovalRouting {
+
+        @Test
+        @DisplayName("registerPlanApproval marks an id as a plan approval, not a permission")
+        void registerPlanApproval_marksId() {
+            provider.registerPlanApproval("toolu_plan");
+            assertTrue(provider.isPlanApproval("toolu_plan"));
+            // A plan approval is distinct from a tool-permission reply.
+            assertFalse(provider.hasPendingPermission("toolu_plan"));
+        }
+
+        @Test
+        @DisplayName("isPlanApproval is false for unknown and null ids")
+        void isPlanApproval_unknownId() {
+            assertFalse(provider.isPlanApproval("nope"));
+            assertFalse(provider.isPlanApproval(null));
+        }
+
+        @Test
+        @DisplayName("clearPlanApproval removes the id (one-time use)")
+        void clearPlanApproval_removesId() {
+            provider.registerPlanApproval("toolu_once");
+            assertTrue(provider.isPlanApproval("toolu_once"));
+            provider.clearPlanApproval("toolu_once");
+            assertFalse(provider.isPlanApproval("toolu_once"));
+        }
+    }
+
+    // --- Capabilities ---
+
     @Test
     @DisplayName("CLI provider returns CLI capabilities")
     void capabilities_returnsCli() {

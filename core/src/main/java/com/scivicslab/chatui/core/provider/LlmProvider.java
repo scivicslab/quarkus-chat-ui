@@ -61,6 +61,23 @@ public interface LlmProvider {
         throw new UnsupportedOperationException("Interactive prompts not supported by " + id());
     }
 
+    /**
+     * Returns whether the given prompt id is an outstanding plan-approval prompt
+     * (emitted when Claude calls {@code ExitPlanMode}).
+     *
+     * <p>Plan approval is not a tool-permission reply: by the time the prompt is shown
+     * the turn has already ended, so the answer must start a fresh turn rather than be
+     * written back to the subprocess as a tool result. Callers use this to route the
+     * response accordingly.</p>
+     *
+     * @param promptId the prompt identifier being answered
+     * @return {@code true} if this id is an outstanding plan-approval prompt
+     */
+    default boolean isPlanApproval(String promptId) { return false; }
+
+    /** Removes the given plan-approval prompt id from the outstanding set, if present. */
+    default void clearPlanApproval(String promptId) { }
+
     /** True if the given input is a slash command handled by this provider. */
     default boolean isCommand(String input) { return false; }
 

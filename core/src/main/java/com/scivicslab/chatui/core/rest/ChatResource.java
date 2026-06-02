@@ -379,6 +379,15 @@ public class ChatResource {
         if (request == null || request.response == null || request.response.isBlank()) {
             return ChatEvent.error("Empty response");
         }
+
+        // Plan-approval answers (ExitPlanMode) are not tool-permission replies: the turn
+        // that proposed the plan has already ended, so writing a tool result back to the
+        // subprocess would reach no active read loop. Instead, start a fresh turn.
+        if (!actorSystem.isMultiUser()
+                && actorSystem.getProvider().isPlanApproval(request.promptId)) {
+            return respondToPlan(request);
+        }
+
         try {
             actorSystem.getChatActor().ask(a -> {
                 try {
@@ -394,6 +403,37 @@ public class ChatResource {
             logger.log(Level.WARNING, "Failed to send response to provider", cause);
             return ChatEvent.error("Failed to send response: " + cause.getMessage());
         }
+    }
+
+    /**
+     * Handles a plan-approval answer (ExitPlanMode) by starting a fresh turn.
+     *
+     * <p>On approval, a continuation prompt instructing Claude to proceed is enqueued so its
+     * implementation streams over SSE just like a normal message. On rejection, the user is
+     * asked to type revised guidance — the next ordinary message resumes the live session.</p>
+     *
+     * @param request the response carrying the plan prompt id and the user's answer
+     * @return an info event acknowledging the action
+     */
+    private ChatEvent respondToPlan(RespondRequest request) {
+        actorSystem.getProvider().clearPlanApproval(request.promptId);
+        boolean approved = request.response.trim().toLowerCase().startsWith("yes");
+        if (!approved) {
+            emitSse(ChatEvent.mcpUser("(Plan rejected)"));
+            return ChatEvent.info("Plan rejected. Type your revised guidance to continue.");
+        }
+
+        emitSse(ChatEvent.mcpUser("(Plan approved — proceeding)"));
+        var chatRef = actorSystem.getChatActor();
+        var queueRef = actorSystem.getQueueActor();
+        String model = chatRef.ask(ChatActor::getModel).join();
+        String continuation =
+                "The plan above is approved. Proceed with implementing it now.";
+        queueRef.tell(q -> q.enqueue(
+                continuation, model, "queue",
+                this::emitSse, chatRef, "human", null,
+                new CompletableFuture<>(), false));
+        return ChatEvent.info("Proceeding with the approved plan");
     }
 
     @POST
