@@ -194,4 +194,31 @@ public class ChatUiActorSystem {
     }
 
     public LlmProvider getProvider() { return provider; }
+
+    /**
+     * Builds the actor tree for {@code GET /api/actors} (right-pane Actors tab). The actors here are
+     * flat (created via {@code actorOf}), so they are returned as children of one synthetic root node.
+     * Uses only non-queue calls ({@code isAlive} / {@code listActorNames}) plus {@code askNow} for the
+     * wrapped POJO's type, so it never blocks behind a busy actor's mailbox.
+     */
+    public ActorNode getActorTree() {
+        if (actorSystem == null) {
+            return new ActorNode("chat-ui", "ActorSystem", false, java.util.List.of());
+        }
+        java.util.List<ActorNode> children = new java.util.ArrayList<>();
+        for (String name : new java.util.TreeSet<>(actorSystem.listActorNames())) {
+            ActorRef<?> ref = actorSystem.getActor(name);
+            if (ref == null) continue;
+            String type;
+            try {
+                @SuppressWarnings("unchecked")
+                ActorRef<Object> r = (ActorRef<Object>) ref;
+                type = r.askNow(o -> o.getClass().getSimpleName()).get(2, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                type = "?";
+            }
+            children.add(new ActorNode(ref.getName(), type, ref.isAlive(), java.util.List.of()));
+        }
+        return new ActorNode("chat-ui", "ActorSystem", actorSystem.isAlive(), children);
+    }
 }

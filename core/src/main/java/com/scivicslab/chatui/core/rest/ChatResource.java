@@ -2,6 +2,7 @@ package com.scivicslab.chatui.core.rest;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scivicslab.chatui.core.actor.ChatActor;
+import com.scivicslab.chatui.core.actor.ActorNode;
 import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.WatchdogActor;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
@@ -529,6 +530,16 @@ public class ChatResource {
             return actorSystem.getMultiUserExtension().getRecentLogs();
         }
         return actorSystem.getChatActor().ask(ChatActor::getRecentLogs).join();
+    }
+
+    @GET
+    @Path("/actors")
+    @Produces(MediaType.APPLICATION_JSON)
+    /**
+     * Returns the live actor tree (right-pane Actors tab): one synthetic root with each actor as a child.
+     */
+    public ActorNode actors() {
+        return actorSystem.getActorTree();
     }
 
     @GET
