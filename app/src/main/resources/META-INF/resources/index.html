@@ -75,8 +75,6 @@
                     </div>
                 </div>
             </div>
-            <button id="save-chat-btn" title="Save conversation as Markdown">Save Chat</button>
-            <button id="clear-chat-btn" title="Clear chat display (session continues)">Clear</button>
             <span id="connection-status" class="disconnected">disconnected</span>
         </div>
     </div>
@@ -85,6 +83,13 @@
         <div id="left-panel">
             <!-- ===== BEGIN chat-ui markup (unchanged: Claude features kept) ===== -->
             <div id="app" style="display:none">
+                <!-- Left-pane header: actions that operate only on this pane's chat (chat-ui3-style). -->
+                <header>
+                    <div class="left-pane-actions" style="display:flex;align-items:center;gap:8px">
+                        <button id="save-chat-btn" title="Save conversation as Markdown">Save Chat</button>
+                        <button id="clear-chat-btn" title="Clear chat display (session continues)">Clear</button>
+                    </div>
+                </header>
                 <div id="notification-bar"></div>
                 <main id="chat-area">
                     <!-- Messages will be appended here -->
@@ -219,6 +224,6 @@
 
     <!-- chat-ui application script (unchanged), then the shell script. -->
     <script src="app.js?v=41"></script>
-    <script src="console.js?v=3"></script>
+    <script src="console.js?v=4"></script>
 </body>
 </html>
