@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.core.actor;
 
+import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
@@ -43,6 +44,11 @@ public class ChatActor {
     private final LlmProvider provider;
     private final AuthMode authMode;
 
+    /** Complete I/O log (Sessions tab). May be null (logging disabled / tests). */
+    private final IoLogStore ioLog;
+    /** Conversation turn counter, used to label I/O-log entries ({@code turn<n>/step1/llm}). */
+    private int ioTurn = 0;
+
     /** Child actor that owns the blocking LLM I/O thread. Set by {@link #init}. */
     private ActorRef<LlmProvider> providerRef;
 
@@ -80,8 +86,14 @@ public class ChatActor {
      * @param provider     the LLM provider implementation to delegate prompts to
      * @param configApiKey optional API key supplied via application configuration
      */
+    /** Convenience constructor without the I/O log (used by tests). */
     public ChatActor(LlmProvider provider, Optional<String> configApiKey) {
+        this(provider, configApiKey, null);
+    }
+
+    public ChatActor(LlmProvider provider, Optional<String> configApiKey, IoLogStore ioLog) {
         this.provider = provider;
+        this.ioLog = ioLog;
 
         if (provider.capabilities().supportsWatchdog()) {
             // CLI-based provider: no API key needed, CLI binary handles auth
@@ -245,6 +257,9 @@ public class ChatActor {
 
         busy = true;
         recordHistory("user", prompt);
+        // Open (lazily) the conversation's I/O-log session and number this turn for the Sessions tab.
+        final long ioSession = (ioLog != null) ? ioLog.ensureSession() : -1;
+        final int ioTurnNo = ++ioTurn;
         if (resultKey != null) {
             pendingResultKeys.remove(resultKey);
             activeResultKey = resultKey;
@@ -271,11 +286,14 @@ public class ChatActor {
 
                 // Wrap emitter to intercept assistant content for history and optional result capture
                 StringBuilder assistantBuf = new StringBuilder();
+                StringBuilder thinkingBuf = new StringBuilder();
                 StringBuilder resultBuf = (resultKey != null) ? new StringBuilder() : null;
                 Consumer<ChatEvent> wrappedEmitter = event -> {
                     if ("delta".equals(event.type()) && event.content() != null) {
                         assistantBuf.append(event.content());
                         if (resultBuf != null) resultBuf.append(event.content());
+                    } else if ("thinking".equals(event.type()) && event.content() != null) {
+                        thinkingBuf.append(event.content());
                     } else if ("result".equals(event.type())) {
                         if (!assistantBuf.isEmpty()) {
                             String content = assistantBuf.toString();
@@ -285,6 +303,8 @@ public class ChatActor {
                             String captured = resultBuf.toString();
                             self.tell(b -> b.storeCompletedResult(resultKey, captured));
                         }
+                        // Persist the completed turn to the I/O log in the Sessions-tab marker format.
+                        recordTurnIo(ioSession, ioTurnNo, prompt, assistantBuf.toString(), thinkingBuf.toString());
                     }
                     emitter.accept(event);
                 };
@@ -357,6 +377,31 @@ public class ChatActor {
     }
 
     /**
+     * Records one completed Claude turn into the H2 I/O log in the marker format the Sessions tab reads
+     * ({@code REQUEST:} = the user prompt as a one-message request, {@code RESPONSE:} = the assistant
+     * text, {@code REASONING:} = thinking, {@code USAGE:} = token line). No-op when logging is off.
+     */
+    private void recordTurnIo(long ioSession, int turnNo, String prompt, String assistant, String thinking) {
+        if (ioLog == null || ioSession < 0) return;
+        try {
+            String requestJson = new org.json.JSONObject()
+                    .put("messages", new org.json.JSONArray().put(
+                            new org.json.JSONObject().put("role", "user").put("content", prompt)))
+                    .toString();
+            StringBuilder m = new StringBuilder();
+            m.append("REQUEST:\n").append(requestJson);
+            m.append("\n\nRESPONSE:\n").append(assistant == null ? "" : assistant);
+            if (thinking != null && !thinking.isBlank()) {
+                m.append("\n\nREASONING:\n").append(thinking);
+            }
+            m.append("\n\nUSAGE: promptTokens=0 completionTokens=0");
+            ioLog.record(ioSession, "agent", "turn" + turnNo + "/step1/llm", m.toString());
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "I/O log turn record failed", e);
+        }
+    }
+
+    /**
      * Returns the most recent conversation history entries, up to the given limit.
      *
      * @param limit the maximum number of entries to return
@@ -369,7 +414,12 @@ public class ChatActor {
     }
 
     /** Removes all entries from the conversation history. */
-    public void clearHistory() { conversationHistory.clear(); }
+    public void clearHistory() {
+        conversationHistory.clear();
+        // New conversation: end the current I/O-log session and renumber turns from 1.
+        if (ioLog != null) ioLog.resetSession();
+        ioTurn = 0;
+    }
 
     // ---- Log ring buffer ----
 

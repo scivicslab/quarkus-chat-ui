@@ -23,6 +23,25 @@
       <groupId>com.scivicslab</groupId>
       <artifactId>pojo-actor</artifactId>
     </dependency>
+    <!-- H2-backed complete I/O log (Sessions tab). Only the storage primitives are used
+         (H2LogStore / H2LogReader / LogEntry / DistributedLogStore), which depend on H2 + org.json
+         only. pojo-actor and turing-workflow are excluded so this does NOT pull a second pojo-actor
+         version (this project stays on its own pojo-actor); the H2 classes never reference them. -->
+    <dependency>
+      <groupId>com.scivicslab.turingworkflow.plugins</groupId>
+      <artifactId>plugin-log-db</artifactId>
+      <version>1.6.0</version>
+      <exclusions>
+        <exclusion>
+          <groupId>com.scivicslab</groupId>
+          <artifactId>pojo-actor</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.scivicslab</groupId>
+          <artifactId>turing-workflow</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
     <dependency>
       <groupId>io.quarkiverse.mcp</groupId>
       <artifactId>quarkus-mcp-server-http</artifactId>

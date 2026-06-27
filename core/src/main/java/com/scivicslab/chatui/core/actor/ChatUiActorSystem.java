@@ -45,6 +45,9 @@ public class ChatUiActorSystem {
     LogStreamHandler logStreamHandler;
 
     @Inject
+    com.scivicslab.chatui.core.iolog.IoLogStore ioLog;
+
+    @Inject
     Instance<MultiUserExtension> multiUserExtInstance;
 
     @Inject
@@ -81,7 +84,7 @@ public class ChatUiActorSystem {
     }
 
     private void initSingleUser() {
-        chatActorRef = actorSystem.actorOf("chat", new ChatActor(provider, configApiKey));
+        chatActorRef = actorSystem.actorOf("chat", new ChatActor(provider, configApiKey, ioLog));
         chatActorRef.tell(a -> a.init(chatActorRef));
         logStreamHandler.wireActorRef(chatActorRef);
 

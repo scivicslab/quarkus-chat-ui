@@ -5,10 +5,14 @@ import com.scivicslab.chatui.core.actor.ChatActor;
 import com.scivicslab.chatui.core.actor.ActorNode;
 import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.WatchdogActor;
+import com.scivicslab.chatui.core.iolog.IoLogStore;
+import com.scivicslab.chatui.core.iolog.IoLogView;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.plugin.PromptPreprocessor;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.service.UrlFetchService;
+import com.scivicslab.turingworkflow.plugins.logdb.DistributedLogStore;
+import com.scivicslab.turingworkflow.plugins.logdb.SessionSummary;
 import io.smallrye.common.annotation.Blocking;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServerResponse;
@@ -18,6 +22,7 @@ import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
@@ -28,6 +33,7 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.io.IOException;
@@ -35,6 +41,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
@@ -58,6 +65,12 @@ public class ChatResource {
 
     @Inject
     ChatUiActorSystem actorSystem;
+
+    @Inject
+    IoLogStore ioLog;
+
+    @Inject
+    IoLogView ioLogView;
 
     @Inject
     Vertx vertx;
@@ -540,6 +553,70 @@ public class ChatResource {
      */
     public ActorNode actors() {
         return actorSystem.getActorTree();
+    }
+
+    // ── Complete I/O log (Sessions tab): persistent H2 conversation sessions ─────────────
+
+    /** Lists conversation sessions (most recent first) from the complete I/O log. */
+    @GET
+    @Path("/sessions")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response sessions() {
+        DistributedLogStore store = ioLog.store();
+        if (store == null) {
+            return Response.ok(List.of()).build();
+        }
+        List<Map<String, Object>> out = store.listSessions(200).stream()
+                .map(this::sessionToMap)
+                .toList();
+        return Response.ok(out).build();
+    }
+
+    /** Deletes one log session and all its logs/node_results. Refuses the active conversation session. */
+    @DELETE
+    @Path("/sessions/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteSession(@PathParam("id") long id) {
+        int n = ioLog.deleteSession(id);
+        if (n < 0) return Response.status(500).entity(Map.of("error", "delete failed")).build();
+        return Response.ok(Map.of("deleted", n)).build();
+    }
+
+    /** Bulk-deletes sessions started more than {@code days} days ago (active session excluded). */
+    @DELETE
+    @Path("/sessions/old")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteOldSessions(@QueryParam("days") @DefaultValue("30") int days) {
+        int n = ioLog.deleteSessionsOlderThan(days);
+        if (n < 0) return Response.status(500).entity(Map.of("error", "delete failed")).build();
+        return Response.ok(Map.of("deleted", n, "olderThanDays", days)).build();
+    }
+
+    /** Returns the full (untruncated) message of one log entry, for on-expand lazy loading. */
+    @GET
+    @Path("/sessions/{id}/entry/{logId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response sessionEntry(@PathParam("id") long id, @PathParam("logId") long logId) {
+        return Response.ok(Map.of("message", ioLogView.fullMessage(id, logId))).build();
+    }
+
+    /** Returns the reconstructed per-turn trace for a session (the Sessions tab's inline view). */
+    @GET
+    @Path("/sessions/{id}/trace")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IoLogView.TraceTurn> sessionTrace(@PathParam("id") long id) {
+        return ioLogView.trace(id);
+    }
+
+    private Map<String, Object> sessionToMap(SessionSummary s) {
+        // String.valueOf guards nulls (endedAt/status may be null): Map.of rejects null values.
+        return Map.of(
+                "sessionId",       s.getSessionId(),
+                "workflowName",    String.valueOf(s.getWorkflowName()),
+                "startedAt",       String.valueOf(s.getStartedAt()),
+                "endedAt",         String.valueOf(s.getEndedAt()),
+                "status",          String.valueOf(s.getStatus()),
+                "totalLogEntries", s.getTotalLogEntries());
     }
 
     @GET
