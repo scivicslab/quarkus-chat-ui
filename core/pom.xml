@@ -23,6 +23,12 @@
       <groupId>com.scivicslab</groupId>
       <artifactId>pojo-actor</artifactId>
     </dependency>
+    <!-- Turing Workflow engine (Phase 3): the Interpreter / IIActorSystem that drives the Claude
+         harness turn-by-turn (the "leash" workflows). -->
+    <dependency>
+      <groupId>com.scivicslab</groupId>
+      <artifactId>turing-workflow</artifactId>
+    </dependency>
     <!-- H2-backed complete I/O log (Sessions tab). Only the storage primitives are used
          (H2LogStore / H2LogReader / LogEntry / DistributedLogStore), which depend on H2 + org.json
          only. pojo-actor and turing-workflow are excluded so this does NOT pull a second pojo-actor

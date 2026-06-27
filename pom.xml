@@ -33,7 +33,10 @@
     <surefire-plugin.version>3.5.4</surefire-plugin.version>
     <failsafe-plugin.version>3.5.4</failsafe-plugin.version>
     <playwright.version>1.52.0</playwright.version>
-    <pojo-actor.version>3.0.1</pojo-actor.version>
+    <!-- Bumped from 3.0.1 to 3.5.0 for the Turing Workflow engine (Phase 3). The pojo-actor API
+         surface this project uses is unchanged between 3.0.1 and 3.5.0, so this is a recompile. -->
+    <pojo-actor.version>3.5.0</pojo-actor.version>
+    <turing-workflow.version>3.7.0</turing-workflow.version>
   </properties>
 
   <dependencyManagement>
@@ -49,6 +52,11 @@
         <groupId>com.scivicslab</groupId>
         <artifactId>pojo-actor</artifactId>
         <version>${pojo-actor.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.scivicslab</groupId>
+        <artifactId>turing-workflow</artifactId>
+        <version>${turing-workflow.version}</version>
       </dependency>
       <dependency>
         <groupId>org.json</groupId>
