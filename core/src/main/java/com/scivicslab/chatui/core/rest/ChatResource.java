@@ -7,6 +7,7 @@ import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.WatchdogActor;
 import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.iolog.IoLogView;
+import com.scivicslab.chatui.core.workflow.ClaudeHarnessRunner;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.plugin.PromptPreprocessor;
 import com.scivicslab.chatui.core.provider.LlmProvider;
@@ -71,6 +72,9 @@ public class ChatResource {
 
     @Inject
     IoLogView ioLogView;
+
+    @Inject
+    ClaudeHarnessRunner workflowRunner;
 
     @Inject
     Vertx vertx;
@@ -617,6 +621,53 @@ public class ChatResource {
                 "endedAt",         String.valueOf(s.getEndedAt()),
                 "status",          String.valueOf(s.getStatus()),
                 "totalLogEntries", s.getTotalLogEntries());
+    }
+
+    // ── Workflow leash (Phase 3): run a workflow that drives Claude one step at a time ──
+
+    private static final List<Map<String, String>> WORKFLOWS = List.of(
+            Map.of("name", "doc-check", "title", "Doc Check — checklist, one item at a time"));
+
+    /** Lists the workflows that can be viewed/run in the Workflow tab. */
+    @GET
+    @Path("/workflows")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<Map<String, String>> workflows() {
+        return WORKFLOWS;
+    }
+
+    /** Returns one workflow's YAML (read-only) for the Workflow tab viewer. */
+    @GET
+    @Path("/workflows/{name}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response workflow(@PathParam("name") String name) {
+        String yaml = readWorkflowYaml(name);
+        if (yaml == null) return Response.status(404).entity(Map.of("error", "not found")).build();
+        return Response.ok(Map.of("name", name, "yaml", yaml, "editable", false)).build();
+    }
+
+    /** Runs a workflow (drives Claude turn-by-turn). Body: the run input JSON ({@code {path, target}}). */
+    @POST
+    @Path("/workflows/{name}/run")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response runWorkflow(@PathParam("name") String name, String inputJson) {
+        if (readWorkflowYaml(name) == null) {
+            return Response.status(404).entity(Map.of("error", "unknown workflow: " + name)).build();
+        }
+        workflowRunner.launch(name, inputJson == null ? "" : inputJson);
+        return Response.ok(Map.of("type", "accepted", "workflow", name)).build();
+    }
+
+    /** Reads {@code /workflows/<name>.yaml} from the classpath; null if the name is invalid or absent. */
+    private String readWorkflowYaml(String name) {
+        if (name == null || !name.matches("[a-z0-9-]{1,64}")) return null;
+        try (var in = getClass().getResourceAsStream("/workflows/" + name + ".yaml")) {
+            if (in == null) return null;
+            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     @GET

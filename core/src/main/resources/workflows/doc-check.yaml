@@ -1,0 +1,47 @@
+name: doc-check
+description: |
+  Apply a documentation checklist to a target, ONE item at a time, through the Claude harness.
+  Each checklist item is sent as its own constrained turn so Claude checks (and reports on) exactly
+  that item instead of skimming the whole list. Input (JSON): {"path": "<checklist file>",
+  "target": "<optional framing instruction>"}.
+
+  Shape: start -> load-checklist -> ( send-next-item )* -> finish.
+  send-next-item SUCCEEDS while items remain (the engine loops back here) and FAILS when the list is
+  exhausted (the engine falls through to finish).
+steps:
+  - states: ["0", "load"]
+    label: start
+    note: "Parse the run input; open the I/O-log session; optionally frame the target."
+    actions:
+      - actor: harness
+        method: start
+
+  - states: ["load", "step"]
+    label: load-checklist
+    note: "Read the checklist file and split it into items (markdown '---' rules separate items)."
+    actions:
+      - actor: harness
+        method: loadChecklist
+
+  - states: ["step", "step"]
+    label: send-next-item
+    note: |
+      Send the next checklist item to Claude as one constrained turn and wait for the reply.
+      SUCCESS while items remain (loop back here); FAILURE when exhausted (fall through to finish).
+    actions:
+      - actor: harness
+        method: sendNextItem
+
+  - states: ["step", "end"]
+    label: finish
+    note: "All items checked: emit the completion event and end."
+    actions:
+      - actor: harness
+        method: finish
+
+  - states: ["!end", "end"]
+    note: "Safety net: any unexpected state ends the workflow."
+    actions:
+      - actor: out
+        method: error
+        arguments: "doc-check workflow ended unexpectedly"

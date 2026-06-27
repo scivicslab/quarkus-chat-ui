@@ -766,6 +766,25 @@
         if (sel) sel.addEventListener('change', function () { wfLoad(sel.value); });
         var btn = document.getElementById('wf-refresh');
         if (btn) btn.addEventListener('click', function () { wfLoad(sel ? sel.value : ''); });
+        var run = document.getElementById('wf-run');
+        if (run) run.addEventListener('click', function () {
+            var name = sel ? sel.value : '';
+            if (!name) { wfStatus('select a workflow first'); return; }
+            var inp = document.getElementById('wf-run-input');
+            var body = inp ? inp.value.trim() : '';
+            wfStatus('starting ' + name + '…');
+            fetch('/api/workflows/' + encodeURIComponent(name) + '/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: body || '{}'
+            }).then(function (r) { return r.json(); })
+              .then(function (j) {
+                  wfStatus(j.type === 'accepted'
+                      ? ('running ' + name + ' — watch the chat (left pane)')
+                      : ('error: ' + (j.error || 'failed')));
+              })
+              .catch(function (e) { wfStatus('error: ' + e.message); });
+        });
     }
 
     function initConfig() {
