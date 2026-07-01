@@ -13,6 +13,7 @@
     <module>provider-claude-code</module>
     <module>provider-claude</module>
     <module>provider-codex</module>
+    <module>provider-claude-tmux</module>
     <module>provider-openai-compat</module>
     <module>plugin-openai-compat-multiuser</module>
     <module>plugin-openai-compat-agent</module>
@@ -87,6 +88,11 @@
       <dependency>
         <groupId>com.scivicslab.chatui</groupId>
         <artifactId>chat-ui-provider-codex</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.scivicslab.chatui</groupId>
+        <artifactId>chat-ui-provider-claude-tmux</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>

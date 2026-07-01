@@ -1,0 +1,62 @@
+name: explain-approve-implement
+description: |
+  Drive Claude through "explain -> (human) approve -> implement". Unlike explain-judge-implement
+  (where an LLM judges automatically), the gate here waits for an EXTERNAL approval decision — a human
+  clicking a button, a queue, or another workflow, anything that answers via POST /api/respond.
+    - explain:       Claude explains its intended approach in full and MUST NOT implement.
+    - awaitApproval: the workflow shows the plan and blocks until approved or rejected.
+                     APPROVE -> implement; REJECT (or timeout) -> stop.
+    - implement:     Claude implements the approved approach.
+  Input (JSON): {"target": "<the task>"}.
+  Shape: start -> explain -> approve -> implement -> finish   (reject -> end)
+params:
+  target:
+    label: "課題（やってほしいこと）"
+    description: "例: src/foo のこの関数をリファクタして"
+    type: textarea
+    required: true
+steps:
+  - states: ["0", "explain"]
+    label: start
+    note: "Parse the run input, open the I/O-log session, record the target task."
+    actions:
+      - actor: harness
+        method: start
+
+  - states: ["explain", "approve"]
+    label: explain
+    note: "Ask Claude to explain its intended approach in full. It MUST NOT implement."
+    actions:
+      - actor: harness
+        method: explain
+
+  - states: ["approve", "implement"]
+    label: approve
+    note: |
+      Human/queue/workflow gate. The step blocks until an external approver answers via /api/respond.
+      SUCCESS = approved -> implement. FAILURE = rejected or timed out -> fall through to reject.
+    actions:
+      - actor: harness
+        method: awaitApproval
+
+  - states: ["approve", "end"]
+    label: reject
+    note: "Approval was rejected or timed out: stop (the harness already emitted the completion)."
+    actions:
+      - actor: out
+        method: print
+        arguments: "explain-approve-implement: rejected — stopped."
+
+  - states: ["implement", "end"]
+    label: implement
+    note: "Approved: tell Claude to implement the approach now, emit completion, and end."
+    actions:
+      - actor: harness
+        method: implement
+
+  - states: ["!end", "end"]
+    note: "Safety net: any unexpected state ends the workflow."
+    actions:
+      - actor: out
+        method: error
+        arguments: "explain-approve-implement workflow ended unexpectedly"

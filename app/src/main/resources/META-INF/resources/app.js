@@ -1523,13 +1523,21 @@
             return;
         }
 
-        // Slash commands: try skill injection first, then fallback to REST
+        // Slash commands. chat-ui's own UI commands (/model, /clear, /session, /help)
+        // are handled locally via /api/command. Everything else starting with "/" —
+        // a chat-ui skill, or a backend-native command like /compact, /context — is
+        // sent to the backend so Claude Code (or Codex) dispatches it.
         if (text.startsWith('/')) {
             hideSkillSuggest();
             var spaceIdx = text.indexOf(' ');
             var cmdName = spaceIdx > 0 ? text.slice(1, spaceIdx) : text.slice(1);
             var cmdArgs = spaceIdx > 0 ? text.slice(spaceIdx + 1).trim() : '';
-            executeSkillCommand(cmdName, cmdArgs, text);
+            var CHATUI_LOCAL = ['model', 'clear', 'session', 'help', '?'];
+            if (CHATUI_LOCAL.indexOf(cmdName.toLowerCase()) >= 0) {
+                executeSlashCommand(text);
+            } else {
+                executeSkillCommand(cmdName, cmdArgs, text);
+            }
             return;
         }
 
@@ -1589,8 +1597,16 @@
             var resp = await fetch('/api/extensions/content?type=skills&name='
                 + encodeURIComponent(cmdName));
             if (!resp.ok) {
-                // Not a skill — delegate to original slash command handler
-                executeSlashCommand(originalText);
+                // Not a skill — send the raw text as a normal prompt so the backend
+                // dispatches it. Claude's native slash commands (/compact, /context,
+                // /rewind, ...) run here, streaming their result over SSE.
+                addToQueue(originalText);
+                if (!busy) {
+                    processQueue();
+                } else {
+                    renderQueue();
+                    showQueue();
+                }
                 return;
             }
             var raw = await resp.text();

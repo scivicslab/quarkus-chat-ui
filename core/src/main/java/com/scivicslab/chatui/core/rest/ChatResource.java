@@ -8,6 +8,7 @@ import com.scivicslab.chatui.core.actor.WatchdogActor;
 import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.iolog.IoLogView;
 import com.scivicslab.chatui.core.workflow.ClaudeHarnessRunner;
+import com.scivicslab.chatui.core.workflow.WorkflowApprovalRegistry;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.plugin.PromptPreprocessor;
 import com.scivicslab.chatui.core.provider.LlmProvider;
@@ -75,6 +76,9 @@ public class ChatResource {
 
     @Inject
     ClaudeHarnessRunner workflowRunner;
+
+    @Inject
+    WorkflowApprovalRegistry approvalRegistry;
 
     @Inject
     Vertx vertx;
@@ -390,12 +394,29 @@ public class ChatResource {
      * @return an info event on success, or an error event on failure
      */
     public ChatEvent respond(RespondRequest request) {
+        // Workflow approval gate (e.g. explain-approve-implement): if this prompt id belongs to a
+        // pending workflow approval, resolve it here — independent of the LLM provider.
+        if (request != null && approvalRegistry.resolve(request.promptId, request.response)) {
+            return ChatEvent.info("承認を受け付けました");
+        }
         if (!actorSystem.getProvider().capabilities().supportsInteractivePrompts()) {
             return ChatEvent.error("Interactive prompts not supported by provider: "
                     + actorSystem.getProvider().id());
         }
         if (request == null || request.response == null || request.response.isBlank()) {
             return ChatEvent.error("Empty response");
+        }
+
+        // Providers that resume interactive answers as a fresh turn (e.g. the tmux-driven
+        // Claude TUI, where the dialog is on screen and the turn has already returned)
+        // translate the answer into a continuation prompt that is enqueued so its output
+        // streams over SSE just like a normal message.
+        if (!actorSystem.isMultiUser()) {
+            String continuation = actorSystem.getProvider()
+                    .resolveApprovalToContinuation(request.promptId, request.response);
+            if (continuation != null) {
+                return respondViaContinuation(continuation);
+            }
         }
 
         // Plan-approval answers (ExitPlanMode) are not tool-permission replies: the turn
@@ -452,6 +473,27 @@ public class ChatResource {
                 this::emitSse, chatRef, "human", null,
                 new CompletableFuture<>(), false));
         return ChatEvent.info("Proceeding with the approved plan");
+    }
+
+    /**
+     * Resumes an interactive answer (for example a tmux dialog choice) by enqueuing a
+     * continuation turn, so the output that follows the answer streams over SSE just like
+     * a normal message. The provider has translated the user's answer into the continuation
+     * prompt (the key(s) to type at the on-screen dialog).
+     *
+     * @param continuation the continuation prompt to enqueue
+     * @return an info event acknowledging the action
+     */
+    private ChatEvent respondViaContinuation(String continuation) {
+        emitSse(ChatEvent.mcpUser("(Answer sent)"));
+        var chatRef = actorSystem.getChatActor();
+        var queueRef = actorSystem.getQueueActor();
+        String model = chatRef.ask(ChatActor::getModel).join();
+        queueRef.tell(q -> q.enqueue(
+                continuation, model, "queue",
+                this::emitSse, chatRef, "human", null,
+                new CompletableFuture<>(), false));
+        return ChatEvent.info("Answer sent; continuing");
     }
 
     @POST
@@ -626,7 +668,11 @@ public class ChatResource {
     // ── Workflow leash (Phase 3): run a workflow that drives Claude one step at a time ──
 
     private static final List<Map<String, String>> WORKFLOWS = List.of(
-            Map.of("name", "doc-check", "title", "Doc Check — checklist, one item at a time"));
+            Map.of("name", "doc-check", "title", "Doc Check — checklist, one item at a time"),
+            Map.of("name", "explain-judge-implement",
+                   "title", "Explain → Judge → Implement (auto; no plan mode)"),
+            Map.of("name", "explain-approve-implement",
+                   "title", "Explain → Approve → Implement (human gate)"));
 
     /** Lists the workflows that can be viewed/run in the Workflow tab. */
     @GET
@@ -636,14 +682,53 @@ public class ChatResource {
         return WORKFLOWS;
     }
 
-    /** Returns one workflow's YAML (read-only) for the Workflow tab viewer. */
+    private static final com.fasterxml.jackson.dataformat.yaml.YAMLMapper YAML_MAPPER =
+            new com.fasterxml.jackson.dataformat.yaml.YAMLMapper();
+
+    /** Returns one workflow's YAML plus its declared input params (for the Workflow tab form). */
     @GET
     @Path("/workflows/{name}")
     @Produces(MediaType.APPLICATION_JSON)
     public Response workflow(@PathParam("name") String name) {
         String yaml = readWorkflowYaml(name);
         if (yaml == null) return Response.status(404).entity(Map.of("error", "not found")).build();
-        return Response.ok(Map.of("name", name, "yaml", yaml, "editable", false)).build();
+        return Response.ok(Map.of("name", name, "yaml", yaml, "editable", false,
+                "params", parseWorkflowParams(yaml))).build();
+    }
+
+    /**
+     * Parses the workflow's {@code params:} section into an ordered list the UI renders as a form.
+     * Each entry carries name/label/description/type/required/default/options. Empty on absence or
+     * malformed YAML, in which case the client falls back to a raw JSON input box.
+     */
+    private List<Map<String, Object>> parseWorkflowParams(String yaml) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        try {
+            com.fasterxml.jackson.databind.JsonNode params = YAML_MAPPER.readTree(yaml).path("params");
+            if (!params.isObject()) return out;
+            var it = params.fields();
+            while (it.hasNext()) {
+                var e = it.next();
+                com.fasterxml.jackson.databind.JsonNode p = e.getValue();
+                Map<String, Object> m = new java.util.LinkedHashMap<>();
+                m.put("name", e.getKey());
+                if (p.hasNonNull("label")) m.put("label", p.get("label").asText());
+                if (p.hasNonNull("description")) m.put("description", p.get("description").asText());
+                m.put("type", p.path("type").asText("text"));
+                boolean hasDefault = p.has("default");
+                if (hasDefault) m.put("default", p.get("default").asText());
+                m.put("required", p.path("required").asBoolean(!hasDefault));
+                if (p.path("options").isArray()) {
+                    List<String> opts = new ArrayList<>();
+                    p.get("options").forEach(o -> opts.add(o.asText()));
+                    m.put("options", opts);
+                }
+                out.add(m);
+            }
+        } catch (Exception ignored) {
+            // malformed or no params — client falls back to the raw JSON box
+        }
+        return out;
     }
 
     /** Runs a workflow (drives Claude turn-by-turn). Body: the run input JSON ({@code {path, target}}). */

@@ -47,6 +47,9 @@ public class ClaudeHarnessRunner {
     @Inject
     ObjectMapper mapper;
 
+    @Inject
+    WorkflowApprovalRegistry approvalRegistry;
+
     /** Starts the named workflow on a virtual thread (returns immediately). */
     public void launch(String workflowName, String inputJson) {
         Thread.ofVirtual().name("workflow-" + workflowName).start(() -> run(workflowName, inputJson));
@@ -77,7 +80,7 @@ public class ClaudeHarnessRunner {
             system.addIIActor(interpreterActor);
 
             ClaudeHarnessActor harness = new ClaudeHarnessActor(
-                    "harness", provider, sseRef, ioLog, system, mapper, inputJson);
+                    "harness", provider, sseRef, ioLog, system, mapper, inputJson, approvalRegistry);
             system.addIIActor(harness);
 
             String resource = "/workflows/" + workflowName + ".yaml";

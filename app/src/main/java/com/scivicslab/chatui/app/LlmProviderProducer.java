@@ -3,6 +3,7 @@ package com.scivicslab.chatui.app;
 import com.scivicslab.chatui.claude.ClaudeLlmProvider;
 import com.scivicslab.chatui.codex.CodexLlmProvider;
 import com.scivicslab.chatui.core.provider.LlmProvider;
+import com.scivicslab.chatui.tmux.TmuxLlmProvider;
 import com.scivicslab.chatui.openaicompat.AgentLoopExtension;
 import com.scivicslab.chatui.openaicompat.OpenAiCompatProvider;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -48,6 +49,9 @@ public class LlmProviderProducer {
     @ConfigProperty(name = "chat-ui.default-model")
     Optional<String> defaultModel;
 
+    @ConfigProperty(name = "chat-ui.tmux.program", defaultValue = "claude")
+    String tmuxProgram;
+
     @Inject
     Instance<AgentLoopExtension> agentLoopExt;
 
@@ -66,6 +70,11 @@ public class LlmProviderProducer {
         return switch (providerName.toLowerCase().trim()) {
             case "claude" -> new ClaudeLlmProvider(allowedTools, permissionMode, sessionFilePath, httpPort);
             case "codex" -> new CodexLlmProvider(allowedTools, permissionMode, sessionFilePath, httpPort);
+            case "claude-tmux" -> {
+                String session = "claude-tmux-" + httpPort;
+                String model = defaultModel.filter(s -> !s.isBlank()).orElse("sonnet");
+                yield new TmuxLlmProvider(session, tmuxProgram, model);
+            }
             case "openai-compat" -> {
                 List<String> urls = Arrays.stream(servers.split(","))
                         .map(String::trim)
@@ -80,7 +89,7 @@ public class LlmProviderProducer {
                 yield new OpenAiCompatProvider(urls, model, ext);
             }
             default -> throw new IllegalStateException(
-                "Unknown provider: '" + providerName + "'. Valid values: claude, codex, openai-compat");
+                "Unknown provider: '" + providerName + "'. Valid values: claude, claude-tmux, codex, openai-compat");
         };
     }
 }

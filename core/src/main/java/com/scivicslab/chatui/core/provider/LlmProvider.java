@@ -78,6 +78,22 @@ public interface LlmProvider {
     /** Removes the given plan-approval prompt id from the outstanding set, if present. */
     default void clearPlanApproval(String promptId) { }
 
+    /**
+     * For providers whose interactive answers must resume via a fresh turn (rather than a
+     * mid-turn write to a still-running request), returns the prompt text to enqueue as that
+     * continuation turn, or {@code null} to fall back to {@link #respond}.
+     *
+     * <p>The tmux-driven Claude provider returns the key(s) to type at the on-screen dialog
+     * (for example {@code "1"}); enqueuing that as a turn types it into the live TUI and the
+     * continuation streams over SSE like a normal message. The default returns {@code null}
+     * so other providers keep their existing in-turn {@link #respond} behaviour.
+     *
+     * @param promptId the prompt being answered
+     * @param response the user's answer
+     * @return the continuation prompt to enqueue, or {@code null} to use {@link #respond}
+     */
+    default String resolveApprovalToContinuation(String promptId, String response) { return null; }
+
     /** True if the given input is a slash command handled by this provider. */
     default boolean isCommand(String input) { return false; }
 

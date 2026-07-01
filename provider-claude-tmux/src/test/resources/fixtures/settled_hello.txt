@@ -1,0 +1,25 @@
+
+╭─── Claude Code v2.1.196 ─────────────────────────────────────────────────────╮
+│                                          │ Tips for getting started           │
+│        Welcome back Osamu Ogasawara!     │ Run /init to create a CLAUDE.md fil│
+│                                          │ ───────────────────────────────────│
+│                   ▐▛███▜▌                │ What's new                         │
+│                  ▝▜█████▛▘               │ Added support for organization def…│
+│      Sonnet 4.6 · Claude Max ·           │ /release-notes for more            │
+│                /tmp/cprobe               │                                    │
+╰───────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Reply with exactly: hello from claude
+
+● hello from claude
+
+✻ Cogitated for 3s
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts · ← for agents

@@ -723,6 +723,85 @@
         wfStatus(parts.steps.length + ' step(s) — read-only');
     }
 
+    // Param descriptors of the selected workflow, or null when the workflow declares no params
+    // (then the raw JSON input box is used instead).
+    var wfCurrentParams = null;
+
+    // Renders an input form from a workflow's declared params. When there are no params, hides the
+    // form and shows the raw JSON box (backward compatible). See spec WorkflowInputParams_260701_oo01.
+    function wfRenderForm(params) {
+        var form = document.getElementById('wf-form');
+        var jsonBox = document.getElementById('wf-run-input');
+        if (!form) return;
+        form.textContent = '';
+        if (!params || !params.length) {
+            wfCurrentParams = null;
+            form.style.display = 'none';
+            if (jsonBox) jsonBox.style.display = '';
+            return;
+        }
+        wfCurrentParams = params;
+        if (jsonBox) jsonBox.style.display = 'none';
+        form.style.display = '';
+        params.forEach(function (p) {
+            var row = document.createElement('div');
+            row.className = 'wf-field';
+            var lab = document.createElement('label');
+            lab.textContent = (p.label || p.name) + (p.required ? ' *' : '');
+            var type = p.type || 'text';
+            var input;
+            if (type === 'textarea') { input = document.createElement('textarea'); input.rows = 3; }
+            else if (type === 'select') {
+                input = document.createElement('select');
+                (p.options || []).forEach(function (o) {
+                    var opt = document.createElement('option');
+                    opt.value = o; opt.textContent = o; input.appendChild(opt);
+                });
+            }
+            else if (type === 'bool') { input = document.createElement('input'); input.type = 'checkbox'; }
+            else if (type === 'int') { input = document.createElement('input'); input.type = 'number'; }
+            else { input = document.createElement('input'); input.type = 'text'; }
+            input.setAttribute('data-wf-name', p.name);
+            input.setAttribute('data-wf-type', type);
+            if (p.description) input.placeholder = p.description;
+            if (p['default'] !== undefined && p['default'] !== null && p['default'] !== '') {
+                if (type === 'bool') input.checked = (String(p['default']) === 'true');
+                else input.value = p['default'];
+            }
+            row.appendChild(lab);
+            row.appendChild(input);
+            form.appendChild(row);
+        });
+    }
+
+    // Builds the JSON body for /run from the form (or the raw JSON box). Returns null and sets a
+    // status message if a required field is empty.
+    function wfCollectInput() {
+        if (!wfCurrentParams) {
+            var box = document.getElementById('wf-run-input');
+            return box ? (box.value.trim() || '{}') : '{}';
+        }
+        var obj = {};
+        var els = document.querySelectorAll('#wf-form [data-wf-name]');
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            var name = el.getAttribute('data-wf-name');
+            var type = el.getAttribute('data-wf-type');
+            var meta = null;
+            for (var k = 0; k < wfCurrentParams.length; k++) {
+                if (wfCurrentParams[k].name === name) { meta = wfCurrentParams[k]; break; }
+            }
+            if (type === 'bool') { obj[name] = el.checked; continue; }
+            var val = (el.value == null) ? '' : String(el.value).trim();
+            if (val === '') {
+                if (meta && meta.required) { wfStatus('必須項目です: ' + (meta.label || name)); return null; }
+                continue;   // omit empty optional fields
+            }
+            obj[name] = (type === 'int') ? parseInt(val, 10) : val;
+        }
+        return JSON.stringify(obj);
+    }
+
     function wfLoad(name) {
         if (!name) return;
         wfStatus('loading…');
@@ -730,6 +809,7 @@
             .then(function (r) { return r.json(); })
             .then(function (d) {
                 if (!d || !d.yaml) { wfStatus('not found'); return; }
+                wfRenderForm(d.params);
                 wfRender(d.yaml);
             })
             .catch(function (e) { wfStatus('error: ' + e.message); });
@@ -770,8 +850,8 @@
         if (run) run.addEventListener('click', function () {
             var name = sel ? sel.value : '';
             if (!name) { wfStatus('select a workflow first'); return; }
-            var inp = document.getElementById('wf-run-input');
-            var body = inp ? inp.value.trim() : '';
+            var body = wfCollectInput();
+            if (body === null) return;   // a required field is empty
             wfStatus('starting ' + name + '…');
             fetch('/api/workflows/' + encodeURIComponent(name) + '/run', {
                 method: 'POST',

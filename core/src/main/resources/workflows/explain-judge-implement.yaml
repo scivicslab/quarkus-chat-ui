@@ -1,0 +1,69 @@
+name: explain-judge-implement
+description: |
+  Drive Claude through a constrained "explain -> judge -> implement" pipeline, one bounded turn at a
+  time, WITHOUT relying on Claude's fragile interactive plan mode. Each phase is a plain constrained
+  prompt so control lives in the workflow, not inside Claude:
+    - explain:   Claude must explain its intended approach in full and MUST NOT implement anything.
+    - judge:     an independent turn decides whether the explanation is clear/complete enough to
+                 proceed (PASS/FAIL). This replaces Claude's own unreliable "A or B?" clarifications.
+    - refine:    on FAIL, carry the judge's feedback back into another explain turn (capped).
+    - implement: on PASS, tell Claude to implement the approved approach.
+  Input (JSON): {"target": "<the task>", "maxRefines": <int, default 2>}.
+  Shape: start -> explain -> judge -> ( refine -> explain -> judge )* -> implement -> finish
+params:
+  target:
+    label: "課題（やってほしいこと）"
+    description: "例: src/foo のこの関数をリファクタして"
+    type: textarea
+    required: true
+  maxRefines:
+    label: "再説明の上限"
+    description: "審査が『不十分』と言ったとき、何回まで説明し直させるか"
+    type: int
+    default: 2
+steps:
+  - states: ["0", "explain"]
+    label: start
+    note: "Parse the run input, open the I/O-log session, and record the target task."
+    actions:
+      - actor: harness
+        method: start
+
+  - states: ["explain", "judge"]
+    label: explain
+    note: |
+      Ask Claude to explain its intended approach thoroughly. It MUST NOT implement. The reply is
+      captured as the current plan. On a re-run, the judge's previous feedback is folded in.
+    actions:
+      - actor: harness
+        method: explain
+
+  - states: ["judge", "implement"]
+    label: judge
+    note: |
+      Judge the explanation with an independent turn. SUCCESS = adequate -> implement.
+      FAILURE = not adequate -> fall through to refine (loop back to explain with feedback).
+    actions:
+      - actor: harness
+        method: judge
+
+  - states: ["judge", "explain"]
+    label: refine
+    note: "Judge said 'not yet': increment the refine counter (feedback is already held) and re-explain."
+    actions:
+      - actor: harness
+        method: refine
+
+  - states: ["implement", "end"]
+    label: implement
+    note: "The approach passed judging: tell Claude to implement it now, emit completion, and end."
+    actions:
+      - actor: harness
+        method: implement
+
+  - states: ["!end", "end"]
+    note: "Safety net: any unexpected state ends the workflow."
+    actions:
+      - actor: out
+        method: error
+        arguments: "explain-judge-implement workflow ended unexpectedly"

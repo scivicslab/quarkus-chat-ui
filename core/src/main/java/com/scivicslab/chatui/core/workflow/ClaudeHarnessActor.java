@@ -44,6 +44,8 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
     private final ObjectMapper mapper;
     /** Raw run input (JSON): {@code {"path": "<checklist file>", "target": "<optional framing>"}}. */
     private final String runInput;
+    /** Registry used by {@link #awaitApproval} to block for an external approval; may be null. */
+    private final WorkflowApprovalRegistry approvalRegistry;
 
     // Per-run state
     private String checklistPath;
@@ -53,14 +55,22 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
     private long ioSession = -1;
     private int turn = 0;
 
+    // Explain -> judge -> implement pipeline state
+    private String plan = "";
+    private String judgeFeedback = "";
+    private int refineCount = 0;
+    private int maxRefines = 2;
+
     public ClaudeHarnessActor(String name, LlmProvider provider, ActorRef<SseActor> sseRef,
-                              IoLogStore ioLog, IIActorSystem system, ObjectMapper mapper, String runInput) {
+                              IoLogStore ioLog, IIActorSystem system, ObjectMapper mapper, String runInput,
+                              WorkflowApprovalRegistry approvalRegistry) {
         super(name, new Object(), system);
         this.provider = provider;
         this.sseRef = sseRef;
         this.ioLog = ioLog;
         this.mapper = mapper;
         this.runInput = runInput;
+        this.approvalRegistry = approvalRegistry;
     }
 
     /** Initialises the run from the JSON input and (optionally) frames the task with one context turn. */
@@ -73,6 +83,10 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
             this.target = in.path("target").asText("");
             this.cursor = 0;
             this.turn = 0;
+            this.maxRefines = in.path("maxRefines").asInt(2);
+            this.refineCount = 0;
+            this.plan = "";
+            this.judgeFeedback = "";
             this.ioSession = (ioLog != null) ? ioLog.ensureSession() : -1;
             emit(ChatEvent.info("▶ Workflow started"
                     + (checklistPath.isBlank() ? "" : " — checklist: " + checklistPath)));
@@ -141,10 +155,126 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
         return new ActionResult(true, "finished");
     }
 
+    // ── explain -> judge -> implement pipeline (no Claude plan mode) ──────────
+
+    /**
+     * Asks Claude to explain its intended approach in full, forbidding implementation. The reply is
+     * kept as the current plan. On a re-run after a FAIL, the judge's feedback is folded in.
+     */
+    @Action("explain")
+    public ActionResult explain(String args) {
+        String feedbackBlock = judgeFeedback.isBlank() ? ""
+                : "\n\n【前回の審査での指摘（これを踏まえて説明し直すこと）】\n" + judgeFeedback;
+        String instruction =
+                "次の課題について、これから取る方針を徹底的に説明してください。"
+              + "**実装は絶対にしないでください（コードやファイルを一切変更しない）。**"
+              + "前提・全体像・手順・判断の根拠を、読み手が可否を判断できる完全な文で書いてください。\n\n"
+              + "【課題】\n" + target + feedbackBlock;
+        emit(ChatEvent.info(refineCount == 0
+                ? "① 方針を説明中…" : "① 方針を再説明中（refine " + refineCount + "/" + maxRefines + "）…"));
+        this.plan = runTurn(instruction);
+        return new ActionResult(true, "explained");
+    }
+
+    /**
+     * Judges the explanation with an independent turn. SUCCESS = adequate (proceed to implement),
+     * FAILURE = not adequate (the workflow falls through to refine and loops back to explain).
+     * After {@code maxRefines} rounds it proceeds anyway to avoid an unbounded loop.
+     */
+    @Action("judge")
+    public ActionResult judge(String args) {
+        if (refineCount >= maxRefines) {
+            emit(ChatEvent.info("② 判定：再説明の上限に達したため、この説明で先へ進みます"));
+            return new ActionResult(true, "max refines reached");
+        }
+        String instruction =
+                "あなたは独立した審査員です。以下は課題と、それに対する提案説明です。"
+              + "この説明が「実装に進んでよいだけ十分に明確・完全か」を厳しく判定してください。"
+              + "1行目に必ず PASS か FAIL だけを書き、2行目以降に理由（FAIL の場合は不足している点を具体的に）"
+              + "を書いてください。あなた自身は実装や新しい方針を書かないこと。\n\n"
+              + "【課題】\n" + target + "\n\n【提案説明】\n" + plan;
+        emit(ChatEvent.info("② 説明の十分性を判定中…"));
+        String verdict = runTurn(instruction);
+        boolean pass = verdict != null && verdict.strip().toUpperCase().startsWith("PASS");
+        if (pass) {
+            emit(ChatEvent.info("② 判定：PASS → 実装へ"));
+            return new ActionResult(true, "pass");
+        }
+        this.judgeFeedback = verdict == null ? "" : verdict.strip();
+        emit(ChatEvent.info("② 判定：FAIL → 再説明へ"));
+        return new ActionResult(false, "fail");
+    }
+
+    /** Judge said "not yet": count the round (the feedback is already held) and loop back to explain. */
+    @Action("refine")
+    public ActionResult refine(String args) {
+        refineCount++;
+        return new ActionResult(true, "refine " + refineCount);
+    }
+
+    /** The approach passed judging: tell Claude to implement it now, then emit completion. */
+    @Action("implement")
+    public ActionResult implement(String args) {
+        emit(ChatEvent.info("③ 承認された方針を実装します"));
+        String instruction =
+                "先ほど説明した方針が承認されました。**今からその方針を実装してください。**"
+              + "承認された方針は次の通りです：\n\n" + plan;
+        runTurn(instruction);
+        emit(ChatEvent.info("✅ Workflow complete"));
+        emit(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
+        return new ActionResult(true, "implemented");
+    }
+
+    /**
+     * Human gate: shows the plan and blocks until an external approver decides. The decision can come
+     * from a human clicking a button, a queue, or another workflow — anything that resolves the prompt
+     * via {@code POST /api/respond}. SUCCESS = approved (proceed to implement), FAILURE = rejected or
+     * timed out (the workflow stops).
+     */
+    @Action("awaitApproval")
+    public ActionResult awaitApproval(String args) {
+        if (approvalRegistry == null) {
+            emit(ChatEvent.error("承認レジストリが無いためゲートできません"));
+            return new ActionResult(false, "no registry");
+        }
+        String promptId = java.util.UUID.randomUUID().toString();
+        java.util.concurrent.CompletableFuture<WorkflowApprovalRegistry.Decision> future =
+                new java.util.concurrent.CompletableFuture<>();
+        approvalRegistry.register(promptId, future);
+        emit(ChatEvent.prompt(promptId,
+                "この方針で実装してよいですか？\n\n" + plan,
+                "workflow_approval",
+                java.util.List.of("承認して実装", "却下（やり直し）")));
+        emit(ChatEvent.info("② 承認待ち…（「承認して実装」または「却下」を押してください）"));
+        try {
+            WorkflowApprovalRegistry.Decision decision =
+                    future.get(30, java.util.concurrent.TimeUnit.MINUTES);
+            if (decision.approved()) {
+                emit(ChatEvent.info("② 承認 → 実装へ"));
+                return new ActionResult(true, "approved");
+            }
+            emit(ChatEvent.info("② 却下されました — 中止します"));
+            emit(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
+            return new ActionResult(false, "rejected");
+        } catch (java.util.concurrent.TimeoutException e) {
+            approvalRegistry.remove(promptId);
+            emit(ChatEvent.error("承認待ちがタイムアウトしました"));
+            emit(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
+            return new ActionResult(false, "timeout");
+        } catch (Exception e) {
+            approvalRegistry.remove(promptId);
+            Thread.currentThread().interrupt();
+            return new ActionResult(false, "interrupted");
+        }
+    }
+
     // ── internals ───────────────────────────────────────────────────────────
 
-    /** Sends one instruction to Claude, streams the reply to the browser, and records the turn. */
-    private void runTurn(String instruction) {
+    /**
+     * Sends one instruction to Claude, streams the reply to the browser, records the turn, and
+     * returns the assistant's text so callers (e.g. the judge) can inspect it.
+     */
+    private String runTurn(String instruction) {
         int turnNo = ++turn;
         StringBuilder assistant = new StringBuilder();
         StringBuilder thinking = new StringBuilder();
@@ -165,6 +295,7 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
             sseRef.tell(a -> a.emit(ChatEvent.error("turn failed: " + e.getMessage())));
         }
         recordTurn(turnNo, instruction, assistant.toString(), thinking.toString());
+        return assistant.toString();
     }
 
     /** Records one turn into the H2 I/O log in the marker format the Sessions tab reads. */

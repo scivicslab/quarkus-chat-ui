@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd"
+    xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.scivicslab.chatui</groupId>
+    <artifactId>quarkus-chat-ui-parent</artifactId>
+    <version>2.4.0</version>
+  </parent>
+  <artifactId>chat-ui-provider-claude-tmux</artifactId>
+
+  <!--
+    Drives the Claude Code interactive TUI inside a tmux session, extracting
+    content from tmux capture-pane output. Phase 1 contains only the pure
+    extraction logic (no tmux, no actors), unit-tested against captured fixtures.
+    See spec TmuxTuiDriver_260630_oo01.
+  -->
+
+  <dependencies>
+    <dependency>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>chat-ui-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.scivicslab</groupId>
+      <artifactId>pojo-actor</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>io.smallrye</groupId>
+        <artifactId>jandex-maven-plugin</artifactId>
+      </plugin>
+      <!-- Activates *IT.java integration tests (real tmux round trip) under mvn verify. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
