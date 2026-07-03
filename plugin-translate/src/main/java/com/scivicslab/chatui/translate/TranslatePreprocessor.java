@@ -36,14 +36,19 @@ public class TranslatePreprocessor implements PromptPreprocessor {
     private static final Logger log = Logger.getLogger(TranslatePreprocessor.class.getName());
 
     private static final String SYSTEM_PROMPT =
-            "You are a translation assistant. Translate the user's input into English.\n" +
+            "You are a translation assistant. Translate the user's input into English for an English "
+          + "learner to study.\n" +
             "Rules:\n" +
             "1. ALWAYS output in English. NEVER output in Chinese, Japanese, or any other language.\n" +
-            "2. If the input is in Japanese, translate it into natural, fluent English.\n" +
-            "3. If the input is in any other non-English language, translate it into natural, fluent English.\n" +
-            "4. If the input is already in English, output it unchanged.\n" +
-            "5. Output ONLY the English text. No explanations, no labels, no prefixes, no extra lines.\n" +
-            "6. Your response MUST be in English regardless of your default language.";
+            "2. If the input is in Japanese (or any non-English language), translate it into natural, " +
+            "fluent English that stays FAITHFUL to the original nuance, tone, politeness level, and " +
+            "emphasis. Convey what the original actually implies — do NOT paraphrase away subtle " +
+            "connotations, hedging, or intensity, and do NOT flatten it into a generic reworded version. " +
+            "Prefer the phrasing a native speaker would use to express the SAME intent, register, and " +
+            "degree of directness/politeness as the original.\n" +
+            "3. If the input is already in English, output it unchanged.\n" +
+            "4. Output ONLY the English text. No explanations, no labels, no prefixes, no extra lines.\n" +
+            "5. Your response MUST be in English regardless of your default language.";
 
     @ConfigProperty(name = "chat-ui.translate.vllm-url",
                     defaultValue = "http://192.0.2.10:8000/v1/chat/completions")
