@@ -11,13 +11,6 @@
   <artifactId>chat-ui-app</artifactId>
 
   <dependencies>
-    <!-- Workspace SPI: declare self-description at compile time; provided at runtime by workspace ClassLoader -->
-    <dependency>
-      <groupId>com.scivicslab</groupId>
-      <artifactId>ai-workspace-spi</artifactId>
-      <version>1.0.0</version>
-      <scope>provided</scope>
-    </dependency>
 
     <!-- All providers included in the single JAR -->
     <dependency>
