@@ -54,8 +54,10 @@ public class TranslatePreprocessor implements PromptPreprocessor {
             "quotes or code fences.\n" +
             "5. Your response MUST be in English regardless of your default language.";
 
+    // Neutral placeholder default; the real vLLM endpoint is injected per deployment via the
+    // chat-ui.translate.vllm-url property (env CHAT_UI_TRANSLATE_VLLM_URL).
     @ConfigProperty(name = "chat-ui.translate.vllm-url",
-                    defaultValue = "http://192.0.2.10:8000/v1/chat/completions")
+                    defaultValue = "http://vllm:8000/v1/chat/completions")
     String vllmUrl;
 
     @ConfigProperty(name = "chat-ui.translate.model",
