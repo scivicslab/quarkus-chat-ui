@@ -4,12 +4,9 @@ import com.scivicslab.chatui.claude.ClaudeLlmProvider;
 import com.scivicslab.chatui.codex.CodexLlmProvider;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.tmux.TmuxLlmProvider;
-import com.scivicslab.chatui.openaicompat.AgentLoopExtension;
 import com.scivicslab.chatui.openaicompat.OpenAiCompatProvider;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.inject.Produces;
-import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.util.Arrays;
@@ -52,9 +49,6 @@ public class LlmProviderProducer {
     @ConfigProperty(name = "chat-ui.tmux.program", defaultValue = "claude")
     String tmuxProgram;
 
-    @Inject
-    Instance<AgentLoopExtension> agentLoopExt;
-
     /**
      * Produces the active {@link LlmProvider} bean based on the {@code chat-ui.provider}
      * configuration property. Supported values are {@code claude}, {@code codex},
@@ -81,12 +75,7 @@ public class LlmProviderProducer {
                         .filter(s -> !s.isBlank())
                         .toList();
                 String model = defaultModel.filter(s -> !s.isBlank()).orElse("default");
-                AgentLoopExtension ext = agentLoopExt.isUnsatisfied() ? null : agentLoopExt.get();
-                if (ext != null && !ext.isEnabled()) ext = null;
-                if (ext == null) {
-                    LOG.info("openai-compat: agent-loop disabled (no mcp-urls configured)");
-                }
-                yield new OpenAiCompatProvider(urls, model, ext);
+                yield new OpenAiCompatProvider(urls, model, null);
             }
             default -> throw new IllegalStateException(
                 "Unknown provider: '" + providerName + "'. Valid values: claude, claude-tmux, codex, openai-compat");

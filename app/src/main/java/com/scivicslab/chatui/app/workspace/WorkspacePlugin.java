@@ -10,7 +10,6 @@ public final class WorkspacePlugin implements WorkspaceToolPlugin {
     @Override public String jarFileName()    { return "quarkus-chat-ui.jar"; }
     @Override public int defaultPort()       { return 28100; }
     @Override public String githubRepo()     { return "scivicslab/quarkus-chat-ui"; }
-    @Override public String gatewayMcpProp() { return "chat-ui.agent-loop.mcp-urls"; }
 
     @Override
     public List<ParamDef> params() {
