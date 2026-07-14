@@ -77,12 +77,44 @@ class PermissionModeIntegrationTest {
             CliProcess process = new CliProcess("claude", "ANTHROPIC_API_KEY", config);
             List<String> cmd = process.buildCommand();
 
-            assertEquals("claude", cmd.get(0), "Binary name");
+            assertEquals("claude", cmd.get(2), "Binary name follows the stdbuf prefix");
             assertTrue(cmd.contains("--output-format"), "Must have --output-format");
             assertTrue(cmd.contains("--input-format"), "Must have --input-format");
             assertTrue(cmd.contains("stream-json"), "Format must be stream-json");
             assertTrue(cmd.contains("--verbose"), "Must have --verbose");
             assertTrue(cmd.contains("--permission-mode"), "Must have --permission-mode");
+        }
+    }
+
+    @Nested
+    @DisplayName("Line-buffered stdout")
+    class LineBufferedStdout {
+
+        @Test
+        @DisplayName("command is prefixed with stdbuf -oL so events arrive as they are produced")
+        void buildCommand_prefixesStdbufLineBuffered() {
+            CliConfig config = claudeConfig("claude-sonnet-4-5");
+            CliProcess process = new CliProcess("claude", "ANTHROPIC_API_KEY", config);
+            List<String> cmd = process.buildCommand();
+
+            assertEquals("stdbuf", cmd.get(0),
+                "Without stdbuf the CLI writes to a pipe, libc uses 4KB block buffering, and the "
+                + "whole turn arrives at once when the process flushes. See "
+                + "StdoutBufferingPostmortem_260714_oo01.");
+            assertEquals("-oL", cmd.get(1), "stdout must be line buffered");
+            assertEquals("claude", cmd.get(2), "The CLI binary follows the stdbuf prefix");
+        }
+
+        @Test
+        @DisplayName("stdbuf prefix does not disturb the flags that follow")
+        void buildCommand_stdbufKeepsFlagOrder() {
+            CliConfig config = claudeConfig("claude-sonnet-4-5");
+            CliProcess process = new CliProcess("claude", "ANTHROPIC_API_KEY", config);
+            List<String> cmd = process.buildCommand();
+
+            int fmtIdx = cmd.indexOf("--output-format");
+            assertTrue(fmtIdx > 2, "--output-format must come after the binary");
+            assertEquals("stream-json", cmd.get(fmtIdx + 1));
         }
     }
 

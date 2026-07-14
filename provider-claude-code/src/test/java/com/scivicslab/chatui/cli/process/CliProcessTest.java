@@ -46,7 +46,8 @@ class CliProcessTest {
             CliProcess process = new CliProcess(BINARY, API_KEY_ENV, defaultConfig);
             List<String> cmd = process.buildCommand();
 
-            assertEquals(BINARY, cmd.get(0));
+            // The command is prefixed with "stdbuf -oL" to keep the CLI's stdout line buffered.
+            assertEquals(BINARY, cmd.get(2));
             assertTrue(cmd.contains("--output-format"));
             assertTrue(cmd.contains("stream-json"));
             assertTrue(cmd.contains("--input-format"));
@@ -270,7 +271,8 @@ class CliProcessTest {
         CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
         List<String> cmd = process.buildCommand();
 
-        assertEquals(BINARY, cmd.get(0));
+        // The command is prefixed with "stdbuf -oL" to keep the CLI's stdout line buffered.
+        assertEquals(BINARY, cmd.get(2));
         assertTrue(cmd.contains("--output-format"));
         assertTrue(cmd.contains("--input-format"));
         assertTrue(cmd.contains("--verbose"));

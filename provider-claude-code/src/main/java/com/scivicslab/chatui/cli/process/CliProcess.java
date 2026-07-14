@@ -277,6 +277,12 @@ public class CliProcess {
 
     List<String> buildCommand() {
         List<String> cmd = new ArrayList<>();
+        // The CLI writes to a pipe here, not a TTY, so libc switches its stdout from line
+        // buffering to 4KB block buffering. Events then sit in the buffer instead of reaching
+        // us as they are produced, and the whole turn arrives at once when the process flushes.
+        // stdbuf -oL forces line buffering so each JSON event is delivered as it is written.
+        cmd.add("stdbuf");
+        cmd.add("-oL");
         cmd.add(binary);
         cmd.add("--output-format");
         cmd.add("stream-json");
