@@ -178,11 +178,12 @@ public abstract class CliLlmProvider implements LlmProvider {
         }
 
         final boolean[] staleSession = {false};
+        final boolean[] sawAssistant = {false};
 
         try {
             cliProcess.sendPrompt(prompt, event -> {
                 ctx.onActivity().run();
-                dispatch(event, emitter, staleSession);
+                dispatch(event, emitter, staleSession, sawAssistant);
             });
         } catch (IOException e) {
             logger.log(Level.WARNING, id() + " CLI failed", e);
@@ -198,9 +199,10 @@ public abstract class CliLlmProvider implements LlmProvider {
             emitter.accept(ChatEvent.thinking("Session expired. Starting new session..."));
             // Retry once without stale-session handling
             try {
+                final boolean[] retrySawAssistant = {false};
                 cliProcess.sendPrompt(prompt, event -> {
                     ctx.onActivity().run();
-                    dispatch(event, emitter, new boolean[]{false});
+                    dispatch(event, emitter, new boolean[]{false}, retrySawAssistant);
                 });
             } catch (IOException e) {
                 emitter.accept(ChatEvent.error(id() + " CLI error on retry: " + e.getMessage()));
@@ -208,12 +210,15 @@ public abstract class CliLlmProvider implements LlmProvider {
         }
     }
 
-    private void dispatch(StreamEvent event, Consumer<ChatEvent> emitter, boolean[] staleSession) {
+    // Package-private so CliLlmProviderDispatchTest can exercise the event routing directly.
+    void dispatch(StreamEvent event, Consumer<ChatEvent> emitter, boolean[] staleSession,
+                  boolean[] sawAssistant) {
         DebugLogger.logEvent("DISPATCH", event.type(), event.content());
 
         switch (event.type()) {
             case "assistant" -> {
                 DebugLogger.log("[EMIT] Sending delta to SSE");
+                sawAssistant[0] = true;
                 emitter.accept(ChatEvent.delta(event.content()));
             }
             case "thinking" -> {
@@ -246,6 +251,14 @@ public abstract class CliLlmProvider implements LlmProvider {
                 if (event.sessionId() != null) saveSession(event.sessionId());
             }
             case "result" -> {
+                // The CLI normally streams the answer as assistant events. When it emits none
+                // for this turn, the full text is only present in the result event; send it as a
+                // delta so the answer still reaches the UI. Guarded by sawAssistant to avoid
+                // duplicating text that was already streamed.
+                if (!sawAssistant[0] && event.content() != null && !event.content().isBlank()) {
+                    DebugLogger.log("[EMIT] No assistant event this turn; sending result text as delta");
+                    emitter.accept(ChatEvent.delta(event.content()));
+                }
                 DebugLogger.log("[EMIT] Sending result to SSE");
                 if (event.sessionId() != null) saveSession(event.sessionId());
                 emitter.accept(ChatEvent.result(event.sessionId(), event.costUsd(), event.durationMs(),

@@ -451,6 +451,37 @@ class StreamEventParserTest {
         }
 
         @Test
+        @DisplayName("result event carries the final answer text as content")
+        void parse_result_carriesFinalText() {
+            String json = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
+                    + "\"result\":\"Migration complete.\",\"session_id\":\"s-1\","
+                    + "\"total_cost_usd\":2.39,\"duration_ms\":13586}";
+            StreamEvent e = parser.parse(json);
+            assertEquals("result", e.type());
+            assertEquals("Migration complete.", e.content());
+            assertEquals("s-1", e.sessionId());
+            assertFalse(e.isError());
+        }
+
+        @Test
+        @DisplayName("result event with empty result text has null content")
+        void parse_result_emptyText_hasNullContent() {
+            String json = "{\"type\":\"result\",\"is_error\":false,\"result\":\"\",\"session_id\":\"s-2\"}";
+            StreamEvent e = parser.parse(json);
+            assertEquals("result", e.type());
+            assertNull(e.content());
+        }
+
+        @Test
+        @DisplayName("result event without a result field has null content")
+        void parse_result_noResultField_hasNullContent() {
+            String json = "{\"type\":\"result\",\"is_error\":false,\"session_id\":\"s-3\"}";
+            StreamEvent e = parser.parse(json);
+            assertEquals("result", e.type());
+            assertNull(e.content());
+        }
+
+        @Test
         @DisplayName("result event without session_id has null sessionId")
         void parse_result_noSessionId() {
             String json = "{\"type\":\"result\",\"is_error\":false}";
@@ -654,4 +685,5 @@ class StreamEventParserTest {
             assertFalse(e.content().isBlank());
         }
     }
+
 }

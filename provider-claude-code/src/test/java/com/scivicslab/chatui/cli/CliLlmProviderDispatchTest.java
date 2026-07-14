@@ -231,4 +231,71 @@ class CliLlmProviderDispatchTest {
             }
         }
     }
+
+    // --- Result-text fallback when the CLI emits no assistant event ---
+
+    @Nested
+    @DisplayName("Result text fallback")
+    class ResultTextFallback {
+
+        private java.util.List<com.scivicslab.chatui.core.rest.ChatEvent> emitted;
+        private java.util.function.Consumer<com.scivicslab.chatui.core.rest.ChatEvent> emitter;
+
+        @BeforeEach
+        void collectEmissions() {
+            emitted = new java.util.ArrayList<>();
+            emitter = emitted::add;
+        }
+
+        private com.scivicslab.chatui.cli.process.StreamEvent resultEvent(String text) {
+            return new com.scivicslab.chatui.cli.process.StreamEvent(
+                    "result", text, "s-1", 0.01, 100L, false, "{}");
+        }
+
+        private com.scivicslab.chatui.cli.process.StreamEvent assistantEvent(String text) {
+            return new com.scivicslab.chatui.cli.process.StreamEvent(
+                    "assistant", text, null, -1, -1, false, "{}");
+        }
+
+        private java.util.List<String> deltaTexts() {
+            return emitted.stream()
+                    .filter(e -> "delta".equals(e.type()))
+                    .map(com.scivicslab.chatui.core.rest.ChatEvent::content)
+                    .toList();
+        }
+
+        @Test
+        @DisplayName("result text is emitted as a delta when no assistant event arrived")
+        void dispatch_resultWithoutAssistant_emitsDelta() {
+            boolean[] sawAssistant = {false};
+            provider.dispatch(resultEvent("Final answer."), emitter, new boolean[]{false}, sawAssistant);
+            assertEquals(java.util.List.of("Final answer."), deltaTexts());
+        }
+
+        @Test
+        @DisplayName("result text is not duplicated when an assistant event already streamed it")
+        void dispatch_resultAfterAssistant_doesNotDuplicate() {
+            boolean[] sawAssistant = {false};
+            provider.dispatch(assistantEvent("Streamed answer."), emitter, new boolean[]{false}, sawAssistant);
+            provider.dispatch(resultEvent("Streamed answer."), emitter, new boolean[]{false}, sawAssistant);
+            // Only the assistant delta; the result must not re-send the same text.
+            assertEquals(java.util.List.of("Streamed answer."), deltaTexts());
+        }
+
+        @Test
+        @DisplayName("result with blank text emits no delta")
+        void dispatch_resultBlankText_emitsNoDelta() {
+            boolean[] sawAssistant = {false};
+            provider.dispatch(resultEvent("   "), emitter, new boolean[]{false}, sawAssistant);
+            assertTrue(deltaTexts().isEmpty());
+        }
+
+        @Test
+        @DisplayName("result event always emits the result metadata event")
+        void dispatch_result_alwaysEmitsResultEvent() {
+            boolean[] sawAssistant = {false};
+            provider.dispatch(resultEvent("Final answer."), emitter, new boolean[]{false}, sawAssistant);
+            assertTrue(emitted.stream().anyMatch(e -> "result".equals(e.type())));
+        }
+    }
 }

@@ -174,7 +174,12 @@ public class StreamEventParser {
             return new StreamEvent("error", json.optString("result", "Unknown error"),
                     sessionId, costUsd, durationMs, true, rawJson);
         }
-        return new StreamEvent("result", null, sessionId, costUsd, durationMs, false, rawJson);
+        // Carry the final text so the dispatcher can fall back to it when the CLI emitted
+        // no assistant event for this turn. Older CLI versions always streamed the answer as
+        // assistant events; newer ones may only put it in the result event.
+        String finalText = json.optString("result", "");
+        return new StreamEvent("result", finalText.isEmpty() ? null : finalText,
+                sessionId, costUsd, durationMs, false, rawJson);
     }
 
     private StreamEvent parseError(JSONObject json, String rawJson) {
