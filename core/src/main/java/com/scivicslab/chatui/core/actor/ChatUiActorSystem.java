@@ -117,6 +117,16 @@ public class ChatUiActorSystem {
             watchdogTimer.scheduleAtFixedRate(
                     () -> watchdogRef.tell(w -> w.tick(chatActorRef)),
                     10, 10, TimeUnit.SECONDS);
+
+            // Idle monitor: while the session is idle, poll the provider for autonomous output
+            // (e.g. a background job the model started finishing) and surface it as its own
+            // assistant turn. Reuses the watchdog scheduler thread. CLI providers only.
+            if (provider.supportsAutonomousEvents()) {
+                watchdogTimer.scheduleAtFixedRate(
+                        () -> chatActorRef.tell(a -> a.pollAutonomousActivity(chatActorRef)),
+                        2, 2, TimeUnit.SECONDS);
+                LOG.info("Idle monitor enabled (autonomous-event polling every 2s)");
+            }
             LOG.info("ChatUiActorSystem initialized (single-user, provider=" + provider.id() + ", watchdog=enabled)");
         } else {
             LOG.info("ChatUiActorSystem initialized (single-user, provider=" + provider.id() + ", watchdog=disabled)");

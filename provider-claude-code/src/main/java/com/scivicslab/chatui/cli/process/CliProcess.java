@@ -41,7 +41,15 @@ public class CliProcess {
     private OutputStream stdinStream;
     private volatile Thread readerThread;
     private volatile Thread sendingThread;
-    private final LinkedBlockingQueue<StreamEvent> eventQueue = new LinkedBlockingQueue<>();
+    // Events produced while a prompt turn is in flight (between writeUserMessage and the turn's
+    // result event) go to turnQueue and are consumed by sendPrompt. Events produced while no
+    // prompt is active — the CLI emitting autonomously (a background job finishing, a
+    // ScheduleWakeup firing) — go to autonomousQueue and are consumed by pollAutonomousEvent.
+    // Routing by turnActive keeps autonomous output from being mis-delivered as the response to
+    // the next user prompt.
+    private final LinkedBlockingQueue<StreamEvent> turnQueue = new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<StreamEvent> autonomousQueue = new LinkedBlockingQueue<>();
+    private volatile boolean turnActive;
     private volatile String apiKey;
 
     /**
@@ -118,9 +126,9 @@ public class CliProcess {
         BufferedReader stdoutReader =
                 new BufferedReader(new InputStreamReader(currentProcess.getInputStream()));
 
-        // Background thread: read stdout continuously and put parsed events into the queue.
-        // This keeps running while the process is alive, picking up both prompted and
-        // autonomous (ScheduleWakeup) turns.
+        // Background thread: read stdout continuously and route parsed events into the turn or
+        // autonomous queue. Keeps running while the process is alive, picking up both prompted and
+        // autonomous (background-job / ScheduleWakeup) turns.
         readerThread = Thread.ofVirtual().start(() -> {
             try {
                 String line;
@@ -134,10 +142,8 @@ public class CliProcess {
                     if ("result".equals(event.type()) && event.sessionId() != null) {
                         lastSessionId = event.sessionId();
                     }
-                    eventQueue.put(event);
+                    routeEvent(event);
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             } catch (IOException ignored) {}
         });
 
@@ -157,22 +163,25 @@ public class CliProcess {
      * Sends a prompt and streams response events to the callback.
      * The process stays alive after a turn completes.
      *
-     * <p>Writes the user message to stdin, then reads events from the shared
-     * {@code eventQueue} (filled by the background reader thread) until a
+     * <p>Writes the user message to stdin, then reads events from {@code turnQueue}
+     * (filled by the background reader thread while the turn is active) until a
      * {@code result} event is received.</p>
      */
     public int sendPrompt(String prompt, StreamCallback callback) throws IOException {
         if (currentProcess == null || !currentProcess.isAlive()) {
-            eventQueue.clear();
+            turnQueue.clear();
+            autonomousQueue.clear();
             startProcess();
         }
 
+        // Mark the turn active before writing so the reader routes the response to turnQueue.
+        beginTurn();
         writeUserMessage(prompt);
 
         sendingThread = Thread.currentThread();
         try {
             while (true) {
-                StreamEvent event = eventQueue.poll(60, TimeUnit.SECONDS);
+                StreamEvent event = pollTurnEvent(60_000);
                 if (event == null) {
                     if (currentProcess != null && currentProcess.isAlive()) {
                         // Process is alive but slow (e.g. 529 retries in progress) — keep waiting.
@@ -181,7 +190,9 @@ public class CliProcess {
                         continue;
                     }
                     // Process has died — give up and discard any stale queued events.
-                    eventQueue.clear();
+                    turnActive = false;
+                    turnQueue.clear();
+                    autonomousQueue.clear();
                     if (callback != null) callback.onComplete(-1);
                     return -1;
                 }
@@ -198,15 +209,62 @@ public class CliProcess {
     }
 
     /**
-     * Polls for the next autonomous event (one not triggered by {@link #sendPrompt}).
-     * Used by the ChatActor's idle monitor to detect ScheduleWakeup responses.
+     * Polls for the next autonomous event (one produced while no {@link #sendPrompt} turn was
+     * active — e.g. a background job finishing or a ScheduleWakeup firing). Consumed by the
+     * ChatActor's idle monitor to surface such output as its own assistant turn.
      *
      * @param timeoutMs maximum wait in milliseconds; 0 means non-blocking
-     * @return the next event, or {@code null} if none arrived within the timeout
+     * @return the next autonomous event, or {@code null} if none arrived within the timeout
      */
-    public StreamEvent pollEvent(long timeoutMs) throws InterruptedException {
-        if (timeoutMs <= 0) return eventQueue.poll();
-        return eventQueue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+    public StreamEvent pollAutonomousEvent(long timeoutMs) throws InterruptedException {
+        if (timeoutMs <= 0) return autonomousQueue.poll();
+        return autonomousQueue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Returns whether any autonomous event is currently buffered. Non-blocking; safe to call
+     * from any thread. The idle monitor uses this cheap check before committing to a drain.
+     *
+     * @return {@code true} if at least one autonomous event is waiting
+     */
+    public boolean hasAutonomousEvent() {
+        return !autonomousQueue.isEmpty();
+    }
+
+    /** Marks a prompt turn as started so subsequent events route to the turn queue. */
+    void beginTurn() { turnActive = true; }
+
+    /** Returns whether a prompt turn is currently in flight (visible for testing). */
+    boolean isTurnActive() { return turnActive; }
+
+    /**
+     * Routes one parsed event to the turn queue or the autonomous queue depending on whether a
+     * prompt turn is in flight. The {@code result} event is the turn boundary: it belongs to the
+     * active turn, and everything after it (until the next prompt) is autonomous. Flipping
+     * {@code turnActive} here — in the single reader thread — closes the window in which a
+     * post-result event could leak into the turn stream and be mis-delivered as the next prompt's
+     * response. Uses {@code offer} on unbounded queues, so it never blocks.
+     *
+     * @param event the parsed stream event to route
+     */
+    void routeEvent(StreamEvent event) {
+        if (turnActive) {
+            turnQueue.offer(event);
+            if ("result".equals(event.type())) turnActive = false;
+        } else {
+            autonomousQueue.offer(event);
+        }
+    }
+
+    /**
+     * Polls the turn queue for the next event of the in-flight prompt.
+     *
+     * @param timeoutMs maximum wait in milliseconds
+     * @return the next turn event, or {@code null} if none arrived within the timeout
+     * @throws InterruptedException if interrupted while waiting
+     */
+    StreamEvent pollTurnEvent(long timeoutMs) throws InterruptedException {
+        return turnQueue.poll(timeoutMs, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -219,7 +277,9 @@ public class CliProcess {
         }
         Thread t = sendingThread;
         if (t != null) t.interrupt();
-        eventQueue.clear();
+        turnActive = false;
+        turnQueue.clear();
+        autonomousQueue.clear();
         Process p = currentProcess;
         currentProcess = null;
         stdinStream = null;

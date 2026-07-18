@@ -94,6 +94,40 @@ public interface LlmProvider {
      */
     default String resolveApprovalToContinuation(String promptId, String response) { return null; }
 
+    // ---- Autonomous events (output produced outside a sendPrompt turn) ----
+
+    /**
+     * Returns whether this provider can produce autonomous events — output that arrives while no
+     * {@link #sendPrompt} turn is active, for example when a background job the model started
+     * finishes, or a scheduled wake-up fires. Only such providers are polled by the idle monitor.
+     *
+     * @return {@code true} if autonomous events are possible for this provider
+     */
+    default boolean supportsAutonomousEvents() { return false; }
+
+    /**
+     * Returns whether autonomous output is currently buffered and waiting to be surfaced.
+     *
+     * <p>Non-blocking and cheap. The idle monitor calls this on the actor thread before
+     * committing to a (blocking) drain, so it never reserves the session when nothing is pending.</p>
+     *
+     * @return {@code true} if at least one autonomous event is waiting
+     */
+    default boolean hasAutonomousActivity() { return false; }
+
+    /**
+     * Drains one autonomous turn, dispatching its events to {@code emitter} using the same shapes
+     * as {@link #sendPrompt} (delta / thinking / result …), and returns whether any event was
+     * surfaced.
+     *
+     * <p>This method blocks until the autonomous turn's {@code result} arrives (or the buffer
+     * drains). It is called on a managed thread pool, never on an actor's virtual thread.</p>
+     *
+     * @param emitter callback that receives the streamed {@link ChatEvent} instances
+     * @return {@code true} if at least one event was surfaced (an autonomous turn happened)
+     */
+    default boolean drainAutonomousActivity(Consumer<ChatEvent> emitter) { return false; }
+
     /** True if the given input is a slash command handled by this provider. */
     default boolean isCommand(String input) { return false; }
 

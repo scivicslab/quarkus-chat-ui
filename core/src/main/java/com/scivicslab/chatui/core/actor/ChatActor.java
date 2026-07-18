@@ -337,6 +337,73 @@ public class ChatActor {
         done.complete(null);
     }
 
+    // ---- Autonomous turns (idle monitor) ----
+
+    /**
+     * Idle-monitor entry point. When the session is idle and the provider has buffered autonomous
+     * output — output produced outside a {@code sendPrompt} turn, e.g. a background job the model
+     * started finishing — drains it as its own assistant turn: streamed to the browser over SSE and
+     * recorded in history, with no preceding user message.
+     *
+     * <p>Invoked periodically via {@code self.tell} by the scheduler in {@code ChatUiActorSystem}.
+     * Following the POJO-actor model, the cheap {@code hasAutonomousActivity()} check runs here on
+     * the actor thread, while the blocking drain is delegated to the managed thread pool so the
+     * actor's message loop stays responsive.</p>
+     *
+     * @param self this actor's own reference, used to queue completion back onto the actor thread
+     */
+    public void pollAutonomousActivity(ActorRef<ChatActor> self) {
+        if (busy || providerRef == null) return;
+        if (!provider.supportsAutonomousEvents() || !provider.hasAutonomousActivity()) return;
+
+        // Reserve the session so a user prompt cannot start while the autonomous turn streams.
+        busy = true;
+        emitToSse(ChatEvent.status(provider.getCurrentModel(), provider.getSessionId(), true));
+        final long ioSession = (ioLog != null) ? ioLog.ensureSession() : -1;
+
+        providerRef.ask(p -> {
+            StringBuilder assistantBuf = new StringBuilder();
+            StringBuilder thinkingBuf = new StringBuilder();
+            Consumer<ChatEvent> wrapped = event -> {
+                if ("delta".equals(event.type()) && event.content() != null) {
+                    assistantBuf.append(event.content());
+                } else if ("thinking".equals(event.type()) && event.content() != null) {
+                    thinkingBuf.append(event.content());
+                } else if ("result".equals(event.type())) {
+                    String content = assistantBuf.toString();
+                    String thinking = thinkingBuf.toString();
+                    if (!content.isBlank()) {
+                        self.tell(b -> b.recordAutonomousTurn(ioSession, content, thinking));
+                    }
+                }
+                emitToSse(event);
+            };
+            return p.drainAutonomousActivity(wrapped);
+        }, providerRef.system().getManagedThreadPool())
+        .whenComplete((happened, ex) -> self.tell(b -> b.onAutonomousComplete(self)));
+    }
+
+    /** Called when an autonomous drain finishes; queued back onto the actor via {@code self.tell}. */
+    public void onAutonomousComplete(ActorRef<ChatActor> self) {
+        busy = false;
+        // A user prompt may have queued while we held the session — let the queue dispatch it now.
+        if (queueActor != null) queueActor.tell(q -> q.onPromptComplete(self));
+        emitToSse(ChatEvent.status(provider.getCurrentModel(), provider.getSessionId(), false));
+    }
+
+    /**
+     * Records a completed autonomous turn (one with no user prompt) into conversation history and
+     * the I/O log. Runs on the actor thread so {@code ioTurn} is mutated safely.
+     *
+     * @param ioSession the open I/O-log session id, or negative when logging is disabled
+     * @param assistant the accumulated assistant text
+     * @param thinking  the accumulated reasoning text
+     */
+    public void recordAutonomousTurn(long ioSession, String assistant, String thinking) {
+        recordHistory("assistant", assistant);
+        recordTurnIo(ioSession, ++ioTurn, "(autonomous continuation)", assistant, thinking);
+    }
+
     /**
      * Cancels the currently running prompt, if any.
      *
@@ -450,6 +517,22 @@ public class ChatActor {
     public void setSseEmitter(Consumer<ChatEvent> emitter) { this.sseEmitter = emitter; }
     /** Unregisters the current SSE emitter, stopping real-time log forwarding. */
     public void clearSseEmitter() { this.sseEmitter = null; }
+
+    /**
+     * Streams a chat event straight to the connected browser via the SSE emitter, without buffering
+     * it in the log ring (unlike {@link #emitEvent}). Used for autonomous-turn output, which is chat
+     * content rather than a log entry. The emitter ({@code SseActor::emit}) is safe to call from any
+     * thread, so this may be invoked from the managed thread pool during a drain.
+     *
+     * @param event the chat event to stream
+     */
+    private void emitToSse(ChatEvent event) {
+        Consumer<ChatEvent> e = sseEmitter;
+        if (e != null) {
+            try { e.accept(event); }
+            catch (Exception ignored) {}
+        }
+    }
 
     /**
      * Buffers a {@link ChatEvent} in the ring buffer and forwards it to the SSE emitter.

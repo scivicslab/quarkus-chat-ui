@@ -152,6 +152,48 @@ public abstract class CliLlmProvider implements LlmProvider {
     @Override
     public void cancel() { cliProcess.cancel(); }
 
+    // ---- Autonomous events ----
+
+    /** Per-event wait while draining an autonomous turn: long enough to bridge gaps within a
+     *  streaming turn, short enough to return promptly once the turn has ended. */
+    private static final long AUTONOMOUS_EVENT_TIMEOUT_MS = 5_000;
+
+    /** {@inheritDoc} The CLI stays alive across turns and can emit output autonomously. */
+    @Override
+    public boolean supportsAutonomousEvents() { return true; }
+
+    /** {@inheritDoc} */
+    @Override
+    public boolean hasAutonomousActivity() { return cliProcess.hasAutonomousEvent(); }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Drains autonomous events through the same {@link #dispatch} conversion used for a normal
+     * turn, stopping at the turn's {@code result} (or when no further event arrives within
+     * {@link #AUTONOMOUS_EVENT_TIMEOUT_MS}). Stale-session retry is intentionally not applied here:
+     * an autonomous turn has no prompt to resend.</p>
+     */
+    @Override
+    public boolean drainAutonomousActivity(Consumer<ChatEvent> emitter) {
+        if (!cliProcess.hasAutonomousEvent()) return false;
+        final boolean[] staleSession = {false};
+        final boolean[] sawAssistant = {false};
+        boolean surfaced = false;
+        try {
+            while (true) {
+                StreamEvent event = cliProcess.pollAutonomousEvent(AUTONOMOUS_EVENT_TIMEOUT_MS);
+                if (event == null) break;
+                dispatch(event, emitter, staleSession, sawAssistant);
+                surfaced = true;
+                if ("result".equals(event.type())) break;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return surfaced;
+    }
+
     /**
      * Sends a prompt to the CLI LLM and streams response events to the emitter.
      *
