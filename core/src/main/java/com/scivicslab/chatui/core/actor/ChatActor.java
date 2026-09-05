@@ -78,6 +78,16 @@ public class ChatActor {
     private String activeResultKey;
 
     /**
+     * Convenience constructor without the I/O log (used by tests).
+     *
+     * @param provider     the LLM provider implementation to delegate prompts to
+     * @param configApiKey optional API key supplied via application configuration
+     */
+    public ChatActor(LlmProvider provider, Optional<String> configApiKey) {
+        this(provider, configApiKey, null);
+    }
+
+    /**
      * Creates a new ChatActor bound to the given LLM provider.
      *
      * <p>Determines the authentication mode by checking (in order):
@@ -85,12 +95,8 @@ public class ChatActor {
      *
      * @param provider     the LLM provider implementation to delegate prompts to
      * @param configApiKey optional API key supplied via application configuration
+     * @param ioLog        store for the complete I/O log (Sessions tab), or {@code null} to disable logging
      */
-    /** Convenience constructor without the I/O log (used by tests). */
-    public ChatActor(LlmProvider provider, Optional<String> configApiKey) {
-        this(provider, configApiKey, null);
-    }
-
     public ChatActor(LlmProvider provider, Optional<String> configApiKey, IoLogStore ioLog) {
         this.provider = provider;
         this.ioLog = ioLog;
@@ -221,12 +227,34 @@ public class ChatActor {
      * Begins an asynchronous prompt. Dispatches blocking LLM I/O onto the managed
      * {@code ioPool}, returning immediately so the actor can process other messages
      * (cancel, log, etc.) while the request is in flight.
+     *
+     * <p>Convenience overload with no {@code resultKey} (human-typed prompts) and
+     * {@code noThink} left at its default ({@code false}).</p>
+     *
+     * @param prompt the prompt text to send to the LLM
+     * @param model  the model to use, or {@code null}/blank to keep the provider's current model
+     * @param emitter callback that receives {@link ChatEvent}s as the response streams in
+     * @param self   this actor's own reference, used to queue completion back onto the actor thread
+     * @param done   completed once the prompt has finished processing (success or error)
      */
     public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
                             ActorRef<ChatActor> self, CompletableFuture<Void> done) {
         startPrompt(prompt, model, emitter, self, done, null, false);
     }
 
+    /**
+     * Begins an asynchronous prompt with MCP result accumulation.
+     *
+     * <p>Convenience overload with {@code noThink} left at its default ({@code false}).</p>
+     *
+     * @param prompt    the prompt text to send to the LLM
+     * @param model     the model to use, or {@code null}/blank to keep the provider's current model
+     * @param emitter   callback that receives {@link ChatEvent}s as the response streams in
+     * @param self      this actor's own reference, used to queue completion back onto the actor thread
+     * @param done      completed once the prompt has finished processing (success or error)
+     * @param resultKey UUID under which the accumulated response is stored for later retrieval via
+     *                  {@link #getCompletedResult(String)}, or {@code null} for human-typed prompts
+     */
     public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
                             ActorRef<ChatActor> self, CompletableFuture<Void> done,
                             String resultKey) {
@@ -239,6 +267,15 @@ public class ChatActor {
      * <p>When {@code resultKey} is non-null (MCP-submitted prompts), the full assistant
      * response text is accumulated and stored in {@code completedResults} under that key
      * so that {@link #getCompletedResult(String)} can return it after completion.</p>
+     *
+     * @param prompt    the prompt text to send to the LLM
+     * @param model     the model to use, or {@code null}/blank to keep the provider's current model
+     * @param emitter   callback that receives {@link ChatEvent}s as the response streams in
+     * @param self      this actor's own reference, used to queue completion back onto the actor thread
+     * @param done      completed once the prompt has finished processing (success or error)
+     * @param resultKey UUID under which the accumulated response is stored for later retrieval via
+     *                  {@link #getCompletedResult(String)}, or {@code null} for human-typed prompts
+     * @param noThink   whether to ask the provider to skip its reasoning/thinking phase
      */
     public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
                             ActorRef<ChatActor> self, CompletableFuture<Void> done,
@@ -321,7 +358,13 @@ public class ChatActor {
         .whenComplete((r, ex) -> self.tell(b -> b.onPromptComplete(emitter, done, self)));
     }
 
-    /** Called when LLM processing finishes; queued back onto the actor via {@code self.tell()}. */
+    /**
+     * Called when LLM processing finishes; queued back onto the actor via {@code self.tell()}.
+     *
+     * @param emitter callback that receives the final {@link ChatEvent} status update
+     * @param done    completed to signal the prompt has finished processing
+     * @param self    this actor's own reference, forwarded to {@code queueActor} to dispatch the next prompt
+     */
     public void onPromptComplete(Consumer<ChatEvent> emitter, CompletableFuture<Void> done, ActorRef<ChatActor> self) {
         busy = false;
         activeResultKey = null;
@@ -383,7 +426,11 @@ public class ChatActor {
         .whenComplete((happened, ex) -> self.tell(b -> b.onAutonomousComplete(self)));
     }
 
-    /** Called when an autonomous drain finishes; queued back onto the actor via {@code self.tell}. */
+    /**
+     * Called when an autonomous drain finishes; queued back onto the actor via {@code self.tell}.
+     *
+     * @param self this actor's own reference, forwarded to {@code queueActor} to dispatch any queued prompt
+     */
     public void onAutonomousComplete(ActorRef<ChatActor> self) {
         busy = false;
         // A user prompt may have queued while we held the session — let the queue dispatch it now.
@@ -565,9 +612,18 @@ public class ChatActor {
         return result;
     }
 
-    /** Wire the watchdog actor reference. Called by ChatUiActorSystem after construction. */
+    /**
+     * Wire the watchdog actor reference. Called by ChatUiActorSystem after construction.
+     *
+     * @param watchdog reference to the actor that monitors CLI-provider stalls
+     */
     public void setWatchdog(ActorRef<WatchdogActor> watchdog) { this.watchdog = watchdog; }
 
+    /**
+     * Wire the queue actor reference. Called by ChatUiActorSystem after construction.
+     *
+     * @param queueActor reference to the actor that holds prompts while this actor is busy
+     */
     public void setQueueActor(ActorRef<QueueActor> queueActor) { this.queueActor = queueActor; }
 
     /**
@@ -580,12 +636,21 @@ public class ChatActor {
 
     // ---- MCP result tracking ----
 
-    /** Registers a UUID so that getResultStatus() returns "processing" until the prompt completes. */
+    /**
+     * Registers a UUID so that getResultStatus() returns "processing" until the prompt completes.
+     *
+     * @param key the MCP result UUID to register as pending
+     */
     public void registerPendingResultKey(String key) {
         pendingResultKeys.add(key);
     }
 
-    /** Stores the accumulated LLM response text for a completed MCP prompt. */
+    /**
+     * Stores the accumulated LLM response text for a completed MCP prompt.
+     *
+     * @param key  the MCP result UUID, previously registered via {@link #registerPendingResultKey(String)}
+     * @param text the accumulated assistant response text
+     */
     public void storeCompletedResult(String key, String text) {
         pendingResultKeys.remove(key);
         completedResults.put(key, text);
@@ -595,6 +660,9 @@ public class ChatActor {
     /**
      * Returns the status of an MCP result key: "completed", "processing", or "unknown".
      * "unknown" means the key was never registered with this actor.
+     *
+     * @param key the MCP result UUID to query
+     * @return "completed", "processing", or "unknown"
      */
     public String getResultStatus(String key) {
         if (completedResults.containsKey(key)) return "completed";
@@ -602,10 +670,21 @@ public class ChatActor {
         return "unknown";
     }
 
-    /** Returns the stored LLM response text for the given MCP result key, or null if not found. */
+    /**
+     * Returns the stored LLM response text for the given MCP result key, or null if not found.
+     *
+     * @param key the MCP result UUID to look up
+     * @return the accumulated assistant response text, or {@code null} if not found
+     */
     public String getCompletedResult(String key) {
         return completedResults.get(key);
     }
 
+    /**
+     * One entry in the conversation history.
+     *
+     * @param role    the message role (e.g. "user" or "assistant")
+     * @param content the message text
+     */
     public record HistoryEntry(String role, String content) {}
 }
