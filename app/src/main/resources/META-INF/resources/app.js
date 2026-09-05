@@ -348,6 +348,31 @@
         gfm: true
     });
 
+    // Renders markdown and points every <img> whose source is a path on this machine at
+    // /api/local-image, which reads the file server-side (LocalImageInAnswer_260904_oo01).
+    // Markdown turns ![](/home/devteam/works/shot.png) into <img src="/home/devteam/works/shot.png">,
+    // and the browser asks THIS server for that path — a request no static resource answers, so the
+    // picture comes out broken. The browser has no way to open a local file itself; only the server
+    // does. Sources under /api/ are left alone: those are this application's own endpoints, not files.
+    function renderMd(text) {
+        var holder = document.createElement('div');
+        holder.innerHTML = marked.parse(text);
+        var imgs = holder.getElementsByTagName('img');
+        for (var i = 0; i < imgs.length; i++) {
+            var raw = imgs[i].getAttribute('src') || '';
+            var filePath = null;
+            if (raw.indexOf('file://') === 0) {
+                filePath = decodeURIComponent(raw.substring('file://'.length));
+            } else if (raw.charAt(0) === '/' && raw.indexOf('/api/') !== 0) {
+                filePath = raw;
+            }
+            if (filePath) {
+                imgs[i].setAttribute('src', '/api/local-image?path=' + encodeURIComponent(filePath));
+            }
+        }
+        return holder.innerHTML;
+    }
+
     // Fix unclosed markdown fences/inline-code so marked.parse() doesn't break mid-stream
     function closeOpenMarkdown(text) {
         // Count triple-backtick fences
@@ -373,7 +398,7 @@
         var displayText = text
             .replace(/<think>[\s\S]*?<\/think>/g, '')
             .replace(/<think>[\s\S]*$/, '');
-        return marked.parse(displayText);
+        return renderMd(displayText);
     }
 
     // --- Timestamp helper ---
@@ -636,7 +661,7 @@
         var displayText = currentAssistantText
             .replace(/<think>[\s\S]*?<\/think>/g, '')
             .replace(/<think>[\s\S]*$/, '');  // partial unclosed <think> block
-        currentAssistantMsg.innerHTML = marked.parse(closeOpenMarkdown(displayText));
+        currentAssistantMsg.innerHTML = renderMd(closeOpenMarkdown(displayText));
         scrollToBottom();
     }
 
@@ -985,13 +1010,13 @@
         if (!content) return;
         btwResponseText += content;
         document.getElementById('btw-response').innerHTML =
-            marked.parse(closeOpenMarkdown(btwResponseText));
+            renderMd(closeOpenMarkdown(btwResponseText));
     }
 
     function handleBtwResult() {
         if (btwResponseText) {
             document.getElementById('btw-response').innerHTML =
-                marked.parse(btwResponseText);
+                renderMd(btwResponseText);
         }
     }
 
@@ -1108,7 +1133,7 @@
     function createAssistantDiv(text) {
         var div = document.createElement('div');
         div.className = 'message assistant';
-        div.innerHTML = marked.parse(text);
+        div.innerHTML = renderMd(text);
 
         var footer = document.createElement('div');
         footer.className = 'message-footer';
@@ -2350,7 +2375,7 @@
                 })
                 .then(function(md) {
                     extDialogBody.innerHTML = (typeof marked !== 'undefined')
-                        ? marked.parse(md)
+                        ? renderMd(md)
                         : '<pre>' + esc(md) + '</pre>';
                 })
                 .catch(function(err) {
