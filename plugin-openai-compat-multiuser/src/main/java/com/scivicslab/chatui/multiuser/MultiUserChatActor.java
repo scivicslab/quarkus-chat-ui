@@ -150,6 +150,15 @@ public class MultiUserChatActor {
         while (s.history.size() > MAX_HISTORY) s.history.removeFirst();
     }
 
+    /**
+     * The users this actor holds a session for.
+     *
+     * @return their ids
+     */
+    public List<String> getUserIds() {
+        return List.copyOf(sessions.keySet());
+    }
+
     public List<ChatActor.HistoryEntry> getHistory(String userId, int limit) {
         UserSession s = session(userId);
         int size = s.history.size();

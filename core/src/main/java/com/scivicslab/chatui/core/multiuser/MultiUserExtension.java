@@ -42,6 +42,18 @@ public interface MultiUserExtension {
 
     List<ChatActor.HistoryEntry> getHistory(String userId, int limit);
 
+    /**
+     * The users this extension is holding a conversation for.
+     *
+     * <p>{@code getHistory} answers for a user someone already named. This names them, which is what
+     * a caller describing the whole instance needs ({@code ActivitySummary_260905_oo01}).</p>
+     *
+     * @return the user ids, in no particular order; empty when nobody has spoken yet
+     */
+    default List<String> getUserIds() {
+        return List.of();
+    }
+
     /** Stores a log record in the shared ring buffer. */
     void publishLog(String level, String loggerName, String message, long timestamp);
 

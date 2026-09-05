@@ -80,6 +80,11 @@ public class MultiUserExtensionImpl implements MultiUserExtension {
     }
 
     @Override
+    public List<String> getUserIds() {
+        return actorRef.ask(MultiUserChatActor::getUserIds).join();
+    }
+
+    @Override
     public void publishLog(String level, String loggerName, String message, long timestamp) {
         actorRef.tell(a -> a.publishLog(level, loggerName, message, timestamp));
     }
