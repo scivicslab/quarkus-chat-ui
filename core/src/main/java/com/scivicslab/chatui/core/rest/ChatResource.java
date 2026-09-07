@@ -276,11 +276,12 @@ public class ChatResource {
             promptText = promptPreprocessors.get().process(promptText, this::emitSse);
         }
         final String finalPrompt = promptText;
+        final List<String> images = request.images != null ? request.images : List.of();
 
         queueRef.tell(q -> q.enqueue(
                 finalPrompt, model, "queue",
                 this::emitSse, chatRef, "human", null,
-                new java.util.concurrent.CompletableFuture<>(), noThink));
+                new java.util.concurrent.CompletableFuture<>(), noThink, images));
         return ChatEvent.info("Processing");
     }
 
@@ -989,6 +990,8 @@ public class ChatResource {
         public String text;
         public String model;
         public boolean noThink;
+        /** Pasted/attached images, as {@code data:} URLs; {@code null} or empty if none. */
+        public List<String> images;
     }
 
     public static class CommandRequest {

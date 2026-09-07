@@ -302,6 +302,13 @@ class QueueActorTest {
         public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
                                 ActorRef<ChatActor> self, CompletableFuture<Void> done,
                                 String resultKey, boolean noThink) {
+            startPrompt(prompt, model, emitter, self, done, resultKey, noThink, List.of());
+        }
+
+        @Override
+        public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
+                                ActorRef<ChatActor> self, CompletableFuture<Void> done,
+                                String resultKey, boolean noThink, List<String> imageDataUrls) {
             receivedPrompts.add(prompt);
             // Immediately complete — no real LLM call
             done.complete(null);

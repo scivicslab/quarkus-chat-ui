@@ -280,6 +280,20 @@ public class ChatActor {
     public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
                             ActorRef<ChatActor> self, CompletableFuture<Void> done,
                             String resultKey, boolean noThink) {
+        startPrompt(prompt, model, emitter, self, done, resultKey, noThink, List.of());
+    }
+
+    /**
+     * Begins an asynchronous prompt carrying image attachments, for a provider whose
+     * {@link com.scivicslab.chatui.core.provider.ProviderCapabilities} advertises image support
+     * ({@code OpenAiCompatProvider} today; a provider that does not simply ignores them via
+     * {@link ProviderContext#imageDataUrls()}).
+     *
+     * @param imageDataUrls the pasted/attached images, as {@code data:} URLs; empty if none
+     */
+    public void startPrompt(String prompt, String model, Consumer<ChatEvent> emitter,
+                            ActorRef<ChatActor> self, CompletableFuture<Void> done,
+                            String resultKey, boolean noThink, List<String> imageDataUrls) {
         if (busy) {
             emitter.accept(ChatEvent.error("Already processing a prompt. Please wait or cancel."));
             done.complete(null);
@@ -319,7 +333,7 @@ public class ChatActor {
                         ? () -> watchdog.tell(WatchdogActor::onActivity)
                         : () -> {};
 
-                ProviderContext ctx = new ProviderContext(snapApiKey, List.of(), noThink, heartbeat);
+                ProviderContext ctx = new ProviderContext(snapApiKey, imageDataUrls, noThink, heartbeat);
 
                 // Wrap emitter to intercept assistant content for history and optional result capture
                 StringBuilder assistantBuf = new StringBuilder();

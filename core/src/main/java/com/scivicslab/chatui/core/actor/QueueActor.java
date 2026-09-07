@@ -5,6 +5,7 @@ import com.scivicslab.pojoactor.core.ActorRef;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
@@ -83,10 +84,23 @@ public class QueueActor {
                         ActorRef<ChatActor> chatActorRef,
                         String source, String resultKey,
                         CompletableFuture<Void> done, boolean noThink) {
+        enqueue(prompt, model, mode, emitter, chatActorRef, source, resultKey, done, noThink, List.of());
+    }
+
+    /**
+     * Enqueues a prompt carrying image attachments (pasted/dropped into the input box).
+     *
+     * @param images the images as {@code data:} URLs; empty if the prompt has none
+     */
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatActor> chatActorRef,
+                        String source, String resultKey,
+                        CompletableFuture<Void> done, boolean noThink, List<String> images) {
 
         switch (mode) {
             case "cancel_and_send" -> {
-                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey, noThink);
+                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey, noThink, images);
                 queue.addFirst(item);
                 chatActorRef.tell(ChatActor::cancel);
                 emitter.accept(ChatEvent.info("Current prompt cancelled. Your message is queued."));
@@ -94,7 +108,7 @@ public class QueueActor {
             }
             default -> {
                 // "queue" mode (default)
-                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey, noThink);
+                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey, noThink, images);
                 queue.addLast(item);
                 emitter.accept(ChatEvent.info("Queued. Your message will be sent when the current prompt finishes."));
                 LOG.info("queue: queued prompt (queue size=" + queue.size() + ")");
@@ -168,7 +182,7 @@ public class QueueActor {
         LOG.info("Dequeuing prompt (remaining=" + queue.size() + "): "
                 + truncate(item.prompt(), 80));
 
-        chat.startPrompt(item.prompt(), item.model(), item.emitter(), chatActorRef, item.done(), item.resultKey(), item.noThink());
+        chat.startPrompt(item.prompt(), item.model(), item.emitter(), chatActorRef, item.done(), item.resultKey(), item.noThink(), item.images());
     }
 
     private static String truncate(String s, int maxLen) {
@@ -186,6 +200,7 @@ public class QueueActor {
             CompletableFuture<Void> done,
             String source,     // "human" | "agent:xxx" (e.g. "agent:localhost:28900")
             String resultKey,  // UUID for MCP result tracking, null for human prompts
-            boolean noThink
+            boolean noThink,
+            List<String> images // pasted/attached image data: URLs, empty if none
     ) {}
 }

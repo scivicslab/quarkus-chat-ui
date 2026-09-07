@@ -72,6 +72,10 @@
     const promptInput = document.getElementById('prompt-input');
     const sendBtn = document.getElementById('send-btn');
     const queueBtn = document.getElementById('queue-btn');
+    const attachBtn = document.getElementById('attach-btn');
+    const imageFileInput = document.getElementById('image-file-input');
+    const imageAttachments = document.getElementById('image-attachments');
+    var pendingImages = []; // [{name, dataUrl}] attached via paste, drop, or the file picker
     const cancelBtn = document.getElementById('cancel-btn');
     const modelSelect = document.getElementById('model-select');
     const themeSelect = document.getElementById('theme-select');
@@ -942,14 +946,24 @@
         trimChatArea();
     }
 
-    function appendMessage(className, text) {
+    function appendMessage(className, text, images) {
         if (className === 'user' && isTaskNotification(text)) {
             showNotification(text);
             return;
         }
         var div = document.createElement('div');
         div.className = 'message ' + className;
-        div.textContent = text;
+        if (images && images.length) {
+            images.forEach(function (src) {
+                var img = document.createElement('img');
+                img.src = src;
+                img.className = 'message-image';
+                div.appendChild(img);
+            });
+            div.appendChild(document.createTextNode(text));
+        } else {
+            div.textContent = text;
+        }
         if (className === 'user') {
             var footer = document.createElement('div');
             footer.className = 'message-footer';
@@ -1188,8 +1202,8 @@
 
     // --- Queue management (position-based) ---
 
-    function addToQueue(text) {
-        queue.push({ text: text, auto: true });
+    function addToQueue(text, images) {
+        queue.push({ text: text, images: images || [], auto: true });
         trimQueue();
         renderQueue();
         saveQueue();
@@ -1522,7 +1536,7 @@
         queuePos++;
         renderQueue();
         saveQueue();
-        executePrompt(item.text);
+        executePrompt(item.text, item.images || []);
     }
 
     // --- Send prompt ---
@@ -1539,6 +1553,7 @@
 
         promptInput.value = '';
         autoResize();
+        var images = takePendingImages();
 
         // /btw: side question — runs independently, never queued, works while busy
         if (text.toLowerCase().startsWith('/btw ')) {
@@ -1566,7 +1581,7 @@
         }
 
         // Always add to queue, then send if not busy
-        addToQueue(text);
+        addToQueue(text, images);
         if (!busy) {
             processQueue();
         } else {
@@ -1720,9 +1735,10 @@
         applySkillSuggest(parseInt(item.dataset.idx, 10));
     });
 
-    async function executePrompt(text) {
+    async function executePrompt(text, images) {
+        images = images || [];
         // Display user message
-        appendMessage('user', text);
+        appendMessage('user', text, images);
         busy = true;
         cancelBtn.disabled = false;
 
@@ -1741,7 +1757,7 @@
             var response = await fetch(apiUrl('api/chat'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: text, model: modelSelect.value, noThink: !(document.getElementById('think-check') || {checked: true}).checked })
+                body: JSON.stringify({ text: text, model: modelSelect.value, noThink: !(document.getElementById('think-check') || {checked: true}).checked, images: images })
             });
             if (!response.ok) {
                 stopThinkingTimer();
@@ -1999,6 +2015,68 @@
         }, 200);
     });
 
+    // --- Image attachments: paste, drop, or pick a file ---
+
+    function addImageFile(file) {
+        if (!file || file.type.indexOf('image/') !== 0) return;
+        var reader = new FileReader();
+        reader.onload = function () {
+            pendingImages.push({ name: file.name || 'pasted-image', dataUrl: reader.result });
+            renderPendingImages();
+        };
+        reader.readAsDataURL(file);
+    }
+
+    function renderPendingImages() {
+        if (!pendingImages.length) {
+            imageAttachments.style.display = 'none';
+            imageAttachments.innerHTML = '';
+            return;
+        }
+        imageAttachments.style.display = 'flex';
+        imageAttachments.innerHTML = pendingImages.map(function (img, i) {
+            return '<span class="image-attachment"><img src="' + img.dataUrl + '" alt="">' +
+                   '<button type="button" class="remove-attachment" data-idx="' + i + '" title="Remove">&times;</button></span>';
+        }).join('');
+        Array.prototype.forEach.call(imageAttachments.querySelectorAll('.remove-attachment'), function (btn) {
+            btn.addEventListener('click', function () {
+                pendingImages.splice(parseInt(btn.dataset.idx, 10), 1);
+                renderPendingImages();
+            });
+        });
+    }
+
+    promptInput.addEventListener('paste', function (e) {
+        var items = (e.clipboardData || {}).items || [];
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf('image/') === 0) {
+                addImageFile(items[i].getAsFile());
+            }
+        }
+    });
+
+    promptInput.addEventListener('dragover', function (e) { e.preventDefault(); });
+    promptInput.addEventListener('drop', function (e) {
+        e.preventDefault();
+        var files = (e.dataTransfer || {}).files || [];
+        for (var i = 0; i < files.length; i++) addImageFile(files[i]);
+    });
+
+    if (attachBtn && imageFileInput) {
+        attachBtn.addEventListener('click', function () { imageFileInput.click(); });
+        imageFileInput.addEventListener('change', function () {
+            Array.prototype.forEach.call(imageFileInput.files, addImageFile);
+            imageFileInput.value = '';
+        });
+    }
+
+    function takePendingImages() {
+        var urls = pendingImages.map(function (img) { return img.dataUrl; });
+        pendingImages = [];
+        renderPendingImages();
+        return urls;
+    }
+
     function autoResize() {
         promptInput.style.height = 'auto';
         promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
@@ -2021,7 +2099,7 @@
         if (text) {
             promptInput.value = '';
             autoResize();
-            queue.push({ text: text, auto: false });
+            queue.push({ text: text, images: takePendingImages(), auto: false });
             trimQueue();
             showQueue();
             renderQueue();
