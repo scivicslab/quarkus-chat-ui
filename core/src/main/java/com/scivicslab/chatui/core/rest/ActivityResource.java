@@ -136,10 +136,11 @@ public class ActivityResource {
         List<ChatActor.HistoryEntry> entries =
                 actorSystem.getChatActor().ask(a -> a.getHistory(ENTRIES_READ)).join();
         if (entries.isEmpty()) {
-            return new Answer("まだ会話が始まっていない。", Instant.now(), List.of(), false);
+            return new Answer("No conversation yet.", Instant.now(), List.of(), false);
         }
         String subject = summarizer.summarise(material(entries));
-        return new Answer(subject == null ? "会話はあるが、要約できなかった。" : subject,
+        return new Answer(subject == null ? "There is a conversation, but it could not be summarised."
+                                           : subject,
                           Instant.now(), List.of(), subject != null);
     }
 
@@ -163,12 +164,13 @@ public class ActivityResource {
 
         String summary;
         if (parts.isEmpty()) {
-            summary = userIds.isEmpty() ? "まだ会話が始まっていない。"
-                                        : "会話は" + userIds.size() + "人分あるが、要約できなかった。";
+            summary = userIds.isEmpty() ? "No conversation yet."
+                                        : "There are conversations for " + userIds.size()
+                                          + " users, but they could not be summarised.";
         } else if (parts.size() == 1) {
             summary = parts.get(0).get("summary");
         } else {
-            summary = parts.get(0).get("summary") + "ほかに" + (parts.size() - 1) + "人。";
+            summary = parts.get(0).get("summary") + " and " + (parts.size() - 1) + " more.";
         }
         return new Answer(summary, Instant.now(), List.copyOf(parts), !parts.isEmpty());
     }

@@ -77,15 +77,17 @@ public class ActivitySummarizer {
         if (model == null) return null;
 
         String prompt = """
-                次の会話が何についてのものかを、日本語1文で述べてください。
+                State in one English sentence what program or project this conversation is building,
+                and what domain of work it belongs to.
 
-                制約:
-                - 何の作業をしているかを述べる。話題の分野ではなく、その会話で進めている作業。
-                - 1文。40字以内。前置きも引用符も付けない。
-                - 計算機名・IPアドレス・ファイルパス・資格情報・コマンドは書かない。
-                - 会話の本文をそのまま写さない。
+                Constraints:
+                - Describe the program/project and its domain, not the specific sub-task currently in
+                  progress within it.
+                - One sentence, at most 20 words. No preamble, no quotation marks.
+                - Do not write hostnames, IP addresses, file paths, credentials, or commands.
+                - Do not copy the conversation text verbatim.
 
-                会話:
+                Conversation:
                 """ + material;
 
         String body = "{\"model\":" + jsonString(model)
