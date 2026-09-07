@@ -53,6 +53,25 @@ public class IoLogStore {
         return dbPath + "-" + httpPort;
     }
 
+    // Recorded on every conversation session so that a database read outside this process can say
+    // which build produced it.
+    @ConfigProperty(name = "quarkus.application.version", defaultValue = "dev")
+    String appVersion;
+
+    /**
+     * This process's own command line, recorded on every conversation session.
+     *
+     * <p>Several programs write conversations into files named {@code chat-ui-iolog-<port>.mv.db},
+     * and the file name says nothing about which one. Once several such files are merged into one
+     * database, the command line is what still distinguishes a {@code quarkus-chat-ui} conversation
+     * from a {@code chat-ui-with-audit-trail} conversation, and says which port it was held on.</p>
+     *
+     * @return the command line, or {@code null} when the operating system does not expose it
+     */
+    private static String currentCommandLine() {
+        return ProcessHandle.current().info().commandLine().orElse(null);
+    }
+
     private DistributedLogStore store;
     private long sessionId = -1;
     private boolean failed = false;
@@ -79,7 +98,9 @@ public class IoLogStore {
         }
         if (sessionId < 0) {
             try {
-                sessionId = store.startSession("chat-ui-conversation", 1);
+                sessionId = store.startSession("chat-ui-conversation", null, null, 1,
+                        System.getProperty("user.dir"), null, null,
+                        currentCommandLine(), appVersion, null);
                 LOG.info("I/O log session started: " + sessionId);
             } catch (Exception e) {
                 LOG.log(Level.WARNING, "startSession failed", e);
