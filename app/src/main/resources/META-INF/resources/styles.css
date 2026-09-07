@@ -732,9 +732,8 @@ footer {
 
 #input-area {
     display: flex;
+    flex-direction: column;
     gap: 8px;
-    align-items: flex-end;
-    flex-wrap: wrap;
 }
 
 #prompt-input {
@@ -755,13 +754,52 @@ footer {
     border-color: var(--accent-blue);
 }
 
-#buttons {
+/* One row: small icon actions on the left, the Send/Cancel slot on the right.
+   Icons live here, not stacked beside the textarea, so adding one more never
+   costs vertical space — the row just gains one more icon. */
+#input-toolbar {
     display: flex;
-    gap: 4px;
-    flex-direction: column;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
 }
 
-#send-btn, #queue-btn, #cancel-btn {
+#input-toolbar-left {
+    display: flex;
+    gap: 6px;
+}
+
+.icon-btn {
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 15px;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    transition: background 0.2s;
+}
+
+.icon-btn:hover {
+    background: var(--border-color);
+}
+
+/* Send and Cancel occupy the same cell and swap by visibility, driven by
+   #cancel-btn's existing disabled state (idle = disabled = Send shows;
+   busy = enabled = Cancel shows) — the busy-state bookkeeping that already
+   toggles that attribute elsewhere needed no changes for this. */
+#send-cancel-slot {
+    display: grid;
+}
+
+#send-cancel-slot > button {
+    grid-area: 1 / 1;
+    width: 100px;
+}
+
+#send-btn, #cancel-btn {
     padding: 8px 16px;
     border: none;
     border-radius: 6px;
@@ -780,19 +818,22 @@ footer {
     background: #7ba9f0;
 }
 
-#send-btn:disabled {
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    cursor: not-allowed;
+#cancel-btn:disabled {
+    visibility: hidden;
+    pointer-events: none;
 }
 
-#queue-btn {
-    background: var(--accent-yellow);
-    color: var(--bg-primary);
+#cancel-btn:not(:disabled) {
+    visibility: visible;
 }
 
-#queue-btn:hover {
-    opacity: 0.85;
+#cancel-btn:not(:disabled) ~ #send-btn {
+    visibility: hidden;
+    pointer-events: none;
+}
+
+#cancel-btn:disabled ~ #send-btn {
+    visibility: visible;
 }
 
 #cancel-btn {
@@ -804,30 +845,9 @@ footer {
     background: #e87a99;
 }
 
-#cancel-btn:disabled {
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    cursor: not-allowed;
-}
-
-#attach-btn {
-    padding: 8px 12px;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 14px;
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
-}
-
-#attach-btn:hover {
-    opacity: 0.85;
-}
-
 /* Pending image attachments, shown above the prompt textarea */
 #image-attachments {
     display: flex;
-    flex-basis: 100%;
     gap: 6px;
     flex-wrap: wrap;
 }
