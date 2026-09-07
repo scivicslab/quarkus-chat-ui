@@ -3,6 +3,8 @@ package com.scivicslab.chatui.core.rest;
 import com.scivicslab.chatui.core.activity.ActivitySummarizer;
 import com.scivicslab.chatui.core.actor.ChatActor;
 import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
+import com.scivicslab.chatui.core.iolog.IoLogStore;
+import com.scivicslab.chatui.core.iolog.IoLogView;
 
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -40,6 +42,12 @@ public class ActivityResource {
 
     @Inject
     ActivitySummarizer summarizer;
+
+    @Inject
+    IoLogStore ioLog;
+
+    @Inject
+    IoLogView ioLogView;
 
     /**
      * How long an answer stands before it is worked out again.
@@ -140,6 +148,13 @@ public class ActivityResource {
     private Answer single() {
         List<ChatActor.HistoryEntry> entries =
                 actorSystem.getChatActor().ask(a -> a.getHistory(ENTRIES_READ)).join();
+        // The in-memory buffer starts empty on every restart even though the conversation it belongs
+        // to is still on disk (recordHistory has nothing to do with the persisted I/O log). Without
+        // this fallback, an instance freshly restarted to pick up a code change reports "no
+        // conversation" about a conversation that has been running for weeks.
+        if (entries.isEmpty()) {
+            entries = fromPersistedLog();
+        }
         if (entries.isEmpty()) {
             return new Answer("No conversation yet.", Instant.now(), List.of(), false);
         }
@@ -147,6 +162,44 @@ public class ActivityResource {
         return new Answer(subject == null ? "There is a conversation, but it could not be summarised."
                                            : subject,
                           Instant.now(), List.of(), subject != null);
+    }
+
+    /**
+     * Rebuilds recent history from the persisted I/O log, for when the in-memory buffer is empty
+     * because the process was restarted rather than because there is truly no conversation yet.
+     *
+     * <p>This process writes to exactly one H2 file (one per port) and starts exactly one kind of
+     * session in it ({@code "chat-ui-conversation"}), so the most recent session in that file is this
+     * conversation's, restart or not — no per-conversation lookup is needed the way a multi-session
+     * store would require.</p>
+     *
+     * @return the most recent turns as history entries, oldest first; empty if there is no persisted
+     *         session or the log is disabled
+     */
+    private List<ChatActor.HistoryEntry> fromPersistedLog() {
+        var store = ioLog.store();
+        if (store == null) {
+            return List.of();
+        }
+        long sessionId = store.getLatestSessionId();
+        if (sessionId < 0) {
+            return List.of();
+        }
+        List<IoLogView.TraceTurn> turns = ioLogView.trace(sessionId);
+        int turnsToKeep = Math.max(1, ENTRIES_READ / 2);
+        int from = Math.max(0, turns.size() - turnsToKeep);
+        List<ChatActor.HistoryEntry> out = new ArrayList<>();
+        for (IoLogView.TraceTurn t : turns.subList(from, turns.size())) {
+            if (t.userPrompt() != null && !t.userPrompt().isBlank()) {
+                out.add(new ChatActor.HistoryEntry("user", t.userPrompt()));
+            }
+            for (IoLogView.TraceStep step : t.steps()) {
+                if ("llm".equals(step.kind()) && step.thought() != null && !step.thought().isBlank()) {
+                    out.add(new ChatActor.HistoryEntry("assistant", step.thought()));
+                }
+            }
+        }
+        return out;
     }
 
     /** One conversation per user, each its own part. */
