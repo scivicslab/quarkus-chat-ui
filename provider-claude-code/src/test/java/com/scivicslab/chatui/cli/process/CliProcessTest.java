@@ -408,6 +408,47 @@ class CliProcessTest {
         }
     }
 
+    // --- buildContentJson ---
+
+    @Nested
+    @DisplayName("buildContentJson()")
+    class BuildContentJson {
+
+        @Test
+        @DisplayName("no images: content is a plain quoted string")
+        void noImages_returnsPlainString() {
+            assertEquals("\"hello\"", CliProcess.buildContentJson("hello", List.of()));
+        }
+
+        @Test
+        @DisplayName("null images list: content is a plain quoted string")
+        void nullImages_returnsPlainString() {
+            assertEquals("\"hello\"", CliProcess.buildContentJson("hello", null));
+        }
+
+        @Test
+        @DisplayName("one image: content is an array with a text block and an image block")
+        void oneImage_returnsTextAndImageBlocks() {
+            String json = CliProcess.buildContentJson("what is this?",
+                List.of("data:image/png;base64,QUJD"));
+
+            assertEquals("[{\"type\":\"text\",\"text\":\"what is this?\"}"
+                + ",{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"QUJD\"}}]",
+                json);
+        }
+
+        @Test
+        @DisplayName("several images: one image block per data URL, in order")
+        void severalImages_returnsOneBlockEach() {
+            String json = CliProcess.buildContentJson("compare these",
+                List.of("data:image/png;base64,AAA", "data:image/jpeg;base64,BBB"));
+
+            assertTrue(json.contains("\"media_type\":\"image/png\",\"data\":\"AAA\""));
+            assertTrue(json.contains("\"media_type\":\"image/jpeg\",\"data\":\"BBB\""));
+            assertTrue(json.indexOf("AAA") < json.indexOf("BBB"), "images stay in the given order");
+        }
+    }
+
     // --- stripAnsi ---
 
     @Nested

@@ -223,7 +223,7 @@ public abstract class CliLlmProvider implements LlmProvider {
         final boolean[] sawAssistant = {false};
 
         try {
-            cliProcess.sendPrompt(prompt, event -> {
+            cliProcess.sendPrompt(prompt, ctx.imageDataUrls(), event -> {
                 ctx.onActivity().run();
                 dispatch(event, emitter, staleSession, sawAssistant);
             });
@@ -242,7 +242,7 @@ public abstract class CliLlmProvider implements LlmProvider {
             // Retry once without stale-session handling
             try {
                 final boolean[] retrySawAssistant = {false};
-                cliProcess.sendPrompt(prompt, event -> {
+                cliProcess.sendPrompt(prompt, ctx.imageDataUrls(), event -> {
                     ctx.onActivity().run();
                     dispatch(event, emitter, new boolean[]{false}, retrySawAssistant);
                 });

@@ -168,6 +168,16 @@ public class CliProcess {
      * {@code result} event is received.</p>
      */
     public int sendPrompt(String prompt, StreamCallback callback) throws IOException {
+        return sendPrompt(prompt, List.of(), callback);
+    }
+
+    /**
+     * Sends a prompt with attached images and streams response events to the callback.
+     * See {@link #sendPrompt(String, StreamCallback)} for the turn protocol; {@code imageDataUrls}
+     * are data URLs (e.g. {@code data:image/png;base64,...}) rendered as Claude image content
+     * blocks alongside the text.
+     */
+    public int sendPrompt(String prompt, List<String> imageDataUrls, StreamCallback callback) throws IOException {
         if (currentProcess == null || !currentProcess.isAlive()) {
             turnQueue.clear();
             autonomousQueue.clear();
@@ -176,7 +186,7 @@ public class CliProcess {
 
         // Mark the turn active before writing so the reader routes the response to turnQueue.
         beginTurn();
-        writeUserMessage(prompt);
+        writeUserMessage(prompt, imageDataUrls);
 
         sendingThread = Thread.currentThread();
         try {
@@ -296,11 +306,51 @@ public class CliProcess {
      * @throws IOException if the process stdin is not available or writing fails
      */
     public void writeUserMessage(String text) throws IOException {
+        writeUserMessage(text, List.of());
+    }
+
+    /**
+     * Writes a user message with attached images to the process stdin in stream-json format.
+     *
+     * @param text          the message text to send
+     * @param imageDataUrls data URLs (e.g. {@code data:image/png;base64,...}); when empty, the
+     *                      content is sent as a plain string, identical to {@link #writeUserMessage(String)}
+     * @throws IOException if the process stdin is not available or writing fails
+     */
+    public void writeUserMessage(String text, List<String> imageDataUrls) throws IOException {
         if (stdinStream == null) throw new IOException("No active process stdin");
         String json = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":"
-            + escapeJsonString(text) + "}}\n";
+            + buildContentJson(text, imageDataUrls) + "}}\n";
         stdinStream.write(json.getBytes(StandardCharsets.UTF_8));
         stdinStream.flush();
+    }
+
+    static String buildContentJson(String text, List<String> imageDataUrls) {
+        if (imageDataUrls == null || imageDataUrls.isEmpty()) {
+            return escapeJsonString(text);
+        }
+        StringBuilder sb = new StringBuilder("[{\"type\":\"text\",\"text\":")
+            .append(escapeJsonString(text)).append("}");
+        for (String dataUrl : imageDataUrls) {
+            sb.append(",{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":")
+              .append(escapeJsonString(mediaTypeOf(dataUrl)))
+              .append(",\"data\":")
+              .append(escapeJsonString(base64DataOf(dataUrl)))
+              .append("}}");
+        }
+        return sb.append("]").toString();
+    }
+
+    private static String mediaTypeOf(String dataUrl) {
+        int colon = dataUrl.indexOf(':');
+        int semicolon = dataUrl.indexOf(';');
+        if (colon < 0 || semicolon < 0 || semicolon < colon) return "image/png";
+        return dataUrl.substring(colon + 1, semicolon);
+    }
+
+    private static String base64DataOf(String dataUrl) {
+        int comma = dataUrl.indexOf(',');
+        return comma < 0 ? dataUrl : dataUrl.substring(comma + 1);
     }
 
     /**
