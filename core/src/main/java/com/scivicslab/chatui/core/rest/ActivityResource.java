@@ -60,8 +60,13 @@ public class ActivityResource {
      */
     private static final Duration RETRY_AGE = Duration.ofMinutes(1);
 
-    /** How many of a conversation's most recent entries are read. */
-    private static final int ENTRIES_READ = 24;
+    /** How many of a conversation's most recent entries are read.
+     *
+     * <p>Wide enough that the entries actually naming the program/domain being worked on are still
+     * in view even once the conversation has moved on to fine-grained sub-tasks, without reaching
+     * back so far that a topic the conversation has since dropped gets pulled in.</p>
+     */
+    private static final int ENTRIES_READ = 60;
 
     /** How much of one entry is passed on. A subject does not need whole answers. */
     private static final int CHARS_PER_ENTRY = 400;

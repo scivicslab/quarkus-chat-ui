@@ -83,6 +83,8 @@ public class ActivitySummarizer {
                 Constraints:
                 - Describe the program/project and its domain, not the specific sub-task currently in
                   progress within it.
+                - Look for the actual program name, repository name, or project keyword mentioned in
+                  the conversation, and name it rather than describing the work only in generic terms.
                 - One sentence, at most 20 words. No preamble, no quotation marks.
                 - Do not write hostnames, IP addresses, file paths, credentials, or commands.
                 - Do not copy the conversation text verbatim.
