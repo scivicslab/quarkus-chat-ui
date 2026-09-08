@@ -77,15 +77,23 @@ public class ActivitySummarizer {
         if (model == null) return null;
 
         String prompt = """
-                State in one English sentence what program or project this conversation is building,
-                and what domain of work it belongs to.
+                Say in one English sentence what is being done in this conversation right now.
+
+                Write it as a piece of work being done to a named thing, for example
+                "Reworking the UI design of quarkus-AI-workspace" or
+                "Refactoring the parallel execution in Turing-workflow".
 
                 Constraints:
-                - Describe the program/project and its domain, not the specific sub-task currently in
-                  progress within it.
-                - Look for the actual program name, repository name, or project keyword mentioned in
-                  the conversation, and name it rather than describing the work only in generic terms.
-                - One sentence, at most 20 words. No preamble, no quotation marks.
+                - Start with the work itself: fixing, refactoring, designing, measuring, writing,
+                  deploying, investigating, and so on.
+                - Name the program, project or document the work is being done to, using the name
+                  the conversation calls it by, for example quarkus-AI-workspace or doc_SCIVICS002.
+                - Do not name a field of work or an industry. "software development", "the AI
+                  workspace domain", "knowledge management" and the like tell a reader nothing that
+                  separates this conversation from any other, and must not appear.
+                - Take the work from the most recent exchanges. A subject the conversation has
+                  already finished with is not what is being done now.
+                - One sentence, at most 15 words. No preamble, no quotation marks.
                 - Do not write hostnames, IP addresses, file paths, credentials, or commands.
                 - Do not copy the conversation text verbatim.
 

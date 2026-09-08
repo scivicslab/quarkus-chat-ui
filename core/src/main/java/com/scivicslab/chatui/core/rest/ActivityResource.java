@@ -70,9 +70,10 @@ public class ActivityResource {
 
     /** How many of a conversation's most recent entries are read.
      *
-     * <p>Wide enough that the entries actually naming the program/domain being worked on are still
-     * in view even once the conversation has moved on to fine-grained sub-tasks, without reaching
-     * back so far that a topic the conversation has since dropped gets pulled in.</p>
+     * <p>The answer names both the thing being worked on and what is being done to it, and those
+     * two are rarely in the same entry: the name is usually settled early and the work is in the
+     * last few exchanges. Wide enough to hold both, and not so wide that a subject the
+     * conversation has since dropped gets pulled in.</p>
      */
     private static final int ENTRIES_READ = 60;
 
