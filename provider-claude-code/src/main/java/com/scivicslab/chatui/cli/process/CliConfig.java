@@ -11,7 +11,8 @@ public record CliConfig(
     String sessionId,
     boolean continueSession,
     String[] allowedTools,
-    String permissionMode
+    String permissionMode,
+    String effort
 ) {
     /**
      * Creates a default configuration with the given model and all other fields unset.
@@ -25,7 +26,7 @@ public record CliConfig(
      * @return a new {@code CliConfig} with sensible defaults
      */
     public static CliConfig defaults(String defaultModel) {
-        return new CliConfig(defaultModel, null, 0, null, null, false, null, null);
+        return new CliConfig(defaultModel, null, 0, null, null, false, null, null, null);
     }
 
     /**
@@ -35,7 +36,7 @@ public record CliConfig(
      * @return a new {@code CliConfig} with the updated model
      */
     public CliConfig withModel(String newModel) {
-        return new CliConfig(newModel, systemPrompt, maxTurns, workingDir, sessionId, continueSession, allowedTools, permissionMode);
+        return new CliConfig(newModel, systemPrompt, maxTurns, workingDir, sessionId, continueSession, allowedTools, permissionMode, effort);
     }
 
     /**
@@ -45,7 +46,7 @@ public record CliConfig(
      * @return a new {@code CliConfig} with the updated session ID
      */
     public CliConfig withSessionId(String newSessionId) {
-        return new CliConfig(model, systemPrompt, maxTurns, workingDir, newSessionId, continueSession, allowedTools, permissionMode);
+        return new CliConfig(model, systemPrompt, maxTurns, workingDir, newSessionId, continueSession, allowedTools, permissionMode, effort);
     }
 
     /**
@@ -54,7 +55,7 @@ public record CliConfig(
      * @return a new {@code CliConfig} with {@code continueSession} set to {@code true}
      */
     public CliConfig withContinueSession() {
-        return new CliConfig(model, systemPrompt, maxTurns, workingDir, sessionId, true, allowedTools, permissionMode);
+        return new CliConfig(model, systemPrompt, maxTurns, workingDir, sessionId, true, allowedTools, permissionMode, effort);
     }
 
     /**
@@ -64,7 +65,7 @@ public record CliConfig(
      * @return a new {@code CliConfig} with the updated max turns
      */
     public CliConfig withMaxTurns(int newMaxTurns) {
-        return new CliConfig(model, systemPrompt, newMaxTurns, workingDir, sessionId, continueSession, allowedTools, permissionMode);
+        return new CliConfig(model, systemPrompt, newMaxTurns, workingDir, sessionId, continueSession, allowedTools, permissionMode, effort);
     }
 
     /**
@@ -74,7 +75,23 @@ public record CliConfig(
      * @return a new {@code CliConfig} with the updated allowed tools
      */
     public CliConfig withAllowedTools(String... newAllowedTools) {
-        return new CliConfig(model, systemPrompt, maxTurns, workingDir, sessionId, continueSession, newAllowedTools, permissionMode);
+        return new CliConfig(model, systemPrompt, maxTurns, workingDir, sessionId, continueSession, newAllowedTools, permissionMode, effort);
+    }
+
+    /**
+     * Returns a copy of this configuration with a different effort level.
+     *
+     * <p>Effort decides how deeply the model thinks and how many tokens it spends. Null leaves
+     * the flag off the command line, so the CLI applies its own default rather than this
+     * program choosing one on its behalf.</p>
+     *
+     * @param newEffort one of {@code low}, {@code medium}, {@code high}, {@code xhigh},
+     *                  {@code max}, or {@code null} to leave it to the CLI
+     * @return a new {@code CliConfig} with the updated effort level
+     */
+    public CliConfig withEffort(String newEffort) {
+        return new CliConfig(model, systemPrompt, maxTurns, workingDir, sessionId, continueSession,
+                allowedTools, permissionMode, newEffort);
     }
 
     /**
@@ -84,6 +101,6 @@ public record CliConfig(
      * @return a new {@code CliConfig} with the updated permission mode
      */
     public CliConfig withPermissionMode(String newPermissionMode) {
-        return new CliConfig(model, systemPrompt, maxTurns, workingDir, sessionId, continueSession, allowedTools, newPermissionMode);
+        return new CliConfig(model, systemPrompt, maxTurns, workingDir, sessionId, continueSession, allowedTools, newPermissionMode, effort);
     }
 }

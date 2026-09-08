@@ -26,7 +26,11 @@ public class ClaudeLlmProvider extends CliLlmProvider {
      *  acceptEdits does NOT cover Bash — do not use as default. */
     private static final String DEFAULT_PERMISSION_MODE = "bypassPermissions";
 
+    // Aliases rather than dated model ids: the CLI resolves each to the current model of that
+    // line, so this list does not go stale when a new one is released. Ordered most capable
+    // first, which is the order the dropdown shows them in.
     private static final List<ModelEntry> MODELS = List.of(
+        new ModelEntry("fable", "claude", null),
         new ModelEntry("opus", "claude", null),
         new ModelEntry("sonnet", "claude", null),
         new ModelEntry("haiku", "claude", null)

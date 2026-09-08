@@ -89,7 +89,7 @@ class CliProcessTest {
         @Test
         @DisplayName("does not include --model when model is null")
         void nullModel_excludesModelFlag() {
-            CliConfig config = new CliConfig(null, null, 0, null, null, false, null, null);
+            CliConfig config = new CliConfig(null, null, 0, null, null, false, null, null, null);
             CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
             List<String> cmd = process.buildCommand();
 
@@ -119,7 +119,7 @@ class CliProcessTest {
         @Test
         @DisplayName("excludes --permission-mode when null")
         void nullPermissionMode_excludesFlag() {
-            CliConfig config = new CliConfig("m", null, 0, null, null, false, null, null);
+            CliConfig config = new CliConfig("m", null, 0, null, null, false, null, null, null);
             CliProcess process = new CliProcess(BINARY, API_KEY_ENV, config);
             List<String> cmd = process.buildCommand();
 

@@ -8,7 +8,7 @@ import java.util.function.Consumer;
 /**
  * Handles slash commands from the Web UI for CLI-based providers.
  *
- * <p>Supported commands: /model, /session, /clear, /help</p>
+ * <p>Supported commands: /model, /effort, /session, /clear, /help</p>
  */
 public class SlashCommandHandler {
 
@@ -36,8 +36,8 @@ public class SlashCommandHandler {
     /**
      * Dispatches a slash command and sends the resulting events to the given consumer.
      *
-     * <p>Supported commands: {@code /model}, {@code /session}, {@code /clear},
-     * {@code /help} (or {@code /?}). Unknown commands produce an error event.</p>
+     * <p>Supported commands: {@code /model}, {@code /effort}, {@code /session},
+     * {@code /clear}, {@code /help} (or {@code /?}). Unknown commands produce an error event.</p>
      *
      * @param input  the full command string including the leading slash
      * @param sender callback that receives {@link ChatEvent} responses
@@ -49,12 +49,40 @@ public class SlashCommandHandler {
 
         switch (command) {
             case "/model" -> handleModel(args, sender);
+            case "/effort" -> handleEffort(args, sender);
             case "/clear" -> handleClear(sender);
             case "/session" -> handleSession(args, sender);
             case "/help", "/?" -> handleHelp(sender);
             default -> sender.accept(ChatEvent.error(
                     "Unknown command: " + command + " (type /help for available commands)"));
         }
+    }
+
+    /** The effort levels the CLI accepts, for rejecting a typo before it reaches the command line. */
+    private static final java.util.List<String> EFFORT_LEVELS =
+            java.util.List.of("low", "medium", "high", "xhigh", "max");
+
+    /**
+     * Shows or changes how deeply the model thinks.
+     *
+     * <p>An unset level is reported as the CLI's own default rather than as a value this program
+     * chose, because that is what an unset level means: no {@code --effort} on the command line.</p>
+     */
+    private void handleEffort(String args, Consumer<ChatEvent> sender) {
+        if (args.isEmpty()) {
+            String current = cliProcess.getConfig().effort();
+            sender.accept(ChatEvent.info("Current effort: "
+                    + (current == null ? "unset (the CLI's own default)" : current)));
+            return;
+        }
+        String level = args.toLowerCase();
+        if (!EFFORT_LEVELS.contains(level)) {
+            sender.accept(ChatEvent.error("Unknown effort level: " + args
+                    + " (choose one of " + String.join(", ", EFFORT_LEVELS) + ")"));
+            return;
+        }
+        cliProcess.setConfig(cliProcess.getConfig().withEffort(level));
+        sender.accept(ChatEvent.info("Effort changed to: " + level));
     }
 
     private void handleModel(String args, Consumer<ChatEvent> sender) {
@@ -89,6 +117,8 @@ public class SlashCommandHandler {
             Available commands:
               /help, /?          Show this help
               /model [name]      Show or change the model
+              /effort [level]    Show or change the effort level
+                                 (low, medium, high, xhigh, max)
               /session [id]      Show or set session ID
               /clear             Clear session (start fresh)"""));
     }

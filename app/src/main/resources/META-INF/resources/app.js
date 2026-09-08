@@ -78,6 +78,7 @@
     var pendingImages = []; // [{name, dataUrl}] attached via paste, drop, or the file picker
     const cancelBtn = document.getElementById('cancel-btn');
     const modelSelect = document.getElementById('model-select');
+    const effortSelect = document.getElementById('effort-select');
     const themeSelect = document.getElementById('theme-select');
     var activeKeybind = 'default'; // set from /api/config
     const sessionLabel = document.getElementById('session-label');
@@ -328,6 +329,9 @@
 
     // --- Model key (per-session in k8s-pups, global in standalone) ---
     var MODEL_KEY = 'chat-ui-model' + SESSION_SUFFIX;
+    // Effort applies to the Claude CLI only; local models ignore it. Kept per session for the
+    // same reason the model is: two instances open side by side are usually doing different work.
+    var EFFORT_KEY = 'chat-ui-effort' + SESSION_SUFFIX;
 
     let currentAssistantMsg = null;
     let currentAssistantText = '';
@@ -2213,6 +2217,49 @@
     document.getElementById('refresh-models-btn').addEventListener('click', function () {
         loadModels();
     });
+
+    // --- Effort ---
+    // The empty value means "send no --effort at all", which is not the same as any level: it
+    // leaves the choice to the CLI, so this page does not freeze today's default into the config.
+    effortSelect.addEventListener('change', async function () {
+        var level = effortSelect.value;
+        try {
+            localStorage.setItem(EFFORT_KEY, level);
+        } catch (e) {
+            console.error('[chat-ui] effort save FAILED:', e);
+        }
+        if (!level) {
+            appendMessage('info', 'Effort left to the CLI default from the next turn.');
+            return;
+        }
+        try {
+            var resp = await fetch(apiUrl('api/command'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: '/effort ' + level })
+            });
+            var events = await resp.json();
+            events.forEach(handleEvent);
+        } catch (e) {
+            appendMessage('error', 'Failed to change effort: ' + e.message);
+        }
+    });
+
+    // Restore the saved level and tell the server about it: the CLI process is started fresh on
+    // every page load, so a level only this page remembers would silently not be in effect.
+    (function restoreEffort() {
+        var saved = null;
+        try { saved = localStorage.getItem(EFFORT_KEY); } catch (e) { saved = null; }
+        if (!saved) return;
+        effortSelect.value = saved;
+        fetch(apiUrl('api/command'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: '/effort ' + saved })
+        }).catch(function (e) {
+            console.error('[chat-ui] effort restore FAILED:', e);
+        });
+    })();
 
     // --- Load app config (title, keybind, auth, logs) ---
     fetch('api/config')

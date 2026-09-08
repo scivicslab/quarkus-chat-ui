@@ -401,6 +401,11 @@ public class CliProcess {
         cmd.add("--verbose");
 
         if (config.model() != null) { cmd.add("--model"); cmd.add(config.model()); }
+        // Left off entirely when unset, so the CLI applies its own default effort rather than
+        // this program picking one and freezing it as the CLI's default changes.
+        if (config.effort() != null && !config.effort().isBlank()) {
+            cmd.add("--effort"); cmd.add(config.effort());
+        }
         if (config.systemPrompt() != null) { cmd.add("--system-prompt"); cmd.add(config.systemPrompt()); }
         if (config.maxTurns() > 0) { cmd.add("--max-turns"); cmd.add(String.valueOf(config.maxTurns())); }
         if (config.sessionId() != null) { cmd.add("--resume"); cmd.add(config.sessionId()); }

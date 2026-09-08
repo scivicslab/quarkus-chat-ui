@@ -54,6 +54,16 @@
                 </select>
                 <button id="refresh-models-btn" title="Refresh model list">&#x21bb;</button>
             </label>
+            <label id="effort-label" title="How deeply the model thinks, and how many tokens it spends">Effort:
+                <select id="effort-select">
+                    <option value="">CLI default</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                    <option value="max">max</option>
+                </select>
+            </label>
             <label id="think-label" style="display:none" title="Enable thinking mode (Qwen3 extended CoT)">
                 <input type="checkbox" id="think-check"> Think
             </label>
