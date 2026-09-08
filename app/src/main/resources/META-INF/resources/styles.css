@@ -737,7 +737,12 @@ footer {
 }
 
 #prompt-input {
-    flex: 1;
+    /* Not flex:1: #input-area is now a column flex container (its main axis is height), and a
+       flex-basis of 0% wins over any explicit height for main-axis sizing — with flex:1 here,
+       every height the resize handle and autoResize() set via JS was silently overridden back to
+       whatever the flex algorithm computed. flex:1 dates from when #input-area was a row
+       container, where flex:1 distributed width and height was the (unaffected) cross axis. */
+    flex: none;
     background: var(--bg-tertiary);
     color: var(--text-primary);
     border: 1px solid var(--border-color);
@@ -973,35 +978,9 @@ footer {
     border-radius: 3px;
 }
 
-/* Server Log Panel */
-#log-panel {
-    flex-shrink: 0;
-    border-top: 1px solid var(--border-color);
-    background: var(--code-bg);
-}
-
-#log-panel summary {
-    padding: 4px 16px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    user-select: none;
-    background: var(--bg-secondary);
-}
-
-#log-panel summary:hover {
-    color: var(--text-primary);
-}
-
-#log-content {
-    height: 200px;
-    overflow-y: auto;
-    padding: 4px 8px;
-    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-    font-size: 11px;
-    line-height: 1.4;
-}
-
+/* .log-line and its level-color modifiers are shared with the right pane's System Log tab
+   (console.js) — the left-pane "Server Logs" panel that used to be their only other consumer has
+   been removed as a duplicate of that tab. */
 .log-line {
     color: var(--text-secondary);
     white-space: pre-wrap;
@@ -1020,19 +999,6 @@ footer {
 .log-line.log-finer,
 .log-line.log-finest {
     color: var(--bg-tertiary);
-}
-
-#log-content::-webkit-scrollbar {
-    width: 6px;
-}
-
-#log-content::-webkit-scrollbar-track {
-    background: var(--code-bg);
-}
-
-#log-content::-webkit-scrollbar-thumb {
-    background: var(--bg-tertiary);
-    border-radius: 3px;
 }
 
 /* Prediction popup */

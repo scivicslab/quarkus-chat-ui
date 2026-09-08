@@ -793,7 +793,6 @@ public class ChatResource {
                     false, false,
                     p.capabilities().supportsImages(),
                     p.capabilities().supportsUrlFetch(),
-                    false,  // logs disabled in multi-user mode
                     true, thinkToggle
             );
         }
@@ -808,7 +807,6 @@ public class ChatResource {
                 p.capabilities().supportsSlashCommands(),
                 p.capabilities().supportsImages(),
                 p.capabilities().supportsUrlFetch(),
-                true,   // logs enabled in single-user mode
                 false, thinkToggle
         );
     }
@@ -976,7 +974,7 @@ public class ChatResource {
         String title, boolean authenticated, String authMode, String keybind,
         String providerId, boolean supportsInteractivePrompts,
         boolean supportsSlashCommands, boolean supportsImages, boolean supportsUrlFetch,
-        boolean logsEnabled, boolean multiUser, boolean supportsThinkToggle
+        boolean multiUser, boolean supportsThinkToggle
     ) {}
 
     public record HistoryResponse(String role, String content) {}

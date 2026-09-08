@@ -88,8 +88,6 @@
     const inputResizeHandle = document.getElementById('input-resize-handle');
     const activityLabel = document.getElementById('activity-label');
     const inputArea = document.getElementById('input-area');
-    const logPanel = document.getElementById('log-panel');
-    const logContent = document.getElementById('log-content');
 
     let thinkingStartTime = null;   // Date.now() when thinking started
     let thinkingTimer = null;       // setInterval ID
@@ -591,9 +589,6 @@
                 break;
             case 'prompt':
                 handlePrompt(event);
-                break;
-            case 'log':
-                appendLog(event);
                 break;
         }
     }
@@ -1402,6 +1397,11 @@
     // --- Input textarea resize handle ---
     var INPUT_HEIGHT_KEY = 'chat-ui-input-height' + SESSION_SUFFIX;
     var savedInputHeight = localStorage.getItem(INPUT_HEIGHT_KEY);
+    // Once the human drags the handle, autoResize() (fired on every keystroke) must treat that
+    // height as a floor, not recompute from content and shrink straight back past it — before
+    // this, a drag to e.g. 400px was undone by the very next character typed, since autoResize()
+    // capped at 200px unconditionally.
+    var manualInputHeight = savedInputHeight ? parseInt(savedInputHeight, 10) : null;
     if (savedInputHeight) {
         promptInput.style.height = savedInputHeight + 'px';
     } else {
@@ -1437,7 +1437,8 @@
             inputResizeHandle.classList.remove('dragging');
             document.body.style.cursor = '';
             document.body.style.userSelect = '';
-            localStorage.setItem(INPUT_HEIGHT_KEY, promptInput.offsetHeight);
+            manualInputHeight = promptInput.offsetHeight;
+            localStorage.setItem(INPUT_HEIGHT_KEY, manualInputHeight);
         });
     })();
 
@@ -2124,7 +2125,8 @@
 
     function autoResize() {
         promptInput.style.height = 'auto';
-        promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
+        var contentHeight = Math.min(promptInput.scrollHeight, 500);
+        promptInput.style.height = Math.max(contentHeight, manualInputHeight || 0) + 'px';
     }
 
     sendBtn.addEventListener('click', sendPrompt);
@@ -2278,9 +2280,6 @@
             if (cfg.authenticated === false) {
                 showAuthDialog();
             }
-            if (cfg.logsEnabled === false) {
-                if (logPanel) logPanel.style.display = 'none';
-            }
             var thinkLabel = document.getElementById('think-label');
             if (thinkLabel) {
                 thinkLabel.style.display = cfg.supportsThinkToggle ? '' : 'none';
@@ -2345,68 +2344,6 @@
         });
         input.focus();
     }
-
-    // --- Server Log Panel ---
-
-    var MAX_LOG_LINES = 500;
-    var logLoaded = false;
-
-    function formatLogTime(ts) {
-        var d = new Date(ts);
-        var hh = String(d.getHours()).padStart(2, '0');
-        var mm = String(d.getMinutes()).padStart(2, '0');
-        var ss = String(d.getSeconds()).padStart(2, '0');
-        var ms = String(d.getMilliseconds()).padStart(3, '0');
-        return hh + ':' + mm + ':' + ss + '.' + ms;
-    }
-
-    function shortLogger(name) {
-        if (!name) return '';
-        var parts = name.split('.');
-        return parts[parts.length - 1];
-    }
-
-    function appendLog(event) {
-        if (!logPanel.open) return;
-        var line = document.createElement('div');
-        line.className = 'log-line log-' + (event.logLevel || 'INFO').toLowerCase();
-        var time = event.timestamp ? formatLogTime(event.timestamp) : '';
-        line.textContent = time + ' [' + (event.logLevel || '?') + '] '
-            + shortLogger(event.loggerName) + ': ' + (event.content || '');
-        logContent.appendChild(line);
-        trimLogLines();
-        logContent.scrollTop = logContent.scrollHeight;
-    }
-
-    function appendLogBatch(events) {
-        for (var i = 0; i < events.length; i++) {
-            var event = events[i];
-            var line = document.createElement('div');
-            line.className = 'log-line log-' + (event.logLevel || 'INFO').toLowerCase();
-            var time = event.timestamp ? formatLogTime(event.timestamp) : '';
-            line.textContent = time + ' [' + (event.logLevel || '?') + '] '
-                + shortLogger(event.loggerName) + ': ' + (event.content || '');
-            logContent.appendChild(line);
-        }
-        trimLogLines();
-        logContent.scrollTop = logContent.scrollHeight;
-    }
-
-    function trimLogLines() {
-        while (logContent.children.length > MAX_LOG_LINES) {
-            logContent.removeChild(logContent.firstChild);
-        }
-    }
-
-    logPanel.addEventListener('toggle', function () {
-        if (logPanel.open && !logLoaded) {
-            logLoaded = true;
-            fetch('api/logs')
-                .then(function (resp) { return resp.json(); })
-                .then(function (logs) { appendLogBatch(logs); })
-                .catch(function () { /* ignore */ });
-        }
-    });
 
     // --- BTW overlay close ---
 

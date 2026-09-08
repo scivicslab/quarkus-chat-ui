@@ -105,12 +105,4 @@ class PageLoadE2E extends E2eTestBase {
         Locator clearBtn = page.locator("#clear-chat-btn");
         assertThat(clearBtn).isVisible();
     }
-
-    @Test
-    @DisplayName("Log panel is present")
-    void pageLoad_logPanelPresent() {
-        page.navigate(baseUrl());
-        Locator logPanel = page.locator("#log-panel");
-        assertThat(logPanel).isVisible();
-    }
 }
