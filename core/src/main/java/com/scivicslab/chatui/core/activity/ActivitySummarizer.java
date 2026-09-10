@@ -7,6 +7,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -36,13 +38,22 @@ public class ActivitySummarizer {
     private static final Duration TIMEOUT = Duration.ofSeconds(60);
 
     /**
-     * The model asked, when the broker serves it.
+     * The model asked first, when the broker serves it.
      *
-     * <p>Named rather than "the first one the broker lists", because the first one it lists is a
-     * reasoning model: asked for one sentence within a 200-token limit it spends the whole limit
+     * <p>Named rather than "the first one the broker lists", because the first one it lists may be
+     * a reasoning model: asked for one sentence within a 200-token limit it spends the whole limit
      * thinking and returns an empty answer. This one replies with the sentence.</p>
      */
     private static final String PREFERRED_MODEL = "google/gemma-4-26B-A4B-it";
+
+    /**
+     * How many of the broker's models are asked before giving up for this round.
+     *
+     * <p>More than one because a model that answers nothing is indistinguishable, from here, from
+     * one that is not suited to the question; the next one on the list is asked instead of
+     * reporting failure. Bounded because each attempt costs a call.</p>
+     */
+    private static final int MODELS_TRIED = 3;
 
     /** Enough for one sentence, and short enough that a model that starts explaining is cut off. */
     private static final int MAX_TOKENS = 200;
@@ -52,8 +63,6 @@ public class ActivitySummarizer {
             // uvicorn/FastAPI upstreams behind the broker reject h2c requests with 422.
             .version(HttpClient.Version.HTTP_1_1)
             .build();
-
-    private volatile String resolvedModel;
 
     /**
      * Whether there is a broker to ask.
@@ -73,8 +82,8 @@ public class ActivitySummarizer {
     public String summarise(String material) {
         String base = brokerUrl();
         if (base.isEmpty()) return null;
-        String model = model(base);
-        if (model == null) return null;
+        List<String> candidates = candidates(base);
+        if (candidates.isEmpty()) return null;
 
         String prompt = """
                 Say in one English sentence what is being done in this conversation right now.
@@ -100,13 +109,17 @@ public class ActivitySummarizer {
                 Conversation:
                 """ + material;
 
-        String body = "{\"model\":" + jsonString(model)
-                + ",\"messages\":[{\"role\":\"user\",\"content\":" + jsonString(prompt) + "}]"
-                + ",\"max_tokens\":" + MAX_TOKENS + "}";
-        String reply = post(base + "/v1/chat/completions", body);
-        if (reply == null) return null;
-        String content = firstChoiceContent(reply);
-        return content == null || content.isBlank() ? null : content.strip();
+        for (String model : candidates) {
+            String body = "{\"model\":" + jsonString(model)
+                    + ",\"messages\":[{\"role\":\"user\",\"content\":" + jsonString(prompt) + "}]"
+                    + ",\"max_tokens\":" + MAX_TOKENS + "}";
+            String reply = post(base + "/v1/chat/completions", body);
+            if (reply == null) continue;
+            String content = firstChoiceContent(reply);
+            if (content != null && !content.isBlank()) return content.strip();
+            LOG.fine("Model " + model + " answered nothing; trying the next one");
+        }
+        return null;
     }
 
     /** The broker's address, without a trailing slash, or {@code ""} when none is configured. */
@@ -117,20 +130,52 @@ public class ActivitySummarizer {
     }
 
     /**
-     * The model to ask, resolved once.
+     * The models to ask, in the order they are asked, resolved afresh on every call.
      *
-     * <p>{@link #PREFERRED_MODEL} when the broker serves it, otherwise the first model it lists —
-     * a broker whose model set changed still gets asked something rather than nothing.</p>
+     * <p>{@link #PREFERRED_MODEL} first when the broker serves it, then the rest as the broker
+     * lists them, at most {@link #MODELS_TRIED}.</p>
+     *
+     * <p>Deliberately not cached. A broker's model set changes while this process runs — nodes are
+     * restarted, the broker rediscovers them — and a name resolved once and kept became a name
+     * that could never be corrected. On 2026-09-11 two instances held {@code Qwen/Qwen3.8-27B},
+     * resolved while the preferred model was absent, and answered nothing for as long as they ran
+     * even after the preferred model came back. The list costs one local GET per summary, and a
+     * summary is worked out at most once a minute.</p>
+     *
+     * @param base the broker's address, without a trailing slash
+     * @return the model ids to try, in order; empty when the broker listed none
      */
-    private String model(String base) {
-        String known = resolvedModel;
-        if (known != null) return known;
+    private List<String> candidates(String base) {
         String listed = post(base + "/v1/models", null);
-        if (listed == null) return null;
-        String chosen = listed.contains("\"" + PREFERRED_MODEL + "\"") ? PREFERRED_MODEL
-                                                                      : firstModelId(listed);
-        resolvedModel = chosen;
-        return chosen;
+        if (listed == null) return List.of();
+        List<String> ids = modelIds(listed);
+        List<String> ordered = new ArrayList<>();
+        if (ids.contains(PREFERRED_MODEL)) ordered.add(PREFERRED_MODEL);
+        for (String id : ids) {
+            if (ordered.size() >= MODELS_TRIED) break;
+            if (!ordered.contains(id)) ordered.add(id);
+        }
+        return List.copyOf(ordered);
+    }
+
+    /**
+     * @param modelsJson a {@code /v1/models} answer
+     * @return every model id in it, in the order listed; empty when there are none or it is
+     *         unreadable
+     */
+    static List<String> modelIds(String modelsJson) {
+        try {
+            org.json.JSONArray data = new org.json.JSONObject(modelsJson).optJSONArray("data");
+            if (data == null) return List.of();
+            List<String> out = new ArrayList<>();
+            for (int i = 0; i < data.length(); i++) {
+                String id = data.getJSONObject(i).optString("id", "");
+                if (!id.isBlank()) out.add(id);
+            }
+            return List.copyOf(out);
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     /** Sends one request, GET when {@code body} is {@code null}. Answers {@code null} on anything but 200. */
@@ -157,14 +202,8 @@ public class ActivitySummarizer {
 
     /** @return the {@code id} of the first model in a {@code /v1/models} answer, or {@code null} */
     static String firstModelId(String modelsJson) {
-        try {
-            org.json.JSONArray data = new org.json.JSONObject(modelsJson).optJSONArray("data");
-            if (data == null || data.isEmpty()) return null;
-            String id = data.getJSONObject(0).optString("id", "");
-            return id.isBlank() ? null : id;
-        } catch (Exception e) {
-            return null;
-        }
+        List<String> ids = modelIds(modelsJson);
+        return ids.isEmpty() ? null : ids.get(0);
     }
 
     /** @return the assistant text of the first choice, or {@code null} */

@@ -1,6 +1,8 @@
 package com.scivicslab.chatui.core.actor;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.scivicslab.chatui.core.activity.ActivityWatcher;
+import com.scivicslab.chatui.core.activity.ActivityWork;
 import com.scivicslab.chatui.core.mcp.McpClientActor;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.provider.LlmProvider;
@@ -56,7 +58,11 @@ public class ChatUiActorSystem {
     @Inject
     ObjectMapper objectMapper;
 
+    @Inject
+    ActivityWork activityWork;
+
     private ActorSystem actorSystem;
+    private ActorRef<ActivityWatcher> activityWatcherRef;
     private ActorRef<ChatActor> chatActorRef;
     private ActorRef<WatchdogActor> watchdogRef;
     private ActorRef<QueueActor> queueActorRef;
@@ -81,6 +87,20 @@ public class ChatUiActorSystem {
         } else {
             initSingleUser();
         }
+
+        startActivityWatcher();
+    }
+
+    /**
+     * Creates the actor that holds what this instance is doing, and starts its schedule.
+     *
+     * <p>After the conversation actors, because working an answer out reads them.</p>
+     */
+    private void startActivityWatcher() {
+        activityWatcherRef = actorSystem.actorOf("activity", new ActivityWatcher(activityWork));
+        activityWatcherRef.tell(w -> w.bind(activityWatcherRef, actorSystem.getManagedThreadPool()));
+        activityWatcherRef.tell(ActivityWatcher::startWatching);
+        LOG.info("ActivityWatcher initialized");
     }
 
     private void initSingleUser() {
@@ -152,6 +172,9 @@ public class ChatUiActorSystem {
     @PreDestroy
     void shutdown() {
         if (watchdogTimer != null) watchdogTimer.shutdownNow();
+        if (activityWatcherRef != null) {
+            activityWatcherRef.tell(ActivityWatcher::stopWatching).join();
+        }
         if (actorSystem != null) actorSystem.terminate();
     }
 
@@ -193,6 +216,9 @@ public class ChatUiActorSystem {
     public ActorRef<McpClientActor> getMcpClientActor() { return mcpClientActorRef; }
 
     public ActorRef<SseActor> getSseActor() { return sseActorRef; }
+
+    /** @return the actor holding what this instance is doing, for {@code ActivityResource} */
+    public ActorRef<ActivityWatcher> getActivityWatcher() { return activityWatcherRef; }
 
     /** Returns true when the system is running in multi-user mode. */
     public boolean isMultiUser() {
