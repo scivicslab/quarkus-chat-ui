@@ -22,6 +22,18 @@ class ChatEventTest {
     }
 
     @Test
+    @DisplayName("withoutBusy keeps every field but busy")
+    void withoutBusy_clearsOnlyBusy() {
+        ChatEvent e = ChatEvent.result("s", 0.5, 42L, "m", false).withoutBusy();
+        assertEquals("result", e.type());
+        assertEquals("s", e.sessionId());
+        assertEquals(0.5, e.costUsd(), 1e-9);
+        assertEquals(42L, e.durationMs());
+        assertEquals("m", e.model());
+        assertNull(e.busy());
+    }
+
+    @Test
     @DisplayName("queueAdd sets type=queue_add and carries the item JSON as content")
     void queueAdd_setsTypeAndContent() {
         ChatEvent e = ChatEvent.queueAdd("{\"kind\":\"prompt\",\"text\":\"hi\",\"auto\":true}");

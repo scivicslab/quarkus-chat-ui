@@ -2,14 +2,12 @@ package com.scivicslab.chatui.core.workflow;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.scivicslab.chatui.core.actor.SseActor;
 import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.pojoactor.action.Action;
 import com.scivicslab.pojoactor.action.ActionResult;
-import com.scivicslab.pojoactor.core.ActorRef;
 import com.scivicslab.turingworkflow.workflow.IIActorRef;
 import com.scivicslab.turingworkflow.workflow.IIActorSystem;
 
@@ -43,7 +41,8 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
     private static final Logger LOG = Logger.getLogger(ClaudeHarnessActor.class.getName());
 
     private final LlmProvider provider;
-    private final ActorRef<SseActor> sseRef;
+    /** Where the browser-bound events go (the SSE actor, or a list in tests). */
+    private final Consumer<ChatEvent> emitter;
     private final IoLogStore ioLog;
     private final ObjectMapper mapper;
     /** Raw run input (JSON): {@code {"path": "<checklist file>", "target": "<optional framing>"}}. */
@@ -65,12 +64,12 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
     private int refineCount = 0;
     private int maxRefines = 2;
 
-    public ClaudeHarnessActor(String name, LlmProvider provider, ActorRef<SseActor> sseRef,
+    public ClaudeHarnessActor(String name, LlmProvider provider, Consumer<ChatEvent> emitter,
                               IoLogStore ioLog, IIActorSystem system, ObjectMapper mapper, String runInput,
                               WorkflowApprovalRegistry approvalRegistry) {
         super(name, new Object(), system);
         this.provider = provider;
-        this.sseRef = sseRef;
+        this.emitter = emitter;
         this.ioLog = ioLog;
         this.mapper = mapper;
         this.runInput = runInput;
@@ -323,21 +322,23 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
         int turnNo = ++turn;
         StringBuilder assistant = new StringBuilder();
         StringBuilder thinking = new StringBuilder();
-        Consumer<ChatEvent> emitter = ev -> {
+        Consumer<ChatEvent> turnEmitter = ev -> {
             if ("delta".equals(ev.type()) && ev.content() != null) {
                 assistant.append(ev.content());
             } else if ("thinking".equals(ev.type()) && ev.content() != null) {
                 thinking.append(ev.content());
             }
-            // Forward everything to the browser so the leashed conversation shows live in the left pane.
-            sseRef.tell(a -> a.emit(ev));
+            // Forward everything to the browser so the leashed conversation shows live in the left
+            // pane — except the turn's busy=false: the run is still going, and the browser would
+            // otherwise start the next queue item now. The runner emits the one terminal result.
+            emit("result".equals(ev.type()) ? ev.withoutBusy() : ev);
         };
         try {
             // Blocks until the turn's result event — this is the leash: the next step waits for Claude.
-            provider.sendPrompt(instruction, provider.getCurrentModel(), emitter, ProviderContext.simple(null));
+            provider.sendPrompt(instruction, provider.getCurrentModel(), turnEmitter, ProviderContext.simple(null));
         } catch (Exception e) {
             LOG.log(Level.WARNING, "harness turn failed", e);
-            sseRef.tell(a -> a.emit(ChatEvent.error("turn failed: " + e.getMessage())));
+            emit(ChatEvent.error("turn failed: " + e.getMessage()));
         }
         recordTurn(turnNo, instruction, assistant.toString(), thinking.toString());
         return assistant.toString();
@@ -365,7 +366,7 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
     }
 
     private void emit(ChatEvent ev) {
-        sseRef.tell(a -> a.emit(ev));
+        emitter.accept(ev);
     }
 
     /** Resolves a user-given path; {@code ~} and {@code $HOME} expand to the home directory. */

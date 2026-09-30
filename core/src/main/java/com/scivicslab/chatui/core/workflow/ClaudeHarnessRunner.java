@@ -130,7 +130,7 @@ public class ClaudeHarnessRunner {
             putParamDefaults(interpreterActor, yaml, vars);
 
             system.addIIActor(new ClaudeHarnessActor(
-                    "harness", provider, sseRef, ioLog, system, mapper, input, approvalRegistry));
+                    "harness", provider, emitter, ioLog, system, mapper, input, approvalRegistry));
             system.addIIActor(new QueueBridgeActor("queue", system, emitter, mapper, title, yaml, input));
 
             try (InputStream in = new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8))) {

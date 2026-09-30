@@ -184,6 +184,16 @@ public record ChatEvent(
      *                 or {@code {"kind":"workflow","text":"<title>","yaml":"...","input":"{}","auto":true}}
      * @return a new queue_add event
      */
+    /**
+     * The same event with {@code busy} cleared. A workflow run forwards each LLM turn's events to
+     * the browser, but the turn's own {@code result(busy=false)} must not end the browser's busy
+     * state: the run is still going, and only its single terminal result may do that.
+     */
+    public ChatEvent withoutBusy() {
+        return new ChatEvent(type, content, sessionId, costUsd, durationMs, model, null,
+                             promptId, promptType, options, logLevel, loggerName, timestamp);
+    }
+
     public static ChatEvent queueAdd(String itemJson) {
         return new ChatEvent("queue_add", itemJson, null, null, null, null, null, null, null, null, null, null, null);
     }
