@@ -1,35 +1,61 @@
-# 会話順序ずれの修正 — 案A（idle monitor）＋ ガード
+# Workflow as a queue item (3.0.0-SNAPSHOT)
 
 ## Problem
-`claude` CLI は stream-json で常駐し、1本の裏スレッドが全イベント（プロンプト応答＋自律イベント）を単一 `eventQueue` に積む。`sendPrompt` は `result` を見て return（`busy=false`）。バックグラウンド完了などの自律イベントを拾う受け皿 `CliProcess.pollEvent()` は呼び出し元ゼロで未配線。よって:
-- 完了通知が誰にも消費されず `eventQueue` に滞留する
-- 次のユーザープロンプトが `sendPrompt` で滞留イベントを先に吸い、前ステップの出力が新プロンプトの返事として配られる → 1つずれてちぐはぐ
+1. The Queue list above the prompt form shows each queued prompt in full; long prompts make the
+   list hard to scan. The tooltip already shows the full text.
+2. A Turing Workflow YAML cannot be queued. The Workflow tab is a read-only viewer of three bundled
+   YAMLs whose Run button starts them immediately, outside the queue. The user wants to write YAML
+   in that tab, put it into the queue, and have it run as a workflow when its turn comes, so that a
+   workflow can gate an action on a condition, re-enqueue itself when the condition is not met, or
+   loop until a condition holds.
 
-対象は quarkus-chat-ui（provider=claude/CLI）のみ。chat-ui3 は openai-compat で自律イベント無し。
-
-## 設計（案A＋ガード）
-- ガード＝**イベントの経路分離**: `CliProcess` に turnQueue / autonomousQueue を持たせ、`turnActive` で振り分ける。prompt ターン中(=turnActive)のイベントは turnQueue、それ以外は autonomousQueue。`result` で reader スレッドが turnActive=false にする。→ 滞留自律イベントが prompt 応答に混ざる経路が構造的に消える。
-- 案A＝**idle monitor**: 既存 `watchdogTimer` に2秒周期のtickを追加し、`chatActorRef.tell(a -> a.pollAutonomousActivity(ref))`。ChatActor が idle かつ autonomous 活動があれば、ブロッキングなドレインを managed pool へ委譲し、独立したアシスタントターンとして履歴記録＋SSE配信する。
-- POJO-actor 原則遵守: 判定(`hasAutonomousActivity`)はアクタースレッドで軽く読むだけ、ドレインは `providerRef.ask(..., getManagedThreadPool())`。
-- フロント変更不要: `handleDelta/handleThinking` は `currentAssistantMsg` が無ければ生成、`handleResult` が確定・null化。ユーザー吹き出し無しの自律ターンをそのまま描画する。
+## Design
+- Queue stays browser-owned (localStorage). A queue item gains `kind`: `prompt` (default) or
+  `workflow` (`{kind:'workflow', text:<title>, yaml, input, auto}`).
+- When a workflow item's turn comes the browser POSTs `{yaml,input}` to `POST /api/workflows/run-yaml`,
+  marks itself busy, and waits for the SSE `result` event exactly as for a prompt.
+- `ClaudeHarnessRunner` runs YAML text (bundled name → text, or text from the browser). It always
+  emits one terminal `result(busy=false)` when the run ends, so the browser queue advances; the
+  per-action `result` emits in `ClaudeHarnessActor` are removed (single source of truth).
+- Input JSON top-level fields are loaded into the workflow `vars`, so `${name}` works in user YAML.
+- New workflow actor `queue` (`QueueBridgeActor`) with actions `requeue` (re-enqueue this same
+  workflow) and `enqueue` (enqueue a plain prompt). Both emit a new SSE event `queue_add` whose
+  content is the item JSON; the browser appends it to its queue. Delay before requeue = the step's
+  own `delay:` field.
+- Generic harness actions for user YAML: `send` (one instruction turn, SUCCESS) and `check` (one
+  turn; SUCCESS iff the reply's first line starts with YES, FAILURE otherwise) — the condition gate.
+- Workflow tab: editable YAML textarea (persisted in localStorage); selecting a bundled workflow
+  loads it as a template; buttons `Add to queue` and `Run now`.
+- A bundled template `check-then-act.yaml` demonstrates check → act / requeue.
 
 ## Tasks
-- [x] CliProcess: turnQueue/autonomousQueue 分離、`turnActive`、`routeEvent`/`beginTurn`/`pollTurnEvent`、`pollAutonomousEvent`/`hasAutonomousEvent`、`cancel`/restart で両方クリア
-- [x] LlmProvider: `supportsAutonomousEvents()` / `hasAutonomousActivity()` / `drainAutonomousActivity(emitter)` を default no-op で追加（ProviderCapabilities record は不変更）
-- [x] CliLlmProvider: 上記3メソッドを override（drain は既存 `dispatch()` を再利用し result まで1ターン分ドレイン）
-- [x] ChatActor: `emitToSse`, `pollAutonomousActivity`, `onAutonomousComplete`, `recordAutonomousTurn`
-- [x] ChatUiActorSystem: watchdog ブロック内（CLIのみ）で idle-monitor tick を 2s 周期で登録
-- [x] Unit tests: `CliProcessRoutingTest`(4), `ChatActorAutonomousTest`(2)
-- [x] rm -rf target && mvn install（全12モジュール・全テスト green）→ jar を ~/works へ配置済み
+- [x] Branch `feat/workflow-as-queue-item`; bump 12 pom.xml to 3.0.0-SNAPSHOT
+- [x] (1) styles.css: `.queue-text` 3-line clamp; drop stray `}`; bump `styles.css?v`
+- [x] ChatEvent: `queueAdd(itemJson)` type `queue_add` + unit test
+- [x] QueueBridgeActor (`queue`: `requeue`, `enqueue`) + unit test
+- [x] ClaudeHarnessActor: `send`, `check`; remove per-action `result` emits
+- [x] ClaudeHarnessRunner: run from YAML text; vars from input JSON; terminal `result`; register `queue`
+- [x] ChatResource: `POST /api/workflows/run-yaml`; add template to WORKFLOWS
+- [x] `check-then-act.yaml` template
+- [x] console.js/index.html/console.css: editable YAML, Add to queue, Run now
+- [x] app.js: workflow queue items (render, send, edit, `queue_add` event); bump `app.js?v`, `console.js?v`
+- [x] rm -rf target && mvn install (all tests); E2E if Playwright browsers exist
+- [x] README: document the queue-workflow feature and YAML actions
 
 ## Review
-- ガード（経路分離）は確実に効く：post-result のイベントは autonomousQueue に入り、次の prompt が
-  それを吸えない。`CliProcessRoutingTest` で「result 後のイベントは autonomous」を検証済み。これが
-  「1つずれてちぐはぐ」の直接原因の除去。
-- idle monitor は 2秒周期で idle 時に自律出力をドレインし、独立アシスタントターンとして
-  履歴記録＋SSE配信。`ChatActorAutonomousTest` でドレイン→履歴・SSE・busy解放を検証済み。
-- **未検証の前提**: `claude` CLI が stream-json 常駐時に、裏ジョブ完了で stdout に自律ターンを
-  実際に emit するか否かは実機未確認。emit するなら「完了通知を待って進む」が機能する。emit しない
-  なら idle monitor は何も拾わない（害はない）。この場合の本命は案C（workflow がジョブを監視し
-  QueueActor へ継続ターンを enqueue）。→ 実機で1回検証する。
-- 再起動は未実施（サーバプロセスを勝手に止めない方針）。どのポートを新 jar で再起動するか要相談。
+- Version 3.0.0-SNAPSHOT in all 12 pom.xml; branch `feat/workflow-as-queue-item`.
+- (1) `.queue-text` is clamped to 3 lines (`-webkit-line-clamp`), the `title` tooltip keeps the full text.
+- (2) Queue items carry `kind`; a `workflow` item holds `yaml` + `input`. `sendFromQueue` posts it to
+  `POST /api/workflows/run-yaml`; `ClaudeHarnessRunner` emits exactly one terminal `result` per run, so
+  the browser's busy/queue logic is unchanged. Actor `queue` (`requeue`, `enqueue`) emits `queue_add`.
+- Engine facts found while testing (turing-workflow 4.2.0): no `${var}` expansion in arguments; use
+  `"jexl: state.getString('k')"` (values put with `putJson`). `out.print`/`error` need `{message: ...}`;
+  the three bundled YAMLs' catch-alls used bare strings and were silently failing — fixed.
+- Tests: core 134 unit tests green (new: QueueBridgeActorTest through a real Interpreter,
+  ClaudeHarnessRunnerTest); all modules `mvn install` green; E2E QueueE2E + new WorkflowQueueE2E green.
+  Full `-Pe2e` has pre-existing failures: LoginE2E/ProxyLoginScreenE2E/McpMessageDisplayE2E need their
+  own profiles; ChatInteractionE2E.cancelButtonEnabled fails on main too; ThemeE2E.persistsAcrossReload
+  is flaky (fails alone, passes in sequence; theme code untouched).
+- Not done: server-side `ChatActor.busy` is not held during a workflow run (pre-existing: an MCP
+  `submitPrompt` during a run would reach the provider concurrently). Jar copied to
+  `~/works/quarkus-chat-ui-3.0.0-SNAPSHOT.jar`; the `quarkus-chat-ui.jar` link and running ports untouched.

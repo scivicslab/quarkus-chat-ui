@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.core.workflow;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.SseActor;
@@ -19,18 +20,28 @@ import com.scivicslab.turingworkflow.workflow.accumulator.MultiplexerAccumulator
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
  * Runs a "leash" workflow in-process: it builds a per-run Turing Workflow {@link IIActorSystem} with
- * the engine's built-in actors plus a {@link ClaudeHarnessActor}, loads the named workflow YAML from
- * the classpath ({@code /workflows/<name>.yaml}), and runs it to completion on a virtual thread.
+ * the engine's built-in actors plus the chat-ui actors {@code harness} ({@link ClaudeHarnessActor})
+ * and {@code queue} ({@link QueueBridgeActor}), loads the workflow YAML, and runs it to completion on
+ * a virtual thread.
  *
- * <p>This mirrors quarkus-chat-ui3's {@code AgentLoopRunner}, but the driven actor wraps the Claude
- * CLI harness (one constrained instruction per step) rather than a bare-LLM tool loop.</p>
+ * <p>The YAML comes either from the classpath ({@code /workflows/<name>.yaml}, the bundled
+ * templates) or as text written by the user in the Workflow tab and queued in the browser's prompt
+ * queue. Top-level string fields of the input JSON are loaded into the workflow {@code vars}, so the
+ * YAML can refer to them as {@code ${name}}.</p>
+ *
+ * <p>Whatever happens, exactly one terminal {@code result} event (busy=false) is emitted when the run
+ * ends. The browser treats it like the end of a prompt turn and moves on to the next queue item.</p>
  */
 @ApplicationScoped
 public class ClaudeHarnessRunner {
@@ -50,19 +61,54 @@ public class ClaudeHarnessRunner {
     @Inject
     WorkflowApprovalRegistry approvalRegistry;
 
-    /** Starts the named workflow on a virtual thread (returns immediately). */
+    /** Starts the named bundled workflow on a virtual thread (returns immediately). */
     public void launch(String workflowName, String inputJson) {
-        Thread.ofVirtual().name("workflow-" + workflowName).start(() -> run(workflowName, inputJson));
+        String yaml = readBundledYaml(workflowName);
+        if (yaml == null) {
+            ActorRef<SseActor> sseRef = chatSystem.getSseActor();
+            if (sseRef != null) {
+                sseRef.tell(a -> a.emit(ChatEvent.error("workflow not found: " + workflowName)));
+            }
+            return;
+        }
+        launchYaml(yaml, inputJson);
     }
 
-    private void run(String workflowName, String inputJson) {
+    /** Starts a workflow given as YAML text on a virtual thread (returns immediately). */
+    public void launchYaml(String yaml, String inputJson) {
+        String title = workflowTitle(yaml);
+        Thread.ofVirtual().name("workflow-" + title).start(() -> run(title, yaml, inputJson));
+    }
+
+    /**
+     * The display title of a workflow YAML: its {@code name:} value, else the first non-empty line,
+     * else {@code "workflow"}. Also used by the browser as the queue-item label.
+     */
+    public static String workflowTitle(String yaml) {
+        if (yaml == null) return "workflow";
+        String firstNonEmpty = null;
+        for (String line : yaml.split("\\R")) {
+            String t = line.strip();
+            if (t.isEmpty()) continue;
+            if (firstNonEmpty == null) firstNonEmpty = t;
+            if (t.startsWith("name:")) {
+                String v = t.substring(5).strip().replaceAll("^[\"']|[\"']$", "");
+                if (!v.isEmpty()) return v;
+            }
+        }
+        return firstNonEmpty == null ? "workflow" : firstNonEmpty;
+    }
+
+    private void run(String title, String yaml, String inputJson) {
         ActorRef<SseActor> sseRef = chatSystem.getSseActor();
         LlmProvider provider = chatSystem.getProvider();
         if (sseRef == null || provider == null) {
             LOG.warning("Cannot run workflow: actor system not ready");
             return;
         }
-        IIActorSystem system = new IIActorSystem("workflow-" + workflowName);
+        Consumer<ChatEvent> emitter = ev -> sseRef.tell(a -> a.emit(ev));
+        String input = inputJson == null ? "" : inputJson;
+        IIActorSystem system = new IIActorSystem("workflow-" + title);
         try {
             Interpreter interpreter = new Interpreter.Builder()
                     .loggerName("interpreter")
@@ -74,34 +120,95 @@ public class ClaudeHarnessRunner {
             MultiplexerAccumulator mux = new MultiplexerAccumulator();
             mux.addTarget(new ConsoleAccumulator());
             system.addIIActor(new MultiplexerAccumulatorIIAR("log", mux, system));
-            system.addIIActor(new VarsActor(system, new HashMap<>()));
+            Map<String, String> vars = varsFromInput(input);
+            system.addIIActor(new VarsActor(system, vars));
             InterpreterIIAR interpreterActor = new InterpreterIIAR("interpreter", interpreter, system);
             interpreter.setSelfActorRef(interpreterActor);
             system.addIIActor(interpreterActor);
+            // ${name} in action arguments expands from the interpreter's JSON state (as the CLI's -P does).
+            putVariables(interpreterActor, vars);
+            putParamDefaults(interpreterActor, yaml, vars);
 
-            ClaudeHarnessActor harness = new ClaudeHarnessActor(
-                    "harness", provider, sseRef, ioLog, system, mapper, inputJson, approvalRegistry);
-            system.addIIActor(harness);
+            system.addIIActor(new ClaudeHarnessActor(
+                    "harness", provider, sseRef, ioLog, system, mapper, input, approvalRegistry));
+            system.addIIActor(new QueueBridgeActor("queue", system, emitter, mapper, title, yaml, input));
 
-            String resource = "/workflows/" + workflowName + ".yaml";
-            try (InputStream in = getClass().getResourceAsStream(resource)) {
-                if (in == null) {
-                    sseRef.tell(a -> a.emit(ChatEvent.error("workflow not found: " + workflowName)));
-                    return;
-                }
+            try (InputStream in = new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8))) {
                 interpreter.readYaml(in);
             }
 
             ActionResult result = interpreter.runUntilEnd(MAX_ITERATIONS);
             if (!result.isSuccess()) {
-                sseRef.tell(a -> a.emit(ChatEvent.error("workflow failed: " + result.getResult())));
+                emitter.accept(ChatEvent.error("workflow failed: " + result.getResult()));
             }
         } catch (Exception e) {
             LOG.log(Level.SEVERE, "Workflow run error", e);
-            sseRef.tell(a -> a.emit(ChatEvent.error("workflow error: " + e.getMessage())));
+            emitter.accept(ChatEvent.error("workflow error: " + e.getMessage()));
         } finally {
             system.terminateIIActors();
             system.terminate();
+            // The single terminal event: the browser ends its "busy" turn and advances its queue.
+            emitter.accept(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
+        }
+    }
+
+    /** Puts each variable into the interpreter's JSON state so {@code ${name}} expands in arguments. */
+    private static void putVariables(InterpreterIIAR interpreterActor, Map<String, String> vars) {
+        for (Map.Entry<String, String> e : vars.entrySet()) {
+            String jsonArg = new org.json.JSONObject()
+                    .put("path", e.getKey())
+                    .put("value", e.getValue())
+                    .toString();
+            interpreterActor.callByActionName("putJson", jsonArg);
+        }
+    }
+
+    /** Applies {@code params.<name>.default} from the YAML for every variable the input did not set. */
+    static void putParamDefaults(InterpreterIIAR interpreterActor, String yaml, Map<String, String> vars) {
+        try {
+            JsonNode params = new com.fasterxml.jackson.dataformat.yaml.YAMLMapper().readTree(yaml).path("params");
+            if (!params.isObject()) return;
+            params.fields().forEachRemaining(e -> {
+                if (vars.containsKey(e.getKey())) return;
+                JsonNode def = e.getValue().get("default");
+                if (def == null || def.isNull()) return;
+                String jsonArg = new org.json.JSONObject()
+                        .put("path", e.getKey())
+                        .put("value", def.asText())
+                        .toString();
+                interpreterActor.callByActionName("putJson", jsonArg);
+            });
+        } catch (Exception e) {
+            LOG.fine("no usable params section: " + e.getMessage());
+        }
+    }
+
+    /** Top-level string/number/boolean fields of the input JSON become workflow variables. */
+    Map<String, String> varsFromInput(String inputJson) {
+        Map<String, String> vars = new HashMap<>();
+        if (inputJson == null || inputJson.isBlank()) return vars;
+        try {
+            JsonNode root = mapper.readTree(inputJson);
+            if (root != null && root.isObject()) {
+                root.fields().forEachRemaining(e -> {
+                    JsonNode v = e.getValue();
+                    vars.put(e.getKey(), v.isValueNode() ? v.asText() : v.toString());
+                });
+            }
+        } catch (Exception e) {
+            LOG.warning("workflow input is not a JSON object; no vars set: " + e.getMessage());
+        }
+        return vars;
+    }
+
+    /** Reads {@code /workflows/<name>.yaml} from the classpath; null if the name is invalid or absent. */
+    public static String readBundledYaml(String name) {
+        if (name == null || !name.matches("[a-z0-9-]{1,64}")) return null;
+        try (InputStream in = ClaudeHarnessRunner.class.getResourceAsStream("/workflows/" + name + ".yaml")) {
+            if (in == null) return null;
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
         }
     }
 }

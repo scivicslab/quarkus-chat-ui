@@ -660,67 +660,41 @@
         }).catch(function (e) { cfgStatus('error: ' + e.message); });
     }
 
-    // ── Workflow tab (read-only system workflow viewer; Phase 1) ──────────────
+    // ── Workflow tab: a YAML editor whose result goes into the prompt queue ───────────────
+    var WF_YAML_KEY = 'chat-ui-wf-yaml';
+    var WF_INPUT_KEY = 'chat-ui-wf-input';
+
     function wfStatus(msg) {
         var s = document.getElementById('wf-status');
         if (s) s.textContent = msg || '';
     }
 
-    // Splits a workflow YAML into a preamble (everything before the first step) and the top-level
-    // step items (lines beginning with exactly "  - "). Display only — no reassembly in Phase 1.
-    function wfSplitSteps(yaml) {
-        var lines = (yaml || '').split('\n');
-        var preamble = [], steps = [], cur = null;
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            if (/^  - /.test(line)) {            // a top-level step list item under steps:
-                if (cur) steps.push(cur.join('\n'));
-                cur = [line];
-            } else if (cur) {
-                cur.push(line);
-            } else {
-                preamble.push(line);
-            }
-        }
-        if (cur) steps.push(cur.join('\n'));
-        return { preamble: preamble.join('\n').replace(/\s+$/, ''), steps: steps };
+    function wfYaml() {
+        var ta = document.getElementById('wf-yaml');
+        return ta ? ta.value : '';
     }
 
-    // Box heading: the step's transition direction (the states array) plus its 0-based step number,
-    // e.g. states ["0", "1"] -> '["0", "1"]   # step 0'. The label still appears in the YAML body.
-    function wfStepTitle(text, idx) {
-        // states: sits on the step's first line "  - states: [...]"; allow the leading "- ".
-        var m = text.match(/(^|\n)\s*-?\s*states:\s*(.+)/);
-        var states = m ? m[2].trim() : '';
-        return (states ? states + '   ' : '') + '# step ' + idx;
+    // Puts YAML into the editor, remembers it, and rebuilds the input form from its params: section.
+    function wfSetYaml(yaml, params) {
+        var ta = document.getElementById('wf-yaml');
+        if (!ta) return;
+        ta.value = yaml || '';
+        try { localStorage.setItem(WF_YAML_KEY, ta.value); } catch (e) { /* ignore */ }
+        if (params) wfRenderForm(params); else wfRefreshParams();
     }
 
-    function wfRenderBox(parent, title, body, kind) {
-        var box = document.createElement('div');
-        box.className = 'wf-box' + (kind ? ' wf-' + kind : '');
-        var h = document.createElement('div');
-        h.className = 'wf-box-title';
-        h.textContent = title;
-        var pre = document.createElement('pre');
-        pre.className = 'wf-box-yaml';
-        pre.textContent = body;          // read-only; textContent => no HTML injection
-        box.appendChild(h);
-        box.appendChild(pre);
-        parent.appendChild(box);
-    }
-
-    // Renders the system steps read-only; after each insertion-point step (label ext-pre/ext-mid/
-    // ext-post) renders that point's editable user-extension box inline.
-    function wfRender(yaml) {
-        var list = document.getElementById('wf-list');
-        if (!list) return;
-        list.textContent = '';
-        var parts = wfSplitSteps(yaml);
-        if (parts.preamble) wfRenderBox(list, 'workflow header', parts.preamble, 'head');
-        parts.steps.forEach(function (s, i) {
-            wfRenderBox(list, wfStepTitle(s, i), s, 'step');
-        });
-        wfStatus(parts.steps.length + ' step(s) — read-only');
+    var wfParamsTimer = null;
+    // Asks the server to parse the editor's params: section (the same parser the templates use).
+    function wfRefreshParams() {
+        var yaml = wfYaml();
+        if (!yaml.trim()) { wfRenderForm(null); return; }
+        fetch('/api/workflows/params', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ yaml: yaml })
+        }).then(function (r) { return r.json(); })
+          .then(function (d) { wfRenderForm(d && d.params); })
+          .catch(function () { wfRenderForm(null); });
     }
 
     // Param descriptors of the selected workflow, or null when the workflow declares no params
@@ -802,15 +776,17 @@
         return JSON.stringify(obj);
     }
 
-    function wfLoad(name) {
+    // onlyIfEmpty: a first-show default load must not clobber text typed while the fetch was in flight.
+    function wfLoad(name, onlyIfEmpty) {
         if (!name) return;
         wfStatus('loading…');
         fetch('/api/workflows/' + encodeURIComponent(name))
             .then(function (r) { return r.json(); })
             .then(function (d) {
                 if (!d || !d.yaml) { wfStatus('not found'); return; }
-                wfRenderForm(d.params);
-                wfRender(d.yaml);
+                if (onlyIfEmpty && wfYaml().trim()) { wfStatus(''); return; }
+                wfSetYaml(d.yaml, d.params);
+                wfStatus('loaded ' + name + ' — edit, then Add to queue');
             })
             .catch(function (e) { wfStatus('error: ' + e.message); });
     }
@@ -832,39 +808,72 @@
             .catch(function (e) { wfStatus('error: ' + e.message); });
     }
 
+    // First show: fill the template list; restore the editor text, or load the first template
+    // when there is nothing to restore. Later shows keep whatever is in the editor.
+    var wfShown = false;
     function wfOnShow() {
+        if (wfShown) return;
+        wfShown = true;
         var sel = document.getElementById('wf-select');
-        if (sel && sel.options.length === 0) {
-            wfPopulate(function () { wfLoad(sel.value); });
-        } else if (sel) {
-            wfLoad(sel.value);
-        }
+        var saved = null;
+        try { saved = localStorage.getItem(WF_YAML_KEY); } catch (e) { /* ignore */ }
+        var box = document.getElementById('wf-run-input');
+        if (box) { try { box.value = localStorage.getItem(WF_INPUT_KEY) || ''; } catch (e) { /* ignore */ } }
+        wfPopulate(function () {
+            if (saved) wfSetYaml(saved);
+            else if (sel && sel.value) wfLoad(sel.value, true);
+        });
+    }
+
+    // Opens a queued workflow item in the editor (the queue's Edit button on a workflow item).
+    function wfOpen(yaml, input) {
+        var btn = document.querySelector('#right-tab-bar .rtab-btn[data-tab="workflow"]');
+        if (btn) btn.click();
+        wfSetYaml(yaml);
+        var box = document.getElementById('wf-run-input');
+        if (box) box.value = input || '';
+        wfStatus('opened from the queue');
     }
 
     function initWorkflow() {
         var sel = document.getElementById('wf-select');
-        if (sel) sel.addEventListener('change', function () { wfLoad(sel.value); });
-        var btn = document.getElementById('wf-refresh');
-        if (btn) btn.addEventListener('click', function () { wfLoad(sel ? sel.value : ''); });
+        var ta = document.getElementById('wf-yaml');
+        if (ta) ta.addEventListener('input', function () {
+            try { localStorage.setItem(WF_YAML_KEY, ta.value); } catch (e) { /* ignore */ }
+            clearTimeout(wfParamsTimer);
+            wfParamsTimer = setTimeout(wfRefreshParams, 600);
+        });
+        var box = document.getElementById('wf-run-input');
+        if (box) box.addEventListener('input', function () {
+            try { localStorage.setItem(WF_INPUT_KEY, box.value); } catch (e) { /* ignore */ }
+        });
+        var load = document.getElementById('wf-load');
+        if (load) load.addEventListener('click', function () { wfLoad(sel ? sel.value : ''); });
+
+        function collect() {
+            var yaml = wfYaml();
+            if (!yaml.trim()) { wfStatus('the editor is empty'); return null; }
+            var input = wfCollectInput();
+            if (input === null) return null;   // a required field is empty
+            return { yaml: yaml, input: input || '{}' };
+        }
+        var q = document.getElementById('wf-queue');
+        if (q) q.addEventListener('click', function () {
+            var w = collect();
+            if (!w) return;
+            if (!window.chatUiQueue) { wfStatus('queue not ready'); return; }
+            window.chatUiQueue.addWorkflow(w.yaml, w.input);
+            wfStatus('added to the queue: ' + window.chatUiQueue.workflowTitle(w.yaml));
+        });
         var run = document.getElementById('wf-run');
         if (run) run.addEventListener('click', function () {
-            var name = sel ? sel.value : '';
-            if (!name) { wfStatus('select a workflow first'); return; }
-            var body = wfCollectInput();
-            if (body === null) return;   // a required field is empty
-            wfStatus('starting ' + name + '…');
-            fetch('/api/workflows/' + encodeURIComponent(name) + '/run', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: body || '{}'
-            }).then(function (r) { return r.json(); })
-              .then(function (j) {
-                  wfStatus(j.type === 'accepted'
-                      ? ('running ' + name + ' — watch the chat (left pane)')
-                      : ('error: ' + (j.error || 'failed')));
-              })
-              .catch(function (e) { wfStatus('error: ' + e.message); });
+            var w = collect();
+            if (!w) return;
+            if (!window.chatUiQueue) { wfStatus('queue not ready'); return; }
+            window.chatUiQueue.runWorkflowNow(w.yaml, w.input);
+            wfStatus('running ' + window.chatUiQueue.workflowTitle(w.yaml) + ' — watch the chat (left pane)');
         });
+        window.chatUiWorkflow = { open: wfOpen };
     }
 
     function initConfig() {

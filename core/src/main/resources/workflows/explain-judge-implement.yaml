@@ -66,4 +66,4 @@ steps:
     actions:
       - actor: out
         method: error
-        arguments: "explain-judge-implement workflow ended unexpectedly"
+        arguments: {message: "explain-judge-implement workflow ended unexpectedly"}

@@ -44,4 +44,4 @@ steps:
     actions:
       - actor: out
         method: error
-        arguments: "doc-check workflow ended unexpectedly"
+        arguments: {message: "doc-check workflow ended unexpectedly"}

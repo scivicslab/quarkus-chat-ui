@@ -590,7 +590,28 @@
             case 'prompt':
                 handlePrompt(event);
                 break;
+            case 'queue_add':
+                handleQueueAdd(event.content);
+                break;
         }
+    }
+
+    // A running workflow asked to append an item to the queue (queue.enqueue / queue.requeue).
+    function handleQueueAdd(itemJson) {
+        var item;
+        try { item = JSON.parse(itemJson); } catch (e) { return; }
+        if (!item || typeof item !== 'object') return;
+        if (item.kind === 'workflow') {
+            addWorkflowToQueue(item.yaml || '', item.input || '', item.text);
+        } else if (item.text) {
+            queue.push({ text: String(item.text), auto: item.auto !== false });
+            trimQueue();
+            showQueue();
+            renderQueue();
+            saveQueue();
+        }
+        // Not processed here: the browser is busy with the workflow that sent this; its terminal
+        // result event calls processQueue().
     }
 
     function startThinkingTimer() {
@@ -1309,7 +1330,9 @@
 
         for (var i = 0; i < queue.length; i++) {
             var item = queue[i];
-            var displayText = item.text;
+            var isWorkflow = (item.kind === 'workflow');
+            var displayText = isWorkflow ? ('\u2699 Workflow: ' + item.text) : item.text;
+            var tooltip = isWorkflow ? (item.yaml || '') : item.text;
             var sent = (i < queuePos);
             var isCurrent = (i === queuePos);
             var isWaiting = (isCurrent && !busy && !item.auto);
@@ -1323,7 +1346,7 @@
 
             html += '<div class="' + cls + '" data-index="' + i + '">'
                 + '<span class="queue-index">' + (i + 1) + '.</span>'
-                + '<span class="queue-text" title="' + escapeAttr(item.text) + '">'
+                + '<span class="queue-text' + (isWorkflow ? ' queue-workflow' : '') + '" title="' + escapeAttr(tooltip) + '">'
                 + escapeHtml(displayText) + '</span>';
 
             if (!sent) {
@@ -1337,7 +1360,8 @@
                     + (canDown ? '' : ' disabled') + ' title="Move down">&darr;</button>';
             }
 
-            html += '<button class="queue-edit" data-queue-edit="' + i + '" title="Edit (copy to input)">📝</button>';
+            html += '<button class="queue-edit" data-queue-edit="' + i + '" title="'
+                + (isWorkflow ? 'Edit (open in the Workflow tab)' : 'Edit (copy to input)') + '">📝</button>';
             html += '<button class="queue-remove" data-queue-remove="' + i + '" title="Remove">&times;</button>'
                 + '</div>';
         }
@@ -1352,7 +1376,9 @@
         if (editBtn) {
             var idx = parseInt(editBtn.getAttribute('data-queue-edit'), 10);
             var item = queue[idx];
-            if (item) {
+            if (item && item.kind === 'workflow') {
+                if (window.chatUiWorkflow) window.chatUiWorkflow.open(item.yaml || '', item.input || '');
+            } else if (item) {
                 promptInput.value = item.text;
                 autoResize();
                 promptInput.focus();
@@ -1582,7 +1608,92 @@
         queuePos++;
         renderQueue();
         saveQueue();
-        executePrompt(item.text, item.images || []);
+        if (item.kind === 'workflow') {
+            executeWorkflow(item);
+        } else {
+            executePrompt(item.text, item.images || []);
+        }
+    }
+
+    // Adds a Turing Workflow (YAML text + input JSON) to the queue as an auto item. Called from the
+    // Workflow tab (console.js) and from the queue_add SSE event a running workflow emits.
+    function addWorkflowToQueue(yaml, input, title) {
+        queue.push({ kind: 'workflow', text: title || workflowTitle(yaml), yaml: yaml, input: input || '', auto: true });
+        trimQueue();
+        showQueue();
+        renderQueue();
+        saveQueue();
+        queueArea.scrollTop = queueArea.scrollHeight;
+    }
+
+    // Puts the workflow at the front of the pending queue and starts it unless something is running
+    // (then it runs next). Same rule as sendPromptText() for prompts.
+    function runWorkflowNow(yaml, input) {
+        queue.splice(queuePos, 0, { kind: 'workflow', text: workflowTitle(yaml), yaml: yaml, input: input || '', auto: true });
+        trimQueue();
+        showQueue();
+        renderQueue();
+        saveQueue();
+        if (!busy) processQueue();
+    }
+
+    // Same rule as the server (ClaudeHarnessRunner.workflowTitle): the name: value, else the first line.
+    function workflowTitle(yaml) {
+        var lines = (yaml || '').split(/\r?\n/);
+        var first = '';
+        for (var i = 0; i < lines.length; i++) {
+            var t = lines[i].trim();
+            if (!t) continue;
+            if (!first) first = t;
+            if (t.indexOf('name:') === 0) {
+                var v = t.substring(5).trim().replace(/^["']|["']$/g, '');
+                if (v) return v;
+            }
+        }
+        return first || 'workflow';
+    }
+
+    // Runs a queued workflow: the browser is "busy" exactly as for a prompt until the server's
+    // terminal result event (emitted once per run by ClaudeHarnessRunner) arrives over SSE.
+    async function executeWorkflow(item) {
+        appendMessage('user', '\u2699 Workflow: ' + (item.text || workflowTitle(item.yaml)));
+        busy = true;
+        cancelBtn.disabled = false;
+        currentAssistantMsg = document.createElement('div');
+        currentAssistantMsg.className = 'message assistant streaming';
+        currentAssistantMsg.innerHTML = '<span class="thinking-indicator">Running workflow...</span>';
+        chatArea.appendChild(currentAssistantMsg);
+        forceScrollToBottom();
+        activityLabel.setAttribute('data-base', 'Running workflow...');
+        activityLabel.textContent = 'Running workflow...';
+        startThinkingTimer();
+        try {
+            var response = await fetch(apiUrl('api/workflows/run-yaml'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ yaml: item.yaml || '', input: item.input || '' })
+            });
+            if (!response.ok) {
+                var errText = await response.text();
+                appendMessage('error', 'HTTP ' + response.status + ': ' + errText.substring(0, 200));
+                finishWorkflowLaunchFailure();
+            }
+            // Events (deltas, info, result) arrive through the EventSource connection
+        } catch (e) {
+            appendMessage('error', 'Workflow launch failed: ' + e.message);
+            finishWorkflowLaunchFailure();
+        }
+    }
+
+    function finishWorkflowLaunchFailure() {
+        stopThinkingTimer();
+        if (currentAssistantMsg && !currentAssistantText) {
+            currentAssistantMsg.remove();
+            currentAssistantMsg = null;
+        }
+        busy = false;
+        cancelBtn.disabled = true;
+        processQueue();
     }
 
     // --- Send prompt ---
@@ -2130,6 +2241,9 @@
     }
 
     sendBtn.addEventListener('click', sendPrompt);
+
+    // The Workflow tab (console.js) enqueues through this.
+    window.chatUiQueue = { addWorkflow: addWorkflowToQueue, runWorkflowNow: runWorkflowNow, workflowTitle: workflowTitle };
 
     function showQueue() {
         queueArea.style.display = 'block';

@@ -19,6 +19,7 @@ import java.util.List;
  *   <li>{@code prompt} - Interactive prompt from the LLM (tool permission, yes/no, etc.)</li>
  *   <li>{@code heartbeat} - Keep-alive for SSE connection</li>
  *   <li>{@code log} - Server log entry (level, logger, message, timestamp)</li>
+ *   <li>{@code queue_add} - Ask the browser to append an item to its prompt queue (content = item JSON)</li>
  * </ul>
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -172,6 +173,19 @@ public record ChatEvent(
     public static ChatEvent log(String level, String logger, String message, long ts) {
         return new ChatEvent("log", message, null, null, null, null, null,
                              null, null, null, level, logger, ts);
+    }
+
+    /**
+     * Creates a queue_add event asking the browser to append one item to its prompt queue.
+     * The queue is browser-owned, so a running workflow that wants to enqueue a prompt or
+     * re-enqueue itself sends this event instead of touching a server-side queue.
+     *
+     * @param itemJson the queue item as JSON, e.g. {@code {"kind":"prompt","text":"...","auto":true}}
+     *                 or {@code {"kind":"workflow","text":"<title>","yaml":"...","input":"{}","auto":true}}
+     * @return a new queue_add event
+     */
+    public static ChatEvent queueAdd(String itemJson) {
+        return new ChatEvent("queue_add", itemJson, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /**

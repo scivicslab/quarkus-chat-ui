@@ -45,7 +45,7 @@ steps:
     actions:
       - actor: out
         method: print
-        arguments: "explain-approve-implement: rejected — stopped."
+        arguments: {message: "explain-approve-implement: rejected — stopped."}
 
   - states: ["implement", "end"]
     label: implement
@@ -59,4 +59,4 @@ steps:
     actions:
       - actor: out
         method: error
-        arguments: "explain-approve-implement workflow ended unexpectedly"
+        arguments: {message: "explain-approve-implement workflow ended unexpectedly"}

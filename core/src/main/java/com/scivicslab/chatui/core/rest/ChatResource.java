@@ -673,7 +673,9 @@ public class ChatResource {
             Map.of("name", "explain-judge-implement",
                    "title", "Explain → Judge → Implement (auto; no plan mode)"),
             Map.of("name", "explain-approve-implement",
-                   "title", "Explain → Approve → Implement (human gate)"));
+                   "title", "Explain → Approve → Implement (human gate)"),
+            Map.of("name", "check-then-act",
+                   "title", "Check → Act, else re-enqueue (template for queued workflows)"));
 
     /** Lists the workflows that can be viewed/run in the Workflow tab. */
     @GET
@@ -745,15 +747,43 @@ public class ChatResource {
         return Response.ok(Map.of("type", "accepted", "workflow", name)).build();
     }
 
+    /** Parses the {@code params:} section of YAML written in the Workflow tab (body: {@code {yaml}}). */
+    @POST
+    @Path("/workflows/params")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response workflowParams(RunYamlRequest req) {
+        String yaml = (req == null || req.yaml == null) ? "" : req.yaml;
+        return Response.ok(Map.of("params", parseWorkflowParams(yaml))).build();
+    }
+
+    /** Body of {@code POST /api/workflows/run-yaml}: the YAML text and its input JSON (as a string). */
+    public static class RunYamlRequest {
+        public String yaml;
+        public String input;
+    }
+
+    /**
+     * Runs a workflow given as YAML text (written in the Workflow tab and queued in the browser's
+     * prompt queue). Returns immediately; the run streams over SSE and ends with one {@code result}
+     * event, so the browser handles it like a prompt turn.
+     */
+    @POST
+    @Path("/workflows/run-yaml")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response runWorkflowYaml(RunYamlRequest req) {
+        if (req == null || req.yaml == null || req.yaml.isBlank()) {
+            return Response.status(400).entity(Map.of("error", "yaml is empty")).build();
+        }
+        workflowRunner.launchYaml(req.yaml, req.input == null ? "" : req.input);
+        return Response.ok(Map.of("type", "accepted",
+                "workflow", ClaudeHarnessRunner.workflowTitle(req.yaml))).build();
+    }
+
     /** Reads {@code /workflows/<name>.yaml} from the classpath; null if the name is invalid or absent. */
     private String readWorkflowYaml(String name) {
-        if (name == null || !name.matches("[a-z0-9-]{1,64}")) return null;
-        try (var in = getClass().getResourceAsStream("/workflows/" + name + ".yaml")) {
-            if (in == null) return null;
-            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            return null;
-        }
+        return ClaudeHarnessRunner.readBundledYaml(name);
     }
 
     @GET

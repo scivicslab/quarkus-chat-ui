@@ -9,6 +9,7 @@ A multi-provider chat UI for Large Language Models, built with [Quarkus](https:/
 - **Multiple LLM providers** — Claude Code CLI, OpenAI Codex CLI, and OpenAI-compatible APIs (vLLM, Ollama)
 - **Streaming responses** — Server-Sent Events (SSE) for real-time token streaming
 - **Prompt queue** — Queue multiple prompts; they execute automatically in order
+- **Workflows in the queue** — Write a Turing Workflow YAML in the Workflow tab and add it to the queue; it runs as a workflow when its turn comes and can gate, loop, or re-enqueue itself (see below)
 - **MCP server** — Each instance exposes itself at `/mcp` for agent-to-agent communication
 - **Theme support** — 10 built-in themes (dark and light variants)
 - **Slash commands** — Provider-specific commands (`/model`, `/compact`, `/clear`, …)
@@ -166,6 +167,50 @@ Register as an MCP server in Claude Code CLI:
 ```bash
 claude mcp add --transport http chat-ui-28900 http://localhost:28900/mcp
 ```
+
+## Workflows in the prompt queue
+
+The right pane's **Workflow** tab is a YAML editor. **Add to queue** puts the YAML (plus its input JSON)
+into the prompt queue as a workflow item; the item shows as `⚙ Workflow: <name>` and runs when its turn
+comes, exactly like a queued prompt (the browser is busy until the run ends). **Run now** puts it at the
+front of the queue. **Load** copies a bundled template into the editor.
+
+Actors available to the YAML, besides the engine's built-ins (`out`, `calc`, `list`, `str`, `interpreter`):
+
+| Actor | Action | Effect | Result |
+|-------|--------|--------|--------|
+| `harness` | `send` | One instruction turn to the LLM; the argument is the instruction | SUCCESS; message = the reply |
+| `harness` | `check` | One YES/NO turn; the argument is the question (the engine appends the answer format) | SUCCESS if the first line starts with YES, else FAILURE |
+| `harness` | `start` | Opens the I/O-log session (optional, first step) | SUCCESS |
+| `queue` | `requeue` | Puts this same workflow (same YAML and input) at the end of the queue | SUCCESS |
+| `queue` | `enqueue` | Puts a plain prompt (the argument) at the end of the queue | SUCCESS, FAILURE if empty |
+
+A FAILURE makes the engine try the next transition from the same state, so a condition gate is two
+transitions from one state: `check` → act, then the fallback → `requeue`. Give the fallback step a
+`delay:` (milliseconds) so retries are spaced. Input JSON fields are in the interpreter's JSON state;
+read one with `"jexl: state.getString('name')"`. The bundled template `check-then-act` is this pattern:
+
+```yaml
+  - states: ["check", "act"]
+    actions:
+      - actor: harness
+        method: check
+        arguments: "jexl: state.getString('condition')"
+  - states: ["check", "end"]
+    delay: 60000
+    actions:
+      - actor: queue
+        method: requeue
+  - states: ["act", "end"]
+    actions:
+      - actor: harness
+        method: send
+        arguments: "jexl: state.getString('action')"
+```
+
+Endpoints: `POST /api/workflows/run-yaml` (`{yaml, input}`), `POST /api/workflows/params` (`{yaml}`),
+`GET /api/workflows`, `GET /api/workflows/{name}`. A running workflow enqueues through the SSE event
+`queue_add`, whose content is the queue item JSON.
 
 ## Testing
 

@@ -22,6 +22,16 @@ class ChatEventTest {
     }
 
     @Test
+    @DisplayName("queueAdd sets type=queue_add and carries the item JSON as content")
+    void queueAdd_setsTypeAndContent() {
+        ChatEvent e = ChatEvent.queueAdd("{\"kind\":\"prompt\",\"text\":\"hi\",\"auto\":true}");
+        assertEquals("queue_add", e.type());
+        assertEquals("{\"kind\":\"prompt\",\"text\":\"hi\",\"auto\":true}", e.content());
+        assertNull(e.busy());
+        assertNull(e.promptId());
+    }
+
+    @Test
     @DisplayName("result(sessionId,cost,duration) sets fields correctly")
     void result_threeArgs_setsFields() {
         ChatEvent e = ChatEvent.result("sess-1", 0.005, 1234L);

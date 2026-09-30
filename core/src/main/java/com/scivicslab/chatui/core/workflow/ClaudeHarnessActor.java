@@ -33,6 +33,10 @@ import java.util.logging.Logger;
  * {@code start} (init) -> {@code loadChecklist} (read the checklist into a list) ->
  * {@code sendNextItem}* (one item per turn; SUCCESS while items remain, FAILURE when exhausted) ->
  * {@code finish}.</p>
+ *
+ * <p>For user-written YAML the generic actions are {@code send} (one instruction turn) and
+ * {@code check} (one YES/NO turn used as a condition gate). The terminal {@code result} event is
+ * emitted once by {@link ClaudeHarnessRunner} when the run ends, not by the actions.</p>
  */
 public class ClaudeHarnessActor extends IIActorRef<Object> {
 
@@ -151,7 +155,6 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
     @Action("finish")
     public ActionResult finish(String args) {
         emit(ChatEvent.info("✅ Workflow complete — " + items.size() + " item(s) checked"));
-        emit(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
         return new ActionResult(true, "finished");
     }
 
@@ -221,7 +224,6 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
               + "承認された方針は次の通りです：\n\n" + plan;
         runTurn(instruction);
         emit(ChatEvent.info("✅ Workflow complete"));
-        emit(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
         return new ActionResult(true, "implemented");
     }
 
@@ -254,18 +256,61 @@ public class ClaudeHarnessActor extends IIActorRef<Object> {
                 return new ActionResult(true, "approved");
             }
             emit(ChatEvent.info("② 却下されました — 中止します"));
-            emit(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
-            return new ActionResult(false, "rejected");
+                return new ActionResult(false, "rejected");
         } catch (java.util.concurrent.TimeoutException e) {
             approvalRegistry.remove(promptId);
             emit(ChatEvent.error("承認待ちがタイムアウトしました"));
-            emit(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
-            return new ActionResult(false, "timeout");
+                return new ActionResult(false, "timeout");
         } catch (Exception e) {
             approvalRegistry.remove(promptId);
             Thread.currentThread().interrupt();
             return new ActionResult(false, "interrupted");
         }
+    }
+
+    // ── generic actions for user-written workflow YAML ───────────────────────
+
+    /**
+     * Sends the argument to Claude as one instruction turn. Always SUCCESS; the reply text is the
+     * action's result, so the next action can read it as {@code ${result}}.
+     */
+    @Action("send")
+    public ActionResult send(String args) {
+        String instruction = parseFirstArgument(args);
+        if (instruction == null || instruction.isBlank()) {
+            return new ActionResult(false, "send: empty instruction");
+        }
+        String reply = runTurn(instruction);
+        return new ActionResult(true, reply);
+    }
+
+    /**
+     * Condition gate: sends the argument as a question that must be answered YES or NO on the first
+     * line. SUCCESS when the first line of the reply starts with YES, FAILURE otherwise (including
+     * an empty reply), so the workflow falls through to the next transition from the same state.
+     */
+    @Action("check")
+    public ActionResult check(String args) {
+        String question = parseFirstArgument(args);
+        if (question == null || question.isBlank()) {
+            return new ActionResult(false, "check: empty question");
+        }
+        String reply = runTurn(question
+                + "\n\nAnswer on the first line with exactly YES or NO, then give the reason.");
+        boolean yes = firstLineStartsWithYes(reply);
+        emit(ChatEvent.info(yes ? "✔ check: YES" : "✘ check: NO"));
+        return new ActionResult(yes, yes ? "YES" : "NO");
+    }
+
+    /** True when the first non-empty line of the reply, ignoring markdown emphasis, starts with YES. */
+    static boolean firstLineStartsWithYes(String reply) {
+        if (reply == null) return false;
+        for (String line : reply.split("\\R")) {
+            String t = line.replaceAll("[*_`#>\\s]", "").toUpperCase();
+            if (t.isEmpty()) continue;
+            return t.startsWith("YES");
+        }
+        return false;
     }
 
     // ── internals ───────────────────────────────────────────────────────────

@@ -630,6 +630,12 @@ header h1[contenteditable]:focus {
     white-space: pre-wrap;
     word-break: break-word;
     color: var(--text-primary);
+    /* Show at most 3 lines; the title attribute carries the full text on hover. */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    line-clamp: 3;
+    overflow: hidden;
 }
 
 .queue-item .queue-auto {
@@ -718,8 +724,6 @@ header h1[contenteditable]:focus {
     border: 1px solid rgba(249, 226, 175, 0.3);
     border-left: 3px solid var(--accent-yellow);
     padding-left: 5px;
-}
-
 }
 
 /* Input area */
