@@ -1,3 +1,43 @@
+# Agent Loop tab and per-turn Turing Workflow for the openai-compat provider (2026-09-30)
+
+Spec: doc_SCIVICS002 quarkus-chat-ui/020_specs/110_AgentLoopTab_260930_oo01 (confirmed 2026-10-01, implemented).
+
+## Plan
+- [x] core: `TurnRunner` and `QueueSink` interfaces + `QueueItem` record; `HarnessLeash` takes a `TurnRunner`,
+      `QueueBridge` a `QueueSink`; the two quarkus-chat-ui implementations live in `ClaudeHarnessRunner`
+      (provider.sendPrompt with busy stripped; SSE queue_add). YAML, IIARs and BundledWorkflowsTest unchanged
+      (the test's ScriptedProvider becomes a scripted TurnRunner). This is what the later port to
+      chat-ui-with-audit-trail swaps (server-side PromptQueue; ChatSessionIIAR.sendPrompt/getResult)
+- [x] `plugin-openai-compat-agent`: `AgentTurn` (POJO) + `AgentTurnIIAR` (actions start/step/runTools/finish/stepCount),
+      `LlmCall` and `ToolCaller` interfaces with `OpenAiCompatClient` / MCP-HTTP implementations,
+      `TextToolCallParser` (ported from chat-ui-with-audit-trail), `AgentLoopWorkflowRunner`,
+      `AgentLoopExtensionImpl` (@ApplicationScoped, config chat-ui.agent-loop.*), bundled `agent-loop-react.yaml`
+- [x] `LlmProviderProducer`: inject `Instance<AgentLoopExtension>`, pass it for openai-compat only
+- [x] REST `AgentLoopResource`: GET /api/agent-loop, GET /workflows, GET /workflows/{name}, POST /workflow
+- [x] UI: 5th right-pane tab "Agent Loop" (select + Refresh + Use, read-only step boxes; note when not openai-compat)
+- [x] Unit tests: Interpreter-driven loop over scripted LlmCall/ToolCaller (tool then answer, step limit, cancel),
+      TextToolCallParserTest; E2E: tab renders in the e2e profile (openai-compat, no server needed for listing)
+- [x] rm -rf target && mvn install; live check against gpu-broker 28005 with the app's own /mcp fs tools
+- [x] README section; jar to ~/works under a new name + relink; commit; ask before push
+
+## Review
+- Live check on a disposable instance (port 28990, gpu-broker 28005, model qwen3.8-flash-next, own /mcp):
+  "list the files under quarkus-chat-ui" -> the model wrote <invoke name="list_directory">, the tool ran,
+  the answer came as one delta + one result(busy=false); the I/O log trace shows turn 1 with a tool step
+  and an llm step. An outer check-then-act YAML posted to run-yaml: harness.check ran the inner loop
+  (get_file_info -> YES), onlyIf took the act transition, harness.send answered DONE; the two inner
+  results reached the browser with busy=null and only the runner's terminal result had busy=false.
+- Unit: core 134 + plugin 8 tests; all modules `mvn install` green; E2E AgentLoopTabE2E, WorkflowQueueE2E,
+  QueueE2E green. Jar placed under a new name and quarkus-chat-ui-3.jar relinked; running 28020 untouched.
+- The I/O log turn number is now shared through IoLogStore.beginTurn()/currentTurn(), so ChatActor's
+  turnN/step1/llm and the loop's turnN/stepM/tool carry the same N.
+
+## Out of scope
+- Claude / Codex / claude-tmux providers (their loop is inside the CLI); the tab only shows a note there
+- Per-conversation loop selection (quarkus-chat-ui has one conversation); prompt-construction sub-workflow
+
+---
+
 # Workflow actors reworked against the POJO-actor anti-pattern documents (2026-09-30)
 
 ## Tasks

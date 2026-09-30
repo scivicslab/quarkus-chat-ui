@@ -434,3 +434,34 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
     tab-size: 2;
 }
 .wf-yaml:focus { outline: 1px solid var(--accent-blue, #a5b4fc); outline-offset: -1px; }
+
+/* ── Agent Loop tab (read-only step boxes of the inner-loop YAML) ──────────── */
+#al-list { padding: 8px; overflow: auto; }
+#al-status { color: var(--text-secondary, #8a8a8a); margin-left: auto; }
+.wf-box {
+    border: 1px solid var(--border-color, #2f2f2f);
+    border-radius: 6px;
+    margin: 0 0 8px 0;
+    background: var(--bg-secondary, #232323);
+    overflow: hidden;
+}
+.wf-box.wf-head { border-style: dashed; opacity: 0.95; }
+.wf-box-title {
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-blue, #a5b4fc);
+    background: var(--bg-tertiary, #1b1b1b);
+    border-bottom: 1px solid var(--border-color, #2f2f2f);
+}
+.wf-box-yaml {
+    margin: 0;
+    padding: 8px 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--text-primary, #e6e6e6);
+}
+.al-note { padding: 12px; color: var(--text-secondary, #8a8a8a); font-size: 13px; }

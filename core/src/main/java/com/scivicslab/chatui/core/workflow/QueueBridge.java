@@ -1,7 +1,5 @@
 package com.scivicslab.chatui.core.workflow;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 
 import java.util.function.Consumer;
@@ -9,28 +7,28 @@ import java.util.function.Consumer;
 /**
  * Puts items into the browser's prompt queue on behalf of a running workflow.
  *
- * <p>The prompt queue is owned by the browser (localStorage), so nothing server-side is touched:
- * each method emits one {@code queue_add} event whose content is the queue item as JSON, and the
- * browser appends it. {@link QueueBridgeIIAR} wraps this as the workflow actor {@code queue}.</p>
+ * <p>Where the queue lives is the {@link QueueSink}'s business: in quarkus-chat-ui it is the browser's
+ * and the sink sends a {@code queue_add} event; elsewhere it may be a server-side actor.
+ * {@link QueueBridgeIIAR} wraps this as the workflow actor {@code queue}.</p>
  */
 public class QueueBridge {
 
+    private final QueueSink sink;
     private final Consumer<ChatEvent> emitter;
-    private final ObjectMapper mapper;
     private final String title;
     private final String yaml;
     private final String input;
 
     /**
-     * @param emitter where {@code queue_add} events go (normally the SSE actor)
-     * @param mapper  JSON mapper for building the item
+     * @param sink    where queue items go
+     * @param emitter where the one-line notices go (the SSE actor, or a list in tests)
      * @param title   display title of the running workflow (shown in the queue list)
      * @param yaml    the running workflow's YAML text, re-sent verbatim by {@link #requeue}
      * @param input   the running workflow's input JSON, re-sent verbatim by {@link #requeue}
      */
-    public QueueBridge(Consumer<ChatEvent> emitter, ObjectMapper mapper, String title, String yaml, String input) {
+    public QueueBridge(QueueSink sink, Consumer<ChatEvent> emitter, String title, String yaml, String input) {
+        this.sink = sink;
         this.emitter = emitter;
-        this.mapper = mapper;
         this.title = title == null ? "" : title;
         this.yaml = yaml == null ? "" : yaml;
         this.input = input == null ? "" : input;
@@ -38,13 +36,7 @@ public class QueueBridge {
 
     /** Puts this same workflow (same YAML, same input) at the end of the queue as an auto item. */
     public void requeue() {
-        ObjectNode item = mapper.createObjectNode();
-        item.put("kind", "workflow");
-        item.put("text", title);
-        item.put("yaml", yaml);
-        item.put("input", input);
-        item.put("auto", true);
-        emitter.accept(ChatEvent.queueAdd(item.toString()));
+        sink.add(QueueItem.workflow(title, yaml, input));
         emitter.accept(ChatEvent.info("↻ Workflow re-enqueued: " + title));
     }
 
@@ -57,11 +49,7 @@ public class QueueBridge {
         if (text == null || text.isBlank()) {
             throw new IllegalArgumentException("empty prompt");
         }
-        ObjectNode item = mapper.createObjectNode();
-        item.put("kind", "prompt");
-        item.put("text", text);
-        item.put("auto", true);
-        emitter.accept(ChatEvent.queueAdd(item.toString()));
+        sink.add(QueueItem.prompt(text));
         emitter.accept(ChatEvent.info("＋ Prompt enqueued by workflow"));
     }
 }

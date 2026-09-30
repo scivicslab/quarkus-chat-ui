@@ -1,0 +1,59 @@
+name: agent-loop-react
+description: |
+  The Local LLM's turn: 0 -> think -> (act -> think)* -> end. One model call per "think"; the model
+  asks for tools with <invoke> blocks or gives the final answer. agent.step answers TOOL or ANSWER
+  as its message; the YAML stores it and decides with onlyIf (AgentLoopTab_260930_oo01).
+steps:
+  - states: ["0", "think"]
+    label: start
+    actions:
+      - actor: agent
+        method: start
+
+  - states: ["think", "end"]
+    label: step-limit
+    note: "The turn may make at most this many model calls; the number is this YAML's, not Java's."
+    actions:
+      - actor: agent
+        method: stepCount
+      - actor: this
+        method: putJson
+        arguments: {path: agent.steps, value: "jexl: result"}
+      - actor: this
+        method: onlyIf
+        arguments: "jexl: state.getInt('agent.steps', 0) >= 30"
+      - actor: agent
+        method: finish
+
+  - states: ["think", "act"]
+    label: think
+    note: "One model call. TOOL when the reply holds an <invoke> block, ANSWER otherwise."
+    actions:
+      - actor: agent
+        method: step
+      - actor: this
+        method: putJson
+        arguments: {path: agent.last, value: "jexl: result"}
+      - actor: this
+        method: onlyIf
+        arguments: "jexl: state.getString('agent.last') == 'TOOL'"
+
+  - states: ["think", "end"]
+    label: answer
+    note: "The reply was the final answer (or the step could not run): send it and end the turn."
+    actions:
+      - actor: agent
+        method: finish
+
+  - states: ["act", "think"]
+    label: run-tools
+    actions:
+      - actor: agent
+        method: runTools
+        arguments: {maxObservationChars: 20000}
+
+  - states: ["!end", "end"]
+    actions:
+      - actor: this
+        method: print
+        arguments: "agent-loop-react ended unexpectedly"

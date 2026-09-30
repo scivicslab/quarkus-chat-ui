@@ -7,7 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <!-- chat-ui stylesheet first (pristine), then the shell overrides/additions. -->
     <link rel="stylesheet" href="styles.css?v=34">
-    <link rel="stylesheet" href="console.css?v=2">
+    <link rel="stylesheet" href="console.css?v=3">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -140,6 +140,7 @@
                 <button class="rtab-btn" data-tab="actors">Actors</button>
                 <button class="rtab-btn" data-tab="syslog">System Log</button>
                 <button class="rtab-btn" data-tab="workflow">Workflow</button>
+                <button class="rtab-btn" data-tab="agentloop">Agent Loop</button>
                 <!-- Add new feature tabs here. -->
             </div>
 
@@ -204,6 +205,20 @@
                     <textarea id="wf-yaml" class="wf-yaml" spellcheck="false"
                               placeholder="Turing Workflow YAML (actors: harness, queue, out, calc, list, str, interpreter)"></textarea>
                 </section>
+
+                <!-- The inner loop: how the openai-compat provider answers one prompt (AgentLoopTab_260930_oo01).
+                     Read-only step boxes of the YAML in effect; Use switches to another bundled YAML. -->
+                <section id="tab-agentloop" class="rtab-content">
+                    <div class="tab-toolbar">
+                        <label class="tab-auto" id="al-select-label">Loop:
+                            <select id="al-select"></select>
+                        </label>
+                        <button id="al-refresh" type="button">Refresh</button>
+                        <button id="al-use" type="button" title="Run the next turn with the selected loop">Use</button>
+                        <span id="al-status"></span>
+                    </div>
+                    <div id="al-list"></div>
+                </section>
             </div>
         </div>
     </div>
@@ -240,6 +255,6 @@
 
     <!-- chat-ui application script (unchanged), then the shell script. -->
     <script src="app.js?v=43"></script>
-    <script src="console.js?v=5"></script>
+    <script src="console.js?v=6"></script>
 </body>
 </html>

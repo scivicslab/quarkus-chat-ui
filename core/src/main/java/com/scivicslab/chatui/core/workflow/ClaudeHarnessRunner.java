@@ -154,10 +154,12 @@ public class ClaudeHarnessRunner {
             putVariables(interpreterActor, vars);
             putParamDefaults(interpreterActor, yaml, vars);
 
+            TurnRunner turns = new ProviderTurnRunner(provider, emitter, ioLog);
+            QueueSink queue = new SseQueueSink(emitter, mapper);
             system.addIIActor(new HarnessLeashIIAR("harness",
-                    new HarnessLeash(provider, emitter, ioLog, mapper, input, approvalRegistry), system));
+                    new HarnessLeash(turns, emitter, mapper, input, approvalRegistry), system));
             system.addIIActor(new QueueBridgeIIAR("queue",
-                    new QueueBridge(emitter, mapper, title, yaml, input), system));
+                    new QueueBridge(queue, emitter, title, yaml, input), system));
 
             try (InputStream in = new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8))) {
                 interpreter.readYaml(in);

@@ -11,9 +11,9 @@
   <artifactId>chat-ui-plugin-openai-compat-agent</artifactId>
 
   <description>
-    Optional plugin that adds a client-side agent loop to the openai-compat provider.
-    Enables tool calling for Local LLMs (vLLM, Ollama, etc.) via MCP servers.
-    Activate with chat-ui.agent-loop.enabled=true and chat-ui.agent-loop.mcp-urls=...
+    The openai-compat provider's agent loop as a per-turn Turing Workflow: the model asks for tools
+    with text invoke blocks, the tools are MCP servers (this instance's own /mcp by default), and the
+    loop's shape is the bundled agent-loop-react.yaml shown in the Agent Loop tab.
   </description>
 
   <dependencies>
@@ -28,6 +28,14 @@
     <dependency>
       <groupId>org.json</groupId>
       <artifactId>json</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.scivicslab</groupId>
+      <artifactId>turing-workflow</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-rest-jackson</artifactId>
     </dependency>
     <dependency>
       <groupId>io.quarkus</groupId>

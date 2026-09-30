@@ -222,6 +222,25 @@ Endpoints: `POST /api/workflows/run-yaml` (`{yaml, input}`), `POST /api/workflow
 `GET /api/workflows`, `GET /api/workflows/{name}`. A running workflow enqueues through the SSE event
 `queue_add`, whose content is the queue item JSON.
 
+## Agent Loop for the Local LLM provider
+
+With `-Dchat-ui.provider=openai-compat`, one prompt is answered by an inner loop that is itself a
+Turing Workflow, `agent-loop-react.yaml` in `plugin-openai-compat-agent`: the model is called, and
+either it asks for tools by writing `<invoke name="...">` blocks in its reply (the loop runs them
+through MCP and calls the model again) or its reply is the final answer. The right pane's **Agent
+Loop** tab shows the YAML in effect as step boxes and lets you switch to another bundled loop with
+**Use**; the switch applies from the next turn. With the Claude or Codex providers the tab only says
+that the loop runs inside the CLI process.
+
+Tools come from MCP servers. `chat-ui.agent-loop.mcp-urls` (comma-separated) names them; when it is
+unset the instance's own `/mcp` is used, which serves the `plugin-fs-tools` tools (`read_file`,
+`write_file`, `list_directory`, `search_files`, `get_file_info`, `read_document`) within
+`chat-ui.filesystem.allowed-dirs`. Intermediate replies and tool results are shown as thinking in the
+chat pane and recorded in the I/O log as `turnN/stepM/tool`; only the final answer is the turn's reply.
+
+A workflow queued from the Workflow tab uses the same inner loop: each `harness.send` or
+`harness.check` is one turn of it.
+
 ## Testing
 
 ### Test types and naming

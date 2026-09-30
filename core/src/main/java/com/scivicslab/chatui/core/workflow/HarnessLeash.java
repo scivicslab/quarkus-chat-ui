@@ -2,9 +2,6 @@ package com.scivicslab.chatui.core.workflow;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.scivicslab.chatui.core.iolog.IoLogStore;
-import com.scivicslab.chatui.core.provider.LlmProvider;
-import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 
 import java.io.IOException;
@@ -17,14 +14,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
- * The leash: drives the LLM provider one constrained turn at a time. Each public method sends at
- * most one instruction through {@link LlmProvider#sendPrompt}, waits for the turn's result, forwards
- * the turn's events to the browser, records the turn in the I/O log, and returns what the workflow
- * needs to decide the next step (the reply text, a verdict, an item count).
+ * The leash: drives the conversation one constrained turn at a time. Each public method sends at
+ * most one instruction through a {@link TurnRunner}, waits for the reply, and returns what the
+ * workflow needs to decide the next step (the reply text, a verdict, an item count). Where a turn
+ * goes (an LLM provider, a prompt queue) is the runner's business, not this class's.
  *
  * <p>This is a plain object. {@link HarnessLeashIIAR} wraps it as the workflow actor {@code harness}
  * and turns these return values and exceptions into action results. A method here throws when it
@@ -34,12 +29,9 @@ import java.util.logging.Logger;
  */
 public class HarnessLeash {
 
-    private static final Logger LOG = Logger.getLogger(HarnessLeash.class.getName());
-
-    private final LlmProvider provider;
-    /** Where the browser-bound events go (the SSE actor, or a list in tests). */
+    private final TurnRunner turns;
+    /** Where the browser-bound notices go (the SSE actor, or a list in tests). */
     private final Consumer<ChatEvent> emitter;
-    private final IoLogStore ioLog;
     private final ObjectMapper mapper;
     /** Raw run input (JSON): {@code {"path": "<checklist file>", "target": "<task>", "maxRefines": n}}. */
     private final String runInput;
@@ -50,8 +42,6 @@ public class HarnessLeash {
     private String checklistPath = "";
     private String target = "";
     private final List<String> items = new ArrayList<>();
-    private long ioSession = -1;
-    private int turn = 0;
 
     // Explain -> judge -> implement pipeline state
     private String plan = "";
@@ -59,29 +49,26 @@ public class HarnessLeash {
     private int refineCount = 0;
     private int maxRefines = 2;
 
-    public HarnessLeash(LlmProvider provider, Consumer<ChatEvent> emitter, IoLogStore ioLog,
+    public HarnessLeash(TurnRunner turns, Consumer<ChatEvent> emitter,
                         ObjectMapper mapper, String runInput, WorkflowApprovalRegistry approvalRegistry) {
-        this.provider = provider;
+        this.turns = turns;
         this.emitter = emitter;
-        this.ioLog = ioLog;
         this.mapper = mapper;
         this.runInput = runInput;
         this.approvalRegistry = approvalRegistry;
     }
 
-    /** Reads the run input and opens the I/O-log session. No turn is sent. */
+    /** Reads the run input and resets the per-run state. No turn is sent. */
     public void start() throws IOException {
         JsonNode in = (runInput == null || runInput.isBlank())
                 ? mapper.createObjectNode() : mapper.readTree(runInput);
         this.checklistPath = in.path("path").asText("");
         this.target = in.path("target").asText("");
-        this.turn = 0;
         this.maxRefines = in.path("maxRefines").asInt(2);
         this.refineCount = 0;
         this.plan = "";
         this.judgeFeedback = "";
         this.items.clear();
-        this.ioSession = (ioLog != null) ? ioLog.ensureSession() : -1;
         emit(ChatEvent.info("▶ Workflow started"
                 + (checklistPath.isBlank() ? "" : " — checklist: " + checklistPath)));
     }
@@ -297,57 +284,9 @@ public class HarnessLeash {
 
     // ── internals ───────────────────────────────────────────────────────────
 
-    /**
-     * Sends one instruction, forwards the turn's events to the browser, records the turn, and
-     * returns the reply text.
-     *
-     * @throws IllegalStateException when the provider failed the turn
-     */
+    /** Sends one instruction as one turn and returns the reply. Throws when the turn could not run. */
     private String runTurn(String instruction) {
-        int turnNo = ++turn;
-        StringBuilder assistant = new StringBuilder();
-        StringBuilder thinking = new StringBuilder();
-        Consumer<ChatEvent> turnEmitter = ev -> {
-            if ("delta".equals(ev.type()) && ev.content() != null) {
-                assistant.append(ev.content());
-            } else if ("thinking".equals(ev.type()) && ev.content() != null) {
-                thinking.append(ev.content());
-            }
-            // The browser shows the turn live. The turn's own busy=false is dropped: the run is
-            // still going, and only the runner's terminal result may end the browser's busy state.
-            emit("result".equals(ev.type()) ? ev.withoutBusy() : ev);
-        };
-        try {
-            // Blocks until the turn's result event: the next workflow step waits for the reply.
-            provider.sendPrompt(instruction, provider.getCurrentModel(), turnEmitter, ProviderContext.simple(null));
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "harness turn failed", e);
-            emit(ChatEvent.error("turn failed: " + e.getMessage()));
-            throw new IllegalStateException("turn failed: " + e.getMessage(), e);
-        }
-        recordTurn(turnNo, instruction, assistant.toString(), thinking.toString());
-        return assistant.toString();
-    }
-
-    /** Records one turn into the H2 I/O log in the marker format the Sessions tab reads. */
-    private void recordTurn(int turnNo, String prompt, String assistant, String thinkingText) {
-        if (ioLog == null || ioSession < 0) return;
-        try {
-            String requestJson = new org.json.JSONObject()
-                    .put("messages", new org.json.JSONArray().put(
-                            new org.json.JSONObject().put("role", "user").put("content", prompt)))
-                    .toString();
-            StringBuilder m = new StringBuilder();
-            m.append("REQUEST:\n").append(requestJson);
-            m.append("\n\nRESPONSE:\n").append(assistant == null ? "" : assistant);
-            if (thinkingText != null && !thinkingText.isBlank()) {
-                m.append("\n\nREASONING:\n").append(thinkingText);
-            }
-            m.append("\n\nUSAGE: promptTokens=0 completionTokens=0");
-            ioLog.record(ioSession, "harness", "turn" + turnNo + "/step1/llm", m.toString());
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "harness I/O log record failed", e);
-        }
+        return turns.run(instruction);
     }
 
     private void emit(ChatEvent ev) {

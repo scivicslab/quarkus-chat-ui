@@ -310,7 +310,7 @@ public class ChatActor {
         recordHistory("user", prompt);
         // Open (lazily) the conversation's I/O-log session and number this turn for the Sessions tab.
         final long ioSession = (ioLog != null) ? ioLog.ensureSession() : -1;
-        final int ioTurnNo = ++ioTurn;
+        final int ioTurnNo = (ioLog != null) ? ioLog.beginTurn() : ++ioTurn;
         if (resultKey != null) {
             pendingResultKeys.remove(resultKey);
             activeResultKey = resultKey;
@@ -462,7 +462,7 @@ public class ChatActor {
      */
     public void recordAutonomousTurn(long ioSession, String assistant, String thinking) {
         recordHistory("assistant", assistant);
-        recordTurnIo(ioSession, ++ioTurn, "(autonomous continuation)", assistant, thinking);
+        recordTurnIo(ioSession, (ioLog != null) ? ioLog.beginTurn() : ++ioTurn, "(autonomous continuation)", assistant, thinking);
     }
 
     /**

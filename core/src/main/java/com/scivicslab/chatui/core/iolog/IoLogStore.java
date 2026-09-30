@@ -115,6 +115,22 @@ public class IoLogStore {
         return sessionId;
     }
 
+    private int turn = 0;
+
+    /**
+     * Starts the next conversation turn of the current session and returns its number (1-based).
+     * Everyone who records {@code turnN/stepM/...} labels takes N from here, so a turn the
+     * ChatActor started and the steps an agent loop or a workflow recorded inside it share one N.
+     */
+    public synchronized int beginTurn() {
+        return ++turn;
+    }
+
+    /** The number of the turn most recently started by {@link #beginTurn}; 0 before the first. */
+    public synchronized int currentTurn() {
+        return turn;
+    }
+
     /** Ends the current conversation session (called on "new conversation" / clear). */
     public synchronized void resetSession() {
         if (store != null && sessionId >= 0) {
@@ -125,6 +141,7 @@ public class IoLogStore {
             }
         }
         sessionId = -1;
+        turn = 0;
     }
 
     /** The shared store (read side for the Sessions view). May be null if logging is disabled. */

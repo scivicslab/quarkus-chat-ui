@@ -62,6 +62,7 @@
             if (tab === 'logdb') ioOnShow();
             if (tab === 'syslog') refreshLogs();
             if (tab === 'workflow') wfOnShow();
+            if (tab === 'agentloop') alOnShow();
         });
     }
 
@@ -876,6 +877,126 @@
         window.chatUiWorkflow = { open: wfOpen };
     }
 
+    // ── Agent Loop tab: the inner-loop YAML the openai-compat provider runs per turn ────────
+    function alStatus(msg) {
+        var s = document.getElementById('al-status');
+        if (s) s.textContent = msg || '';
+    }
+
+    // Splits a workflow YAML into a preamble and one item per top-level step ("  - " lines). Display only.
+    function alSplitSteps(yaml) {
+        var lines = (yaml || '').split('\n');
+        var preamble = [], steps = [], cur = null;
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (/^  - /.test(line)) {
+                if (cur) steps.push(cur.join('\n'));
+                cur = [line];
+            } else if (cur) {
+                cur.push(line);
+            } else {
+                preamble.push(line);
+            }
+        }
+        if (cur) steps.push(cur.join('\n'));
+        return { preamble: preamble.join('\n').replace(/\s+$/, ''), steps: steps };
+    }
+
+    function alStepTitle(text, idx) {
+        var m = text.match(/(^|\n)\s*-?\s*states:\s*(.+)/);
+        var states = m ? m[2].trim() : '';
+        return (states ? states + '   ' : '') + '# step ' + idx;
+    }
+
+    function alRenderBox(parent, title, body, kind) {
+        var box = document.createElement('div');
+        box.className = 'wf-box' + (kind ? ' wf-' + kind : '');
+        var h = document.createElement('div');
+        h.className = 'wf-box-title';
+        h.textContent = title;
+        var pre = document.createElement('pre');
+        pre.className = 'wf-box-yaml';
+        pre.textContent = body;
+        box.appendChild(h);
+        box.appendChild(pre);
+        parent.appendChild(box);
+    }
+
+    function alRender(yaml) {
+        var list = document.getElementById('al-list');
+        if (!list) return;
+        list.textContent = '';
+        var parts = alSplitSteps(yaml);
+        if (parts.preamble) alRenderBox(list, 'workflow header', parts.preamble, 'head');
+        parts.steps.forEach(function (s, i) { alRenderBox(list, alStepTitle(s, i), s, 'step'); });
+        alStatus(parts.steps.length + ' step(s)');
+    }
+
+    function alLoad(name) {
+        if (!name) return;
+        fetch('/api/agent-loop/workflows/' + encodeURIComponent(name))
+            .then(function (r) { return r.json(); })
+            .then(function (d) { if (d && d.yaml) alRender(d.yaml); else alStatus('not found'); })
+            .catch(function (e) { alStatus('error: ' + e.message); });
+    }
+
+    // Reads the loop status and the catalog every time the tab is shown: another turn may have
+    // switched the loop, and the status says whether this provider has an inner loop at all.
+    function alOnShow() {
+        var sel = document.getElementById('al-select');
+        var list = document.getElementById('al-list');
+        var label = document.getElementById('al-select-label');
+        var use = document.getElementById('al-use');
+        if (!sel || !list) return;
+        fetch('/api/agent-loop').then(function (r) { return r.json(); }).then(function (st) {
+            if (!st || !st.enabled) {
+                if (label) label.style.display = 'none';
+                if (use) use.style.display = 'none';
+                list.textContent = '';
+                var note = document.createElement('div');
+                note.className = 'al-note';
+                note.textContent = 'provider=' + (st ? st.provider : '?')
+                    + ': the loop that answers one prompt runs inside the CLI process; there is no inner-loop YAML here.';
+                list.appendChild(note);
+                alStatus('');
+                return;
+            }
+            if (label) label.style.display = '';
+            if (use) use.style.display = '';
+            fetch('/api/agent-loop/workflows').then(function (r) { return r.json(); }).then(function (arr) {
+                sel.textContent = '';
+                var current = '';
+                (arr || []).forEach(function (w) {
+                    var o = document.createElement('option');
+                    o.value = w.name;
+                    o.textContent = (w.current ? '\u25cf ' : '') + (w.title || w.name);
+                    if (w.current) current = w.name;
+                    sel.appendChild(o);
+                });
+                if (current) sel.value = current;
+                alLoad(sel.value);
+            });
+        }).catch(function (e) { alStatus('error: ' + e.message); });
+    }
+
+    function initAgentLoop() {
+        var sel = document.getElementById('al-select');
+        if (sel) sel.addEventListener('change', function () { alLoad(sel.value); });
+        var refresh = document.getElementById('al-refresh');
+        if (refresh) refresh.addEventListener('click', alOnShow);
+        var use = document.getElementById('al-use');
+        if (use) use.addEventListener('click', function () {
+            if (!sel || !sel.value) return;
+            fetch('/api/agent-loop/workflow', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: sel.value })
+            }).then(function (r) { return r.json(); })
+              .then(function (j) { alStatus(j.type === 'ok' ? ('next turn runs ' + j.workflow) : ('error: ' + (j.error || 'failed'))); alOnShow(); })
+              .catch(function (e) { alStatus('error: ' + e.message); });
+        });
+    }
+
     function initConfig() {
         cfgLoad();
         var t = document.getElementById('cfg-temp');
@@ -894,6 +1015,7 @@
         initIo();
         initConfig();
         initWorkflow();
+        initAgentLoop();
         ioOnShow();   // Sessions is the default active tab; load it on startup.
     });
 })();

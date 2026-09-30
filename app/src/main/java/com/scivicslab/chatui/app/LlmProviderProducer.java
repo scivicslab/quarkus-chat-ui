@@ -4,9 +4,12 @@ import com.scivicslab.chatui.claude.ClaudeLlmProvider;
 import com.scivicslab.chatui.codex.CodexLlmProvider;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.tmux.TmuxLlmProvider;
+import com.scivicslab.chatui.openaicompat.AgentLoopExtension;
 import com.scivicslab.chatui.openaicompat.OpenAiCompatProvider;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.inject.Produces;
+import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.util.Arrays;
@@ -24,6 +27,10 @@ import java.util.logging.Logger;
 public class LlmProviderProducer {
 
     private static final Logger LOG = Logger.getLogger(LlmProviderProducer.class.getName());
+
+    /** The per-turn agent loop for openai-compat, when plugin-openai-compat-agent is on the classpath. */
+    @Inject
+    Instance<AgentLoopExtension> agentLoop;
 
     @ConfigProperty(name = "chat-ui.provider", defaultValue = "claude")
     String providerName;
@@ -75,7 +82,9 @@ public class LlmProviderProducer {
                         .filter(s -> !s.isBlank())
                         .toList();
                 String model = defaultModel.filter(s -> !s.isBlank()).orElse("default");
-                yield new OpenAiCompatProvider(urls, model, null);
+                AgentLoopExtension loop = agentLoop.isResolvable() ? agentLoop.get() : null;
+            LOG.info("openai-compat agent loop: " + (loop == null ? "absent" : loop.getClass().getSimpleName()));
+            yield new OpenAiCompatProvider(urls, model, loop);
             }
             default -> throw new IllegalStateException(
                 "Unknown provider: '" + providerName + "'. Valid values: claude, claude-tmux, codex, openai-compat");
