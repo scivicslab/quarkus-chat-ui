@@ -1,9 +1,10 @@
 name: check-then-act
 description: |
   Template for a conditional, self-re-enqueuing workflow. It asks Claude one question whose answer
-  must start with YES or NO. On YES the action is sent; on NO the workflow puts itself back at the
-  end of the prompt queue (after a delay) so the check is repeated when its turn comes again.
-    - harness.check:  one turn; SUCCESS when the reply's first line starts with YES, FAILURE otherwise.
+  must start with YES or NO, stores the answer, and acts only on YES. On NO the workflow puts itself
+  back at the end of the prompt queue (after a delay) so the check is repeated when its turn comes.
+    - harness.check:  one turn; answers YES or NO (the message). It never fails on NO: the YAML
+                      stores the answer with this.putJson and decides with this.onlyIf.
     - harness.send:   one instruction turn (the action to take when the condition holds).
     - queue.requeue:  re-enqueue this same workflow (same YAML and input); the step's delay
                       (milliseconds) spaces the retries.
@@ -32,15 +33,23 @@ steps:
 
   - states: ["check", "act"]
     label: check
-    note: "SUCCESS (YES) -> act; FAILURE (NO) -> the next transition from 'check' is tried."
+    note: |
+      One YES/NO turn. The answer is stored as check.answer; only YES takes this transition.
+      On NO the state stays "check" and the next transition (requeue) is taken.
     actions:
       - actor: harness
         method: check
         arguments: "jexl: state.getString('condition')"
+      - actor: this
+        method: putJson
+        arguments: {path: check.answer, value: "jexl: result"}
+      - actor: this
+        method: onlyIf
+        arguments: "jexl: state.getString('check.answer') == 'YES'"
 
   - states: ["check", "end"]
     label: requeue
-    note: "Condition not met: wait, then put this workflow back at the end of the queue."
+    note: "The answer was NO: wait, then put this workflow back at the end of the queue."
     delay: 60000
     actions:
       - actor: queue
@@ -48,7 +57,7 @@ steps:
 
   - states: ["act", "end"]
     label: act
-    note: "Condition met: send the action as one turn."
+    note: "The answer was YES: send the action as one turn."
     actions:
       - actor: harness
         method: send
@@ -57,6 +66,6 @@ steps:
   - states: ["!end", "end"]
     note: "Safety net: any unexpected state ends the workflow."
     actions:
-      - actor: out
-        method: error
-        arguments: {message: "check-then-act workflow ended unexpectedly"}
+      - actor: this
+        method: print
+        arguments: "check-then-act workflow ended unexpectedly"

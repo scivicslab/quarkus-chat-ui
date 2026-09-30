@@ -1,3 +1,26 @@
+# Workflow actors reworked against the POJO-actor anti-pattern documents (2026-09-30)
+
+## Tasks
+- [x] `harness` and `queue` are plain objects (`HarnessLeash`, `QueueBridge`) wrapped by `IIActorRef`
+      adapters (`HarnessLeashIIAR`, `QueueBridgeIIAR`) that hold only `@Action` plumbing
+      (ActorSuffixAndOwnedActorRef_260722_oo01)
+- [x] Data facts are action messages, not failures: `check` → YES/NO, `judge` → PASS/FAIL,
+      `awaitApproval` → APPROVED/REJECTED/TIMEOUT, `loadChecklist` → item count; the YAML stores
+      them with `this.putJson` and gates with `this.onlyIf` (ExitConditionRidingOnAFailure_260914_oo01)
+- [x] Catch-alls use `this.print`; no auto-created `out` (LookupThatCreates_260914_oo01)
+- [x] All four bundled YAMLs rewritten; the checklist framing turn moved from `start` into doc-check's
+      own conditional first step (it was sent in every pipeline, with checklist wording)
+- [x] `ClaudeHarnessRunner.runWorkflow` extracted so tests run the bundled YAMLs through the real assembly
+- [x] Tests: `BundledWorkflowsTest` (doc-check loop and framing, judge FAIL→PASS and refine budget,
+      check-then-act YES/NO, busy stripping, queue.enqueue), `ClaudeHarnessRunnerTest`
+- [x] README actions table and template; spec doc `TwoTilesOneRepository_260930_oo01` rewritten
+      against AntiPattern_260921_oo01
+
+## Review
+- see the commit message
+
+---
+
 # Workflow as a queue item (3.0.0-SNAPSHOT)
 
 ## Problem

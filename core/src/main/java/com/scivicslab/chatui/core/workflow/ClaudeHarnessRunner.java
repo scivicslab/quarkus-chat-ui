@@ -31,8 +31,9 @@ import java.util.logging.Logger;
 
 /**
  * Runs a "leash" workflow in-process: it builds a per-run Turing Workflow {@link IIActorSystem} with
- * the engine's built-in actors plus the chat-ui actors {@code harness} ({@link ClaudeHarnessActor})
- * and {@code queue} ({@link QueueBridgeActor}), loads the workflow YAML, and runs it to completion on
+ * the engine's built-in actors plus the chat-ui actors {@code harness} ({@link HarnessLeash} wrapped by
+ * {@link HarnessLeashIIAR}) and {@code queue} ({@link QueueBridge} wrapped by {@link QueueBridgeIIAR}),
+ * loads the workflow YAML, and runs it to completion on
  * a virtual thread.
  *
  * <p>The YAML comes either from the classpath ({@code /workflows/<name>.yaml}, the bundled
@@ -107,6 +108,30 @@ public class ClaudeHarnessRunner {
             return;
         }
         Consumer<ChatEvent> emitter = ev -> sseRef.tell(a -> a.emit(ev));
+        try {
+            ActionResult result = runWorkflow(title, yaml, inputJson, provider, emitter, ioLog, mapper,
+                    approvalRegistry);
+            if (!result.isSuccess()) {
+                emitter.accept(ChatEvent.error("workflow failed: " + result.getResult()));
+            }
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Workflow run error", e);
+            emitter.accept(ChatEvent.error("workflow error: " + e.getMessage()));
+        } finally {
+            // The single terminal event: the browser ends its "busy" turn and advances its queue.
+            emitter.accept(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
+        }
+    }
+
+    /**
+     * Assembles the per-run actor system and runs the YAML to its end. This is the whole run except
+     * the terminal result event, so tests drive the bundled YAMLs through it with a scripted provider.
+     *
+     * @return the interpreter's final result
+     */
+    static ActionResult runWorkflow(String title, String yaml, String inputJson, LlmProvider provider,
+                                    Consumer<ChatEvent> emitter, IoLogStore ioLog, ObjectMapper mapper,
+                                    WorkflowApprovalRegistry approvalRegistry) throws Exception {
         String input = inputJson == null ? "" : inputJson;
         IIActorSystem system = new IIActorSystem("workflow-" + title);
         try {
@@ -120,7 +145,7 @@ public class ClaudeHarnessRunner {
             MultiplexerAccumulator mux = new MultiplexerAccumulator();
             mux.addTarget(new ConsoleAccumulator());
             system.addIIActor(new MultiplexerAccumulatorIIAR("log", mux, system));
-            Map<String, String> vars = varsFromInput(input);
+            Map<String, String> vars = varsFromInput(mapper, input);
             system.addIIActor(new VarsActor(system, vars));
             InterpreterIIAR interpreterActor = new InterpreterIIAR("interpreter", interpreter, system);
             interpreter.setSelfActorRef(interpreterActor);
@@ -129,26 +154,18 @@ public class ClaudeHarnessRunner {
             putVariables(interpreterActor, vars);
             putParamDefaults(interpreterActor, yaml, vars);
 
-            system.addIIActor(new ClaudeHarnessActor(
-                    "harness", provider, emitter, ioLog, system, mapper, input, approvalRegistry));
-            system.addIIActor(new QueueBridgeActor("queue", system, emitter, mapper, title, yaml, input));
+            system.addIIActor(new HarnessLeashIIAR("harness",
+                    new HarnessLeash(provider, emitter, ioLog, mapper, input, approvalRegistry), system));
+            system.addIIActor(new QueueBridgeIIAR("queue",
+                    new QueueBridge(emitter, mapper, title, yaml, input), system));
 
             try (InputStream in = new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8))) {
                 interpreter.readYaml(in);
             }
-
-            ActionResult result = interpreter.runUntilEnd(MAX_ITERATIONS);
-            if (!result.isSuccess()) {
-                emitter.accept(ChatEvent.error("workflow failed: " + result.getResult()));
-            }
-        } catch (Exception e) {
-            LOG.log(Level.SEVERE, "Workflow run error", e);
-            emitter.accept(ChatEvent.error("workflow error: " + e.getMessage()));
+            return interpreter.runUntilEnd(MAX_ITERATIONS);
         } finally {
             system.terminateIIActors();
             system.terminate();
-            // The single terminal event: the browser ends its "busy" turn and advances its queue.
-            emitter.accept(ChatEvent.result(provider.getSessionId(), 0.0, 0L, provider.getCurrentModel(), false));
         }
     }
 
@@ -185,6 +202,10 @@ public class ClaudeHarnessRunner {
 
     /** Top-level string/number/boolean fields of the input JSON become workflow variables. */
     Map<String, String> varsFromInput(String inputJson) {
+        return varsFromInput(mapper, inputJson);
+    }
+
+    static Map<String, String> varsFromInput(ObjectMapper mapper, String inputJson) {
         Map<String, String> vars = new HashMap<>();
         if (inputJson == null || inputJson.isBlank()) return vars;
         try {

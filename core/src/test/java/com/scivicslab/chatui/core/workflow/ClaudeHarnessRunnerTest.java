@@ -102,12 +102,12 @@ class ClaudeHarnessRunnerTest {
     @Test
     @DisplayName("check: only a first line starting with YES counts, markdown emphasis ignored")
     void firstLineStartsWithYes() {
-        assertTrue(ClaudeHarnessActor.firstLineStartsWithYes("YES\nbecause"));
-        assertTrue(ClaudeHarnessActor.firstLineStartsWithYes("\n**Yes** — the jar exists"));
-        assertTrue(ClaudeHarnessActor.firstLineStartsWithYes("yes."));
-        assertFalse(ClaudeHarnessActor.firstLineStartsWithYes("NO\nYES later"));
-        assertFalse(ClaudeHarnessActor.firstLineStartsWithYes("The answer is YES"));
-        assertFalse(ClaudeHarnessActor.firstLineStartsWithYes(""));
-        assertFalse(ClaudeHarnessActor.firstLineStartsWithYes(null));
+        assertTrue(HarnessLeash.firstLineStartsWith("YES\nbecause", "YES"));
+        assertTrue(HarnessLeash.firstLineStartsWith("\n**Yes** — the jar exists", "YES"));
+        assertTrue(HarnessLeash.firstLineStartsWith("yes.", "YES"));
+        assertFalse(HarnessLeash.firstLineStartsWith("NO\nYES later", "YES"));
+        assertFalse(HarnessLeash.firstLineStartsWith("The answer is YES", "YES"));
+        assertFalse(HarnessLeash.firstLineStartsWith("", "YES"));
+        assertFalse(HarnessLeash.firstLineStartsWith(null, "YES"));
     }
 }

@@ -10,31 +10,61 @@ description: |
   exhausted (the engine falls through to finish).
 steps:
   - states: ["0", "load"]
+    label: start-with-target
+    note: |
+      When the run input names a target: parse the input, open the I/O-log session, and send one
+      framing turn so Claude knows what the checklist applies to. The condition comes first, so a
+      run without a target leaves no effect here and takes the next transition.
+    actions:
+      - actor: this
+        method: onlyIf
+        arguments: "jexl: state.getString('target', '') != ''"
+      - actor: harness
+        method: start
+      - actor: harness
+        method: frame
+
+  - states: ["0", "load"]
     label: start
-    note: "Parse the run input; open the I/O-log session; optionally frame the target."
+    note: "No target: parse the run input and open the I/O-log session."
     actions:
       - actor: harness
         method: start
 
   - states: ["load", "step"]
     label: load-checklist
-    note: "Read the checklist file and split it into items (markdown '---' rules separate items)."
+    note: |
+      Read the checklist file and split it into items (markdown '---' rules separate items).
+      The item count becomes items.total; the cursor items.next starts at 0.
     actions:
       - actor: harness
         method: loadChecklist
+      - actor: this
+        method: putJson
+        arguments: {path: items.total, value: "jexl: result"}
+      - actor: this
+        method: putJson
+        arguments: {path: items.next, value: 0}
 
   - states: ["step", "step"]
     label: send-next-item
     note: |
-      Send the next checklist item to Claude as one constrained turn and wait for the reply.
-      SUCCESS while items remain (loop back here); FAILURE when exhausted (fall through to finish).
+      While items remain (the condition is written here, not left to an action's failure):
+      send the item at items.next as one constrained turn, then advance the cursor.
     actions:
+      - actor: this
+        method: onlyIf
+        arguments: "jexl: state.getInt('items.next', 0) < state.getInt('items.total', 0)"
       - actor: harness
         method: sendNextItem
+        arguments: "jexl: state.getInt('items.next', 0)"
+      - actor: this
+        method: putJson
+        arguments: {path: items.next, value: "jexl: state.getInt('items.next', 0) + 1"}
 
   - states: ["step", "end"]
     label: finish
-    note: "All items checked: emit the completion event and end."
+    note: "No items remain: emit the completion event and end."
     actions:
       - actor: harness
         method: finish
@@ -42,6 +72,6 @@ steps:
   - states: ["!end", "end"]
     note: "Safety net: any unexpected state ends the workflow."
     actions:
-      - actor: out
-        method: error
-        arguments: {message: "doc-check workflow ended unexpectedly"}
+      - actor: this
+        method: print
+        arguments: "doc-check workflow ended unexpectedly"

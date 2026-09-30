@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Holds pending workflow-approval gates keyed by prompt id. A workflow step (see
- * {@code ClaudeHarnessActor.awaitApproval}) registers a future and blocks on it; an external
+ * {@code HarnessLeash.awaitApproval}) registers a future and blocks on it; an external
  * approver — a human clicking a button, a queue consumer, or another workflow — resolves it by
  * calling {@link #resolve} (via {@code POST /api/respond}). This decouples "who approves" from the
  * workflow: any caller that can reach the REST layer can supply the decision.

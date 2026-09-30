@@ -41,15 +41,22 @@ steps:
   - states: ["judge", "implement"]
     label: judge
     note: |
-      Judge the explanation with an independent turn. SUCCESS = adequate -> implement.
-      FAILURE = not adequate -> fall through to refine (loop back to explain with feedback).
+      Judge the explanation with an independent turn. The verdict (PASS or FAIL) is stored as
+      judge.verdict; only PASS takes this transition. On FAIL the state stays "judge" and the
+      next transition (refine) is taken.
     actions:
       - actor: harness
         method: judge
+      - actor: this
+        method: putJson
+        arguments: {path: judge.verdict, value: "jexl: result"}
+      - actor: this
+        method: onlyIf
+        arguments: "jexl: state.getString('judge.verdict') == 'PASS'"
 
   - states: ["judge", "explain"]
     label: refine
-    note: "Judge said 'not yet': increment the refine counter (feedback is already held) and re-explain."
+    note: "The verdict was FAIL: count the round (the feedback is already held) and re-explain."
     actions:
       - actor: harness
         method: refine
@@ -64,6 +71,6 @@ steps:
   - states: ["!end", "end"]
     note: "Safety net: any unexpected state ends the workflow."
     actions:
-      - actor: out
-        method: error
-        arguments: {message: "explain-judge-implement workflow ended unexpectedly"}
+      - actor: this
+        method: print
+        arguments: "explain-judge-implement workflow ended unexpectedly"

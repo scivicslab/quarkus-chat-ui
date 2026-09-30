@@ -175,20 +175,24 @@ into the prompt queue as a workflow item; the item shows as `⚙ Workflow: <name
 comes, exactly like a queued prompt (the browser is busy until the run ends). **Run now** puts it at the
 front of the queue. **Load** copies a bundled template into the editor.
 
-Actors available to the YAML, besides the engine's built-ins (`out`, `calc`, `list`, `str`, `interpreter`):
+Actors available to the YAML, besides the engine's built-ins (`this`, `calc`, `list`, `str`, `interpreter`):
 
-| Actor | Action | Effect | Result |
-|-------|--------|--------|--------|
-| `harness` | `send` | One instruction turn to the LLM; the argument is the instruction | SUCCESS; message = the reply |
-| `harness` | `check` | One YES/NO turn; the argument is the question (the engine appends the answer format) | SUCCESS if the first line starts with YES, else FAILURE |
-| `harness` | `start` | Opens the I/O-log session (optional, first step) | SUCCESS |
-| `queue` | `requeue` | Puts this same workflow (same YAML and input) at the end of the queue | SUCCESS |
-| `queue` | `enqueue` | Puts a plain prompt (the argument) at the end of the queue | SUCCESS, FAILURE if empty |
+| Actor | Action | Effect | Message (the action's result) |
+|-------|--------|--------|-------------------------------|
+| `harness` | `send` | One instruction turn to the LLM; the argument is the instruction | the reply |
+| `harness` | `check` | One YES/NO turn; the argument is the question (the answer format is appended) | `YES` or `NO` |
+| `harness` | `start` | Reads the run input and opens the I/O-log session (first step) | `started` |
+| `harness` | `frame` | One turn telling the LLM the run input's `target`, asking only for an acknowledgement | the reply |
+| `queue` | `requeue` | Puts this same workflow (same YAML and input) at the end of the queue | `requeued` |
+| `queue` | `enqueue` | Puts a plain prompt (the argument) at the end of the queue | `enqueued` |
 
-A FAILURE makes the engine try the next transition from the same state, so a condition gate is two
-transitions from one state: `check` → act, then the fallback → `requeue`. Give the fallback step a
-`delay:` (milliseconds) so retries are spaced. Input JSON fields are in the interpreter's JSON state;
-read one with `"jexl: state.getString('name')"`. The bundled template `check-then-act` is this pattern:
+An action fails only when it could not do what was asked (a blank argument, a provider error). A
+fact about the data, such as the answer being NO, is the action's message: the YAML stores it with
+`this.putJson` and decides with `this.onlyIf`. When `onlyIf` fails the state does not change and the
+engine tries the next transition from the same state, so a gate is two transitions from one state:
+`check` + `onlyIf` → act, then the fallback → `requeue`. Give the fallback step a `delay:`
+(milliseconds) so retries are spaced. Input JSON fields are in the interpreter's JSON state; read one
+with `"jexl: state.getString('name')"`. The bundled template `check-then-act` is this pattern:
 
 ```yaml
   - states: ["check", "act"]
@@ -196,6 +200,12 @@ read one with `"jexl: state.getString('name')"`. The bundled template `check-the
       - actor: harness
         method: check
         arguments: "jexl: state.getString('condition')"
+      - actor: this
+        method: putJson
+        arguments: {path: check.answer, value: "jexl: result"}
+      - actor: this
+        method: onlyIf
+        arguments: "jexl: state.getString('check.answer') == 'YES'"
   - states: ["check", "end"]
     delay: 60000
     actions:
