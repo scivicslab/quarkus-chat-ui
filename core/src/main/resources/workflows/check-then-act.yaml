@@ -39,7 +39,7 @@ steps:
     actions:
       - actor: harness
         method: check
-        arguments: "jexl: state.getString('condition')"
+        arguments: {question: "jexl: state.getString('condition')"}
       - actor: this
         method: putJson
         arguments: {path: check.answer, value: "jexl: result"}
@@ -61,7 +61,7 @@ steps:
     actions:
       - actor: harness
         method: send
-        arguments: "jexl: state.getString('action')"
+        arguments: {instruction: "jexl: state.getString('action')"}
 
   - states: ["!end", "end"]
     note: "Safety net: any unexpected state ends the workflow."

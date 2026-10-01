@@ -30,3 +30,9 @@
   methods only delegate; a fact about the data is the action's message and the YAML decides with
   `this.putJson` + `this.onlyIf`; an action fails only when it could not do the work; catch-alls use
   `this.print`, never the auto-created `out`.
+
+## 2026-10-01 Scan my own documents for metaphors and numbered labels before handing them over
+- Four documents written on 2026-09-30 used 鍵/口/回す/投げる/流す/塞がる/落とす/使い捨て/出所/産物/効く/
+  載せる/届く/拾う and numbered labels "場所 1..4". All are in doc_Base010's AntiPatternNaming and
+  AntiPatternSectionAxis lists. Rule: after writing, search the file for those words and for "N " labels,
+  and replace each with the concrete verb or the thing's name.

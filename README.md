@@ -179,12 +179,12 @@ Actors available to the YAML, besides the engine's built-ins (`this`, `calc`, `l
 
 | Actor | Action | Effect | Message (the action's result) |
 |-------|--------|--------|-------------------------------|
-| `harness` | `send` | One instruction turn to the LLM; the argument is the instruction | the reply |
-| `harness` | `check` | One YES/NO turn; the argument is the question (the answer format is appended) | `YES` or `NO` |
+| `harness` | `send` | One instruction turn to the LLM; `arguments: {instruction: ...}` | the reply |
+| `harness` | `check` | One YES/NO turn; `arguments: {question: ...}` (the answer format is appended) | `YES` or `NO` |
 | `harness` | `start` | Reads the run input and opens the I/O-log session (first step) | `started` |
 | `harness` | `frame` | One turn telling the LLM the run input's `target`, asking only for an acknowledgement | the reply |
 | `queue` | `requeue` | Puts this same workflow (same YAML and input) at the end of the queue | `requeued` |
-| `queue` | `enqueue` | Puts a plain prompt (the argument) at the end of the queue | `enqueued` |
+| `queue` | `enqueue` | Puts a plain prompt at the end of the queue; `arguments: {text: ...}` | `enqueued` |
 
 An action fails only when it could not do what was asked (a blank argument, a provider error). A
 fact about the data, such as the answer being NO, is the action's message: the YAML stores it with
@@ -199,7 +199,7 @@ with `"jexl: state.getString('name')"`. The bundled template `check-then-act` is
     actions:
       - actor: harness
         method: check
-        arguments: "jexl: state.getString('condition')"
+        arguments: {question: "jexl: state.getString('condition')"}
       - actor: this
         method: putJson
         arguments: {path: check.answer, value: "jexl: result"}
@@ -215,7 +215,7 @@ with `"jexl: state.getString('name')"`. The bundled template `check-then-act` is
     actions:
       - actor: harness
         method: send
-        arguments: "jexl: state.getString('action')"
+        arguments: {instruction: "jexl: state.getString('action')"}
 ```
 
 Endpoints: `POST /api/workflows/run-yaml` (`{yaml, input}`), `POST /api/workflows/params` (`{yaml}`),

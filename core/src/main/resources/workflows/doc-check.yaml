@@ -57,7 +57,7 @@ steps:
         arguments: "jexl: state.getInt('items.next', 0) < state.getInt('items.total', 0)"
       - actor: harness
         method: sendNextItem
-        arguments: "jexl: state.getInt('items.next', 0)"
+        arguments: {index: "jexl: state.getInt('items.next', 0)"}
       - actor: this
         method: putJson
         arguments: {path: items.next, value: "jexl: state.getInt('items.next', 0) + 1"}

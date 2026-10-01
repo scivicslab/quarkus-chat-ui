@@ -7,7 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <!-- chat-ui stylesheet first (pristine), then the shell overrides/additions. -->
     <link rel="stylesheet" href="styles.css?v=34">
-    <link rel="stylesheet" href="console.css?v=3">
+    <link rel="stylesheet" href="console.css?v=4">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -202,6 +202,9 @@
                         <input id="wf-run-input" type="text"
                                placeholder='input JSON, e.g. {"path":"~/works/.../checklist.md"}'>
                     </div>
+                    <!-- What each step's actor.method does and takes, from the action catalog
+                         (ActionCatalogWithJavadoc_260930_oo01); refreshed as the YAML is edited. -->
+                    <div id="wf-actions" class="wf-actions"></div>
                     <textarea id="wf-yaml" class="wf-yaml" spellcheck="false"
                               placeholder="Turing Workflow YAML (actors: harness, queue, out, calc, list, str, interpreter)"></textarea>
                 </section>
@@ -255,6 +258,6 @@
 
     <!-- chat-ui application script (unchanged), then the shell script. -->
     <script src="app.js?v=43"></script>
-    <script src="console.js?v=6"></script>
+    <script src="console.js?v=7"></script>
 </body>
 </html>

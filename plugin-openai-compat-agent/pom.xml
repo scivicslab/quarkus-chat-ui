@@ -50,6 +50,67 @@
         <groupId>io.smallrye</groupId>
         <artifactId>jandex-maven-plugin</artifactId>
       </plugin>
+      <!-- action-schemas/*.schema.json for every @Action that declares argsType (ActionArgumentSchema_260807_oo01). -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.1.0</version>
+        <dependencies>
+          <dependency>
+            <groupId>com.github.victools</groupId>
+            <artifactId>jsonschema-generator</artifactId>
+            <version>4.38.0</version>
+          </dependency>
+        </dependencies>
+        <executions>
+          <execution>
+            <id>generate-action-schemas</id>
+            <phase>process-classes</phase>
+            <goals><goal>java</goal></goals>
+            <configuration>
+              <includePluginDependencies>true</includePluginDependencies>
+              <mainClass>com.scivicslab.pojoactor.action.schema.ActionSchemaGenerator</mainClass>
+              <!-- Absolute paths: in a multi-module build the working directory is the reactor root. -->
+              <arguments>
+                <argument>${project.build.outputDirectory}</argument>
+                <argument>${project.build.outputDirectory}/action-schemas</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <!-- META-INF/turing-plugin.json: each @Action method's Javadoc first sentence and its record's @param
+           prose, read back by ActionManifest (ActionCatalogWithJavadoc_260930_oo01). -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.6.3</version>
+        <executions>
+          <execution>
+            <id>generate-plugin-manifest</id>
+            <goals><goal>javadoc</goal></goals>
+            <!-- Before the test phase, so tests see the manifest on the classpath as the app does. -->
+            <phase>process-classes</phase>
+            <configuration>
+              <outputDirectory>${project.build.directory}/plugin-manifest-javadoc</outputDirectory>
+              <reportOutputDirectory>${project.build.directory}/plugin-manifest-javadoc</reportOutputDirectory>
+              <doclet>com.scivicslab.pojoactor.doclet.TuringPluginDoclet</doclet>
+              <docletArtifact>
+                <groupId>com.scivicslab</groupId>
+                <artifactId>turing-workflow</artifactId>
+                <version>${turing-workflow.version}</version>
+              </docletArtifact>
+              <useStandardDocletOptions>false</useStandardDocletOptions>
+              <additionalOptions>
+                <additionalOption>-turingOutputDir</additionalOption>
+                <additionalOption>${project.build.outputDirectory}/META-INF</additionalOption>
+              </additionalOptions>
+              <doclint>none</doclint>
+              <failOnError>false</failOnError>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 </project>

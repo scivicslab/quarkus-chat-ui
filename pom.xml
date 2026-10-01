@@ -37,7 +37,7 @@
     <!-- Bumped from 3.0.1 to 3.5.0 for the Turing Workflow engine (Phase 3). The pojo-actor API
          surface this project uses is unchanged between 3.0.1 and 3.5.0, so this is a recompile. -->
     <pojo-actor.version>4.2.0</pojo-actor.version>
-    <turing-workflow.version>4.2.0</turing-workflow.version>
+    <turing-workflow.version>4.3.0-SNAPSHOT</turing-workflow.version>
   </properties>
 
   <dependencyManagement>
@@ -52,12 +52,12 @@
       <dependency>
         <groupId>com.scivicslab</groupId>
         <artifactId>pojo-actor</artifactId>
-        <version>4.2.0</version>
+        <version>${pojo-actor.version}</version>
       </dependency>
       <dependency>
         <groupId>com.scivicslab</groupId>
         <artifactId>turing-workflow</artifactId>
-        <version>4.2.0</version>
+        <version>${turing-workflow.version}</version>
       </dependency>
       <dependency>
         <groupId>org.json</groupId>

@@ -465,3 +465,22 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
     color: var(--text-primary, #e6e6e6);
 }
 .al-note { padding: 12px; color: var(--text-secondary, #8a8a8a); font-size: 13px; }
+
+/* ── Workflow tab: the actions panel (one row per step's actor.method) ────────── */
+.wf-actions {
+    flex-shrink: 0;
+    max-height: 40%;
+    overflow: auto;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-color, #2c2c2c);
+    font-size: 12px;
+}
+.wf-actions:empty { display: none; }
+.wf-action { padding: 4px 0; border-bottom: 1px dotted var(--border-color, #2c2c2c); }
+.wf-action:last-child { border-bottom: none; }
+.wf-action-head { color: var(--accent-blue, #a5b4fc); font-weight: 600; }
+.wf-action-head .wf-step-no { color: var(--text-secondary, #8a8a8a); font-weight: 400; margin-right: 6px; }
+.wf-action-desc { color: var(--text-primary, #e6e6e6); margin: 2px 0 0 0; }
+.wf-action-fields { margin: 2px 0 0 12px; padding: 0; list-style: none; color: var(--text-secondary, #8a8a8a); }
+.wf-action-fields code { color: var(--text-primary, #e6e6e6); }
+.wf-action-problem { color: var(--accent-red, #f38ba8); margin: 2px 0 0 0; }

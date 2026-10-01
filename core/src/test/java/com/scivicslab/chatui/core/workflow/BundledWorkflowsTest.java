@@ -144,12 +144,12 @@ class BundledWorkflowsTest {
                     actions:
                       - actor: harness
                         method: send
-                        arguments: "do one"
+                        arguments: {instruction: "do one"}
                   - states: ["1", "end"]
                     actions:
                       - actor: harness
                         method: send
-                        arguments: "do two"
+                        arguments: {instruction: "do two"}
                 """;
         ScriptedProvider p = new ScriptedProvider("first", "second");
         List<ChatEvent> events = new ArrayList<>();
@@ -170,12 +170,12 @@ class BundledWorkflowsTest {
                     actions:
                       - actor: queue
                         method: enqueue
-                        arguments: ""
+                        arguments: {text: ""}
                   - states: ["0", "end"]
                     actions:
                       - actor: queue
                         method: enqueue
-                        arguments: "jexl: 'Deploy ' + state.getString('target') + ' now'"
+                        arguments: {text: "jexl: 'Deploy ' + state.getString('target') + ' now'"}
                 """;
         List<ChatEvent> events = new ArrayList<>();
         assertTrue(ClaudeHarnessRunner.runWorkflow("t", yaml, "{\"target\":\"foo.jar\"}", new ScriptedProvider(),

@@ -24,6 +24,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.logging.Level;
@@ -61,6 +62,34 @@ public class ClaudeHarnessRunner {
 
     @Inject
     WorkflowApprovalRegistry approvalRegistry;
+
+    /**
+     * The actors a run registers, by the name the YAML uses, with the class whose {@code @Action}
+     * methods are their actions. Fixed for every run, so a Workflow-tab reader can describe a step's
+     * actor before any run exists ({@code ActionCatalogWithJavadoc_260930_oo01}); the engine's
+     * built-ins {@code calc}, {@code list}, {@code str} and {@code out} are created by the engine on
+     * first use and are listed here under their plain names.
+     */
+    public static final Map<String, Class<?>> ACTOR_CLASSES = Map.ofEntries(
+            Map.entry("harness", HarnessLeashIIAR.class),
+            Map.entry("queue", QueueBridgeIIAR.class),
+            Map.entry("this", InterpreterIIAR.class),
+            Map.entry("interpreter", InterpreterIIAR.class),
+            Map.entry("loader", DynamicActorLoaderIIAR.class),
+            Map.entry("log", MultiplexerAccumulatorIIAR.class),
+            Map.entry("vars", VarsActor.class),
+            Map.entry("out", com.scivicslab.turingworkflow.workflow.OutActor.class),
+            Map.entry("calc", com.scivicslab.turingworkflow.workflow.CalcActor.class),
+            Map.entry("list", com.scivicslab.turingworkflow.workflow.ListActor.class),
+            Map.entry("str", com.scivicslab.turingworkflow.workflow.StringActor.class));
+
+    /**
+     * The interpreter's own actions, answered by {@code callByActionName} rather than declared with
+     * {@code @Action}, so reflection does not find them.
+     */
+    public static final List<String> INTERPRETER_ACTIONS = List.of(
+            "putJson", "getJson", "hasJson", "clearJson", "printJson", "appendJson",
+            "onlyIf", "print", "sleep", "doNothing", "setCurrentState", "call", "apply");
 
     /** Starts the named bundled workflow on a virtual thread (returns immediately). */
     public void launch(String workflowName, String inputJson) {

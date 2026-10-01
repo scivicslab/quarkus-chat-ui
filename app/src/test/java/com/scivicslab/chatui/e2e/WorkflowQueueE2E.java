@@ -22,7 +22,7 @@ class WorkflowQueueE2E extends E2eTestBase {
             "    actions:",
             "      - actor: queue",
             "        method: enqueue",
-            "        arguments: \"E2E prompt enqueued by workflow\"",
+            "        arguments: {text: \"E2E prompt enqueued by workflow\"}",
             "");
 
     private void waitForReady() {

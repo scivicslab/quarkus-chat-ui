@@ -4,20 +4,46 @@ import com.scivicslab.pojoactor.action.Action;
 import com.scivicslab.pojoactor.action.ActionResult;
 import com.scivicslab.turingworkflow.workflow.IIActorRef;
 import com.scivicslab.turingworkflow.workflow.IIActorSystem;
+import jakarta.validation.constraints.NotNull;
 
 /**
  * The workflow actor {@code harness}: wraps a {@link HarnessLeash} and maps each of its methods to
  * one {@code @Action}. Only workflow plumbing lives here. An action fails when the leash could not
  * do what was asked (it threw); a fact about the data comes back as the action's message, so the
  * YAML stores it with {@code this.putJson} and decides with {@code this.onlyIf}.
+ *
+ * <p>Actions that take an argument declare it as a record: the record's components are the keys the
+ * YAML writes under {@code arguments:}, its Javadoc {@code @param} lines are what the Workflow tab shows
+ * beside the step, and {@code @NotNull} marks the required ones ({@code ActionCatalogWithJavadoc_260930_oo01}).</p>
  */
 public class HarnessLeashIIAR extends IIActorRef<HarnessLeash> {
+
+    /**
+     * Which checklist item to send.
+     *
+     * @param index 0-based index into the items loadChecklist read
+     */
+    public record SendItemArgs(@NotNull Integer index) {}
+
+    /**
+     * One instruction turn.
+     *
+     * @param instruction the text sent to the LLM as this turn's prompt
+     */
+    public record SendArgs(@NotNull String instruction) {}
+
+    /**
+     * One YES/NO turn.
+     *
+     * @param question the question; the leash appends the instruction to answer YES or NO on the first line
+     */
+    public record CheckArgs(@NotNull String question) {}
 
     public HarnessLeashIIAR(String name, HarnessLeash leash, IIActorSystem system) {
         super(name, leash, system);
     }
 
-    /** Initialises the run from the JSON input; SUCCESS "started". */
+    /** Reads the run input and resets the per-run state; no turn is sent. */
     @Action("start")
     public ActionResult start(String args) {
         try {
@@ -28,7 +54,7 @@ public class HarnessLeashIIAR extends IIActorRef<HarnessLeash> {
         }
     }
 
-    /** One framing turn about the run input's target; the message is the reply. */
+    /** Sends one framing turn telling the LLM the run input's target and asking only for an acknowledgement. */
     @Action("frame")
     public ActionResult frame(String args) {
         try {
@@ -38,7 +64,7 @@ public class HarnessLeashIIAR extends IIActorRef<HarnessLeash> {
         }
     }
 
-    /** Reads the checklist; the message is the item count, for {@code this.putJson}. */
+    /** Reads the checklist file named by the run input; the message is the item count. */
     @Action("loadChecklist")
     public ActionResult loadChecklist(String args) {
         try {
@@ -48,24 +74,24 @@ public class HarnessLeashIIAR extends IIActorRef<HarnessLeash> {
         }
     }
 
-    /** Sends the item at the 0-based index given as the argument; the message is the reply. */
-    @Action("sendNextItem")
-    public ActionResult sendNextItem(String args) {
+    /** Sends one checklist item to the LLM as one constrained turn; the message is the reply. */
+    @Action(value = "sendNextItem", argsType = SendItemArgs.class)
+    public ActionResult sendNextItem(SendItemArgs args) {
         try {
-            int index = Integer.parseInt(firstArgument(args).trim());
-            return new ActionResult(true, wrapped().sendItem(index));
+            return new ActionResult(true, wrapped().sendItem(args.index()));
         } catch (Exception e) {
             return new ActionResult(false, "sendNextItem: " + e.getMessage());
         }
     }
 
+    /** Tells the browser the checklist run is complete. */
     @Action("finish")
     public ActionResult finish(String args) {
         wrapped().finish();
         return new ActionResult(true, "finished");
     }
 
-    /** One explanation turn; the message is the plan. */
+    /** Asks the LLM to explain its intended approach without implementing; the message is the plan. */
     @Action("explain")
     public ActionResult explain(String args) {
         try {
@@ -75,7 +101,7 @@ public class HarnessLeashIIAR extends IIActorRef<HarnessLeash> {
         }
     }
 
-    /** One judging turn; the message is {@code PASS} or {@code FAIL}. */
+    /** Judges the plan with an independent turn; the message is PASS or FAIL. */
     @Action("judge")
     public ActionResult judge(String args) {
         try {
@@ -85,12 +111,13 @@ public class HarnessLeashIIAR extends IIActorRef<HarnessLeash> {
         }
     }
 
+    /** Counts one refine round after a FAIL verdict. */
     @Action("refine")
     public ActionResult refine(String args) {
         return new ActionResult(true, "refine " + wrapped().refine());
     }
 
-    /** One implementation turn; the message is the reply. */
+    /** Tells the LLM the plan is approved and to implement it now; the message is the reply. */
     @Action("implement")
     public ActionResult implement(String args) {
         try {
@@ -100,7 +127,7 @@ public class HarnessLeashIIAR extends IIActorRef<HarnessLeash> {
         }
     }
 
-    /** Blocks for the human decision; the message is {@code APPROVED}, {@code REJECTED} or {@code TIMEOUT}. */
+    /** Waits up to 30 minutes for a human decision on the plan; the message is APPROVED, REJECTED or TIMEOUT. */
     @Action("awaitApproval")
     public ActionResult awaitApproval(String args) {
         try {
@@ -113,37 +140,23 @@ public class HarnessLeashIIAR extends IIActorRef<HarnessLeash> {
         }
     }
 
-    /** One instruction turn (the argument); the message is the reply. */
-    @Action("send")
-    public ActionResult send(String args) {
+    /** Sends one instruction to the LLM as one turn; the message is the reply. */
+    @Action(value = "send", argsType = SendArgs.class)
+    public ActionResult send(SendArgs args) {
         try {
-            return new ActionResult(true, wrapped().send(firstArgument(args)));
+            return new ActionResult(true, wrapped().send(args.instruction()));
         } catch (Exception e) {
             return new ActionResult(false, "send: " + e.getMessage());
         }
     }
 
-    /** One YES/NO turn (the argument is the question); the message is {@code YES} or {@code NO}. */
-    @Action("check")
-    public ActionResult check(String args) {
+    /** Sends one question to be answered YES or NO; the message is YES or NO. */
+    @Action(value = "check", argsType = CheckArgs.class)
+    public ActionResult check(CheckArgs args) {
         try {
-            return new ActionResult(true, wrapped().check(firstArgument(args)));
+            return new ActionResult(true, wrapped().check(args.question()));
         } catch (Exception e) {
             return new ActionResult(false, "check: " + e.getMessage());
         }
-    }
-
-    /** The first element of a JSON-array argument as text, whatever its JSON type; else the text itself. */
-    static String firstArgument(String args) {
-        if (args == null) return "";
-        if (args.startsWith("[")) {
-            try {
-                org.json.JSONArray arr = new org.json.JSONArray(args);
-                return arr.length() == 0 ? "" : String.valueOf(arr.get(0));
-            } catch (Exception ignored) {
-                // not a JSON array: use the text as written
-            }
-        }
-        return args;
     }
 }

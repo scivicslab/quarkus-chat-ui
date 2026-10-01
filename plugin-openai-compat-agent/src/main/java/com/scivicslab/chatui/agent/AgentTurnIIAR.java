@@ -11,10 +11,18 @@ import com.scivicslab.turingworkflow.workflow.IIActorSystem;
  */
 public class AgentTurnIIAR extends IIActorRef<AgentTurn> {
 
+    /**
+     * How much of each tool result the model may see.
+     *
+     * @param maxObservationChars characters of each observation kept in the model's copy; the I/O log keeps all
+     */
+    public record RunToolsArgs(Integer maxObservationChars) {}
+
     public AgentTurnIIAR(String name, AgentTurn turn, IIActorSystem system) {
         super(name, turn, system);
     }
 
+    /** Resets the turn's state. */
     @Action("start")
     public ActionResult start(String args) {
         wrapped().start();
@@ -31,20 +39,18 @@ public class AgentTurnIIAR extends IIActorRef<AgentTurn> {
         }
     }
 
-    /** Runs the pending tool calls; argument {@code {maxObservationChars: N}}; the message is the count. */
-    @Action("runTools")
-    public ActionResult runTools(String args) {
+    /** Runs the tool calls the last reply asked for and feeds the results back; the message is the count. */
+    @Action(value = "runTools", argsType = RunToolsArgs.class)
+    public ActionResult runTools(RunToolsArgs args) {
         try {
-            int max = 20000;
-            if (args != null && args.trim().startsWith("{")) {
-                max = new org.json.JSONObject(args).optInt("maxObservationChars", max);
-            }
+            int max = (args == null || args.maxObservationChars() == null) ? 20000 : args.maxObservationChars();
             return new ActionResult(true, String.valueOf(wrapped().runTools(max)));
         } catch (Exception e) {
             return new ActionResult(false, "runTools: " + e.getMessage());
         }
     }
 
+    /** Sends the final answer to the browser and ends the turn. */
     @Action("finish")
     public ActionResult finish(String args) {
         wrapped().finish();

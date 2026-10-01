@@ -1,3 +1,27 @@
+# Action descriptions beside each Workflow-tab step (ActionCatalogWithJavadoc_260930_oo01), 2026-10-02
+
+## Tasks
+- [x] Turing-workflow (4.3.0-SNAPSHOT, ee5bdda): ActionManifest reads META-INF/turing-plugin.json; ActionCatalog
+      merges description + per-field @param prose into the schema; static describe(Class, action) and
+      actionNamesOf(Class); doclet reads the argsType record's @param; the core jar carries its own manifest
+- [x] chat-ui: argsType records with Javadoc on harness.send/check/sendNextItem, queue.enqueue, agent.runTools;
+      YAML arguments in map form; core and plugin poms generate action-schemas/ (process-classes, absolute paths)
+      and META-INF/turing-plugin.json (doclet at process-classes so tests see it)
+- [x] REST GET /api/workflows/actions/{actor} and /{actor}/{action} over the static actor-to-class table
+      (ClaudeHarnessRunner.ACTOR_CLASSES, INTERPRETER_ACTIONS for `this`)
+- [x] Workflow tab: actions panel above the editor; per step actor.method, the Javadoc sentence, fields with
+      type/required/description, and a problem line for an unknown action or a missing required key
+- [x] Tests: ActionDescriptionTest (core, over the built artefacts), WorkflowActionsPanelE2E; all E2E green
+- [x] AI workspace: the 3.x tile now dependsOn turing-workflow (09bcea7); jar placed, 28000 not restarted
+- [ ] push: Turing-workflow main, quarkus-chat-ui branch, quarkus-AI-workspace main; restart 28000 and 28020
+
+## Review
+- The root pom's dependencyManagement hard-coded turing-workflow 4.2.0 beside the property; now `${turing-workflow.version}`.
+- The schema generator needs absolute paths in a multi-module build (its defaults are relative to the reactor root).
+- The doclet must run before `test`, or the manifest is absent from target/classes during unit tests.
+
+---
+
 # Agent Loop tab and per-turn Turing Workflow for the openai-compat provider (2026-09-30)
 
 Spec: doc_SCIVICS002 quarkus-chat-ui/020_specs/110_AgentLoopTab_260930_oo01 (confirmed 2026-10-01, implemented).

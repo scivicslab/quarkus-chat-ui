@@ -682,6 +682,131 @@
         ta.value = yaml || '';
         try { localStorage.setItem(WF_YAML_KEY, ta.value); } catch (e) { /* ignore */ }
         if (params) wfRenderForm(params); else wfRefreshParams();
+        wfRenderActions();
+    }
+
+    // ── The actions panel: for each step's actor/method, what it does and what it takes ─────────
+
+    // Pulls (actor, method, argument keys) out of each step of the YAML. Text-level: a step starts
+    // at a line "  - ", an action at "      - actor:"; argument keys are read from an inline map
+    // {k: v, k2: v} or from the indented lines under "arguments:". Enough for the catalog lookup.
+    function wfExtractActions(yaml) {
+        var lines = (yaml || '').split(/\r?\n/);
+        var out = [];
+        var step = -1, cur = null;
+        function flush() { if (cur) { out.push(cur); cur = null; } }
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (/^  - /.test(line)) { flush(); step++; }
+            var m = line.match(/^\s*-\s*actor:\s*(\S+)/);
+            if (m) { flush(); cur = { step: step, actor: m[1].replace(/^["']|["']$/g, ''), method: '', keys: [], hasArgs: false, line: i + 1 }; continue; }
+            if (!cur) continue;
+            var mm = line.match(/^\s*method:\s*(\S+)/);
+            if (mm) { cur.method = mm[1].replace(/^["']|["']$/g, ''); continue; }
+            var ma = line.match(/^(\s*)arguments:\s*(.*)$/);
+            if (ma) {
+                cur.hasArgs = true;
+                var rest = ma[2].trim();
+                if (rest.indexOf('{') === 0) {
+                    rest.replace(/^\{|\}$/g, '').split(',').forEach(function (kv) {
+                        var k = kv.split(':')[0].trim().replace(/^["']|["']$/g, '');
+                        if (k) cur.keys.push(k);
+                    });
+                } else if (rest === '') {
+                    var indent = ma[1].length;
+                    for (var j = i + 1; j < lines.length; j++) {
+                        var l2 = lines[j];
+                        if (!l2.trim()) continue;
+                        var ind = l2.match(/^(\s*)/)[1].length;
+                        if (ind <= indent) break;
+                        var mk = l2.match(/^\s*([A-Za-z_][\w.-]*)\s*:/);
+                        if (mk) cur.keys.push(mk[1]);
+                    }
+                }
+                continue;
+            }
+        }
+        flush();
+        return out;
+    }
+
+    var wfDescribeCache = {};
+    function wfDescribe(actor, method) {
+        var key = actor + '/' + method;
+        if (wfDescribeCache[key]) return wfDescribeCache[key];
+        var p = fetch('/api/workflows/actions/' + encodeURIComponent(actor) + '/' + encodeURIComponent(method))
+            .then(function (r) { return r.ok ? r.json() : r.json().then(function (e) { return { error: e.error || ('HTTP ' + r.status) }; }); })
+            .catch(function (e) { return { error: e.message }; });
+        wfDescribeCache[key] = p;
+        return p;
+    }
+
+    function wfRenderActions() {
+        var panel = document.getElementById('wf-actions');
+        if (!panel) return;
+        var actions = wfExtractActions(wfYaml());
+        if (!actions.length) { panel.textContent = ''; return; }
+        Promise.all(actions.map(function (a) { return a.method ? wfDescribe(a.actor, a.method) : Promise.resolve({ error: 'no method' }); }))
+            .then(function (descs) {
+                panel.textContent = '';
+                actions.forEach(function (a, i) {
+                    var d = descs[i];
+                    var row = document.createElement('div');
+                    row.className = 'wf-action';
+                    var head = document.createElement('div');
+                    head.className = 'wf-action-head';
+                    var no = document.createElement('span');
+                    no.className = 'wf-step-no';
+                    no.textContent = 'step ' + a.step;
+                    head.appendChild(no);
+                    head.appendChild(document.createTextNode(a.actor + '.' + a.method));
+                    row.appendChild(head);
+                    if (d.error) {
+                        var pr = document.createElement('p');
+                        pr.className = 'wf-action-problem';
+                        pr.textContent = d.error;
+                        row.appendChild(pr);
+                        panel.appendChild(row);
+                        return;
+                    }
+                    if (d.description) {
+                        var desc = document.createElement('p');
+                        desc.className = 'wf-action-desc';
+                        desc.textContent = d.description;
+                        row.appendChild(desc);
+                    }
+                    var schema = d.schema;
+                    if (schema && schema.properties) {
+                        var required = schema.required || [];
+                        var ul = document.createElement('ul');
+                        ul.className = 'wf-action-fields';
+                        Object.keys(schema.properties).forEach(function (name) {
+                            var prop = schema.properties[name] || {};
+                            var li = document.createElement('li');
+                            var code = document.createElement('code');
+                            code.textContent = name;
+                            li.appendChild(code);
+                            li.appendChild(document.createTextNode(' (' + (prop.type || 'any') + (required.indexOf(name) >= 0 ? ', required' : '') + ')'
+                                + (prop.description ? ' — ' + prop.description : '')));
+                            ul.appendChild(li);
+                        });
+                        row.appendChild(ul);
+                        var missing = required.filter(function (r) { return a.keys.indexOf(r) < 0; });
+                        if (missing.length) {
+                            var pm = document.createElement('p');
+                            pm.className = 'wf-action-problem';
+                            pm.textContent = 'arguments: is missing the required key' + (missing.length > 1 ? 's ' : ' ') + missing.join(', ');
+                            row.appendChild(pm);
+                        }
+                    } else if (d.note) {
+                        var pn = document.createElement('p');
+                        pn.className = 'wf-action-fields';
+                        pn.textContent = d.note;
+                        row.appendChild(pn);
+                    }
+                    panel.appendChild(row);
+                });
+            });
     }
 
     var wfParamsTimer = null;
@@ -842,7 +967,7 @@
         if (ta) ta.addEventListener('input', function () {
             try { localStorage.setItem(WF_YAML_KEY, ta.value); } catch (e) { /* ignore */ }
             clearTimeout(wfParamsTimer);
-            wfParamsTimer = setTimeout(wfRefreshParams, 600);
+            wfParamsTimer = setTimeout(function () { wfRefreshParams(); wfRenderActions(); }, 600);
         });
         var box = document.getElementById('wf-run-input');
         if (box) box.addEventListener('input', function () {

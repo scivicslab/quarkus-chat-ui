@@ -757,6 +757,47 @@ public class ChatResource {
         return Response.ok(Map.of("params", parseWorkflowParams(yaml))).build();
     }
 
+    // ── Describing a step's actor and action before any run (ActionCatalogWithJavadoc_260930_oo01) ──
+
+    private static final com.scivicslab.pojoactor.action.schema.ActionSchemaRegistry ACTION_SCHEMAS =
+            new com.scivicslab.pojoactor.action.schema.ActionSchemaRegistry();
+    private static final com.scivicslab.pojoactor.action.schema.ActionManifest ACTION_MANIFEST =
+            new com.scivicslab.pojoactor.action.schema.ActionManifest();
+
+    /** The actions of one actor the Workflow tab may name: {@code {actor, class, actions:[...]}}. */
+    @GET
+    @Path("/workflows/actions/{actor}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response workflowActorActions(@PathParam("actor") String actor) {
+        Class<?> cls = ClaudeHarnessRunner.ACTOR_CLASSES.get(actor);
+        if (cls == null) return Response.status(404).entity(Map.of("error", "unknown actor: " + actor)).build();
+        java.util.SortedSet<String> names = com.scivicslab.pojoactor.action.schema.ActionCatalog.actionNamesOf(cls);
+        if (cls == com.scivicslab.turingworkflow.workflow.InterpreterIIAR.class) {
+            names = new java.util.TreeSet<>(ClaudeHarnessRunner.INTERPRETER_ACTIONS);
+        }
+        return Response.ok(Map.of("actor", actor, "class", cls.getName(), "actions", names)).build();
+    }
+
+    /**
+     * The description of one action: its JSON Schema with the record's {@code @param} prose on each
+     * property, and the action method's first Javadoc sentence. The same answer {@code ActionCatalog}
+     * gives for a running actor, without a run.
+     */
+    @GET
+    @Path("/workflows/actions/{actor}/{action}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response workflowActionDescription(@PathParam("actor") String actor, @PathParam("action") String action) {
+        Class<?> cls = ClaudeHarnessRunner.ACTOR_CLASSES.get(actor);
+        if (cls == null) return Response.status(404).entity(Map.of("error", "unknown actor: " + actor)).build();
+        boolean known = com.scivicslab.pojoactor.action.schema.ActionCatalog.actionNamesOf(cls).contains(action)
+                || (cls == com.scivicslab.turingworkflow.workflow.InterpreterIIAR.class
+                    && ClaudeHarnessRunner.INTERPRETER_ACTIONS.contains(action));
+        if (!known) return Response.status(404).entity(Map.of("error", "actor " + actor + " has no action " + action)).build();
+        var node = com.scivicslab.pojoactor.action.schema.ActionCatalog.describe(cls, action, ACTION_SCHEMAS, ACTION_MANIFEST);
+        node.put("actor", actor);
+        return Response.ok(node.toString()).build();
+    }
+
     /** Body of {@code POST /api/workflows/run-yaml}: the YAML text and its input JSON (as a string). */
     public static class RunYamlRequest {
         public String yaml;
