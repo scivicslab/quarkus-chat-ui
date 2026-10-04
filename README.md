@@ -226,17 +226,24 @@ Endpoints: `POST /api/workflows/run-yaml` (`{yaml, input}`), `POST /api/workflow
 
 The right pane's **Actions** tab answers, without a run, what a workflow YAML may write in an
 `actor:` / `method:` pair. Type an actor name — the field offers the known ones — and **Show** lists
-that actor's actions; click one, or type it in the `action` field, and the tab shows the action's
-first Javadoc sentence and each of its fields with type, required mark and the record's `@param`
-prose. Clearing the `action` field lists the actions again. An actor or action name that does not
-exist is reported as a problem line.
+that actor's actions, each with the first sentence of its Javadoc. Click one, or type it in the
+`action` field, and the tab shows the whole description: the first sentence, the rest of the
+Javadoc, what the action takes — each field of its argument record with type, required mark and
+`@param` prose, or for an action that receives a raw String what the method's `@param` says of it
+(`args (string) — ignored` for the ones that take nothing) — and the step as a workflow YAML writes
+it. That step is the `<pre>` block of the action's Javadoc when it has one, otherwise it is composed
+from the declaration: `actor:`, `method:` and an `arguments:` map with the schema type as each
+value's placeholder. Clearing the `action` field lists the actions again. An actor or action name
+that does not exist is reported as a problem line.
 
 Three endpoints serve it, all without a running workflow: `GET /api/workflows/actions` (the actor
-names), `GET /api/workflows/actions/{actor}` (that actor's action names), and
-`GET /api/workflows/actions/{actor}/{action}` (the description and the JSON Schema of its
-arguments). The descriptions are generated at build time — `action-schemas/` from the argument
-records' `@NotNull` annotations and `META-INF/turing-plugin.json` from their Javadoc — so they are
-the same text `ActionCatalog` gives for a running actor.
+names), `GET /api/workflows/actions/{actor}` (`{name, description}` per action), and
+`GET /api/workflows/actions/{actor}/{action}` (`description`, `details`, `example`, the JSON
+`schema` of a record argument or the `argument` of a raw-String one, and `yaml`). Everything comes
+from the build: `action-schemas/` from the argument records' `@NotNull` annotations and
+`META-INF/turing-plugin.json` from the Javadoc, so it is the same text `ActionCatalog` gives for a
+running actor. To document a new action, write its Javadoc: the first sentence, the body, a
+`<pre>{@code ...}</pre>` block holding the YAML step, and `@param` lines.
 
 ## Agent Loop for the Local LLM provider
 

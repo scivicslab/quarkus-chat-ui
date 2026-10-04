@@ -23,14 +23,40 @@ public class QueueBridgeIIAR extends IIActorRef<QueueBridge> {
         super(name, bridge, system);
     }
 
-    /** Puts this same workflow, with the same input, at the end of the prompt queue. */
+    /**
+     * Puts this same workflow, with the same input, at the end of the prompt queue.
+     *
+     * <p>Use it as the fallback of a gate, with a {@code delay:} on the transition so the retries are
+     * spaced; the run then ends, and the queued copy starts over when its turn comes.</p>
+     *
+     * <pre>{@code
+     * - states: ["check", "end"]
+     *   delay: 60000
+     *   actions:
+     *     - actor: queue
+     *       method: requeue
+     * }</pre>
+     *
+     * @param args ignored
+     */
     @Action("requeue")
     public ActionResult requeue(String args) {
         wrapped().requeue();
         return new ActionResult(true, "requeued");
     }
 
-    /** Puts a plain prompt at the end of the prompt queue. */
+    /**
+     * Puts a plain prompt at the end of the prompt queue.
+     *
+     * <p>Fails when the text is blank. The prompt runs as an ordinary turn when its turn comes, after
+     * this workflow has ended.</p>
+     *
+     * <pre>{@code
+     * - actor: queue
+     *   method: enqueue
+     *   arguments: {text: "Summarize what the last run changed."}
+     * }</pre>
+     */
     @Action(value = "enqueue", argsType = EnqueueArgs.class)
     public ActionResult enqueue(EnqueueArgs args) {
         try {

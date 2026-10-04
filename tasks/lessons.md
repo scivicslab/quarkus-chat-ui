@@ -36,3 +36,10 @@
   載せる/届く/拾う and numbered labels "場所 1..4". All are in doc_Base010's AntiPatternNaming and
   AntiPatternSectionAxis lists. Rule: after writing, search the file for those words and for "N " labels,
   and replace each with the concrete verb or the thing's name.
+
+## 2026-10-05 Never `git add -A`; stage the files I changed by name
+- `git add -A` put `app/chat-ui-iolog-28900.mv.db`, a database a running instance writes, into my
+  commit; caught before the push and amended out. The same sweep put the user's OpenMath-standard
+  import into openmath-lisp's doc commit 455a585 on 2026-10-03.
+- Rule: read `git status --short` first, then `git add <each path I edited>`; a `??` entry I did not
+  create is never mine to commit. Add an ignore rule when the stray file is a runtime artefact.

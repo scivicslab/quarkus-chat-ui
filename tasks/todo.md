@@ -185,3 +185,56 @@ name an action, get its description — and give the Workflow tab back the shape
   and the browser logged no unexpected error.
 - The running instances on 28020 and 28021 and the `~/works/quarkus-chat-ui-3.jar` link are
   untouched; deploying this build is a separate decision.
+
+---
+
+# Actions tab: the list carries each description; one action shows its argument and a YAML example
+
+## Plan
+The list of an actor's actions shows names only, and a raw-String action such as `harness.explain`
+answers "takes a raw String; its shape is not declared", which tells the reader nothing about what to
+write. The Javadoc already knows more than the first sentence: the method's own `@param` line says
+what the String is (or that it is ignored), and a `<pre>` block in the Javadoc is the usage example
+the author wrote. The doclet keeps only the first sentence and, for records, the record's `@param`s.
+
+Carry the rest through: the doclet writes `details` (the body after the first sentence) and
+`example` (the first `<pre>` block) into `turing-plugin.json`; `ActionCatalog.describe` returns them
+and, for a raw-String action, the method's `@param` as `argument`; the chat-ui composes a YAML step
+(`actor:`/`method:`/`arguments:`) from the schema when the Javadoc has no example; the list endpoint
+returns `{name, description}` pairs; the tab shows all of it.
+
+## Tasks
+- [x] Turing-workflow `TuringPluginDoclet`: `details`, `example`; Javadoc inline tags converted to text
+      instead of brace-stripped
+- [x] Turing-workflow `ActionManifest.ActionDoc` + `ActionCatalog.describe`: `details`, `example`, `argument`
+- [x] Turing-workflow tests: `test-turing-plugin.json` and `ActionCatalogTest` cover the three
+- [x] Turing-workflow: rm -rf target && mvn install (4.3.0-SNAPSHOT)
+- [x] chat-ui `HarnessLeashIIAR`/`QueueBridgeIIAR`: `@param args` on every raw-String action, one `<pre>`
+      YAML example per action
+- [x] chat-ui `ChatResource`: list returns `{name, description}`; describe adds `yaml`
+- [x] chat-ui `console.js`/`console.css`: list rows with descriptions; action view with argument, details,
+      example
+- [x] chat-ui `ActionDescriptionTest`: `explain` argument, `send` example, yaml composition
+- [x] chat-ui README Actions tab section
+- [x] rm -rf target && mvn install; headless check against the built jar
+
+## Review
+- Turing-workflow `218b473`: the doclet writes `details`, `example` and the String action's own
+  `@param`; inline tags become text (the old brace-stripping would have eaten `{key: value}` from a
+  YAML example). A new `TuringPluginDocletTest` runs the javadoc tool on a source file and checks the
+  JSON; `ActionCatalogTest` checks `argument`, `details`, `example`. 363 tests green; 4.3.0-SNAPSHOT
+  installed to `~/.m2`.
+- chat-ui: every harness and queue action's Javadoc now has `@param args ignored` (or the record's
+  `@param`s), a body saying where its input comes from and what to do with its message, and a
+  `<pre>{@code ...}</pre>` block holding the step as the bundled YAMLs write it. The manifest shows all
+  14 actions with an example.
+- `GET /api/workflows/actions/{actor}` answers `{name, description}` per action; `/{actor}/{action}`
+  adds `details`, `example`, `argument` (raw-String actions) and `yaml`; `ActionStepYaml` composes the
+  step from the schema when the Javadoc has no example (`out.print` → `arguments: {message: "<string>"}`).
+- Headless browser against the built jar on a scratch port: the harness list shows 12 actions each with
+  its sentence; `explain` shows `args (string) — ignored`, the details and the two-line step; `check`
+  shows the field and the 9-line example with its braces and jexl intact; `out.print` shows the
+  composed step with the "(composed from the declaration)" label; no browser errors.
+- Not covered: the `this`/`interpreter` actions (`putJson`, `onlyIf`, ...) have no description, because
+  `InterpreterIIAR` dispatches them in a switch without `@Action`, so the doclet never sees them; the
+  tab shows their names and a composed two-line step only.

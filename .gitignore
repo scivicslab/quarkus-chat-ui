@@ -15,3 +15,5 @@ E2E_TEST_REPORT_*.md
 TEST_REQUEST_FROM_*.md
 test_file_*.txt
 test_mcp_message.sh
+# I/O-log databases an instance writes beside its working directory
+chat-ui-iolog-*.db

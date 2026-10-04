@@ -39,6 +39,36 @@ class ActionDescriptionTest {
     }
 
     @Test
+    @DisplayName("harness.explain: the String it receives is declared ignored, the body says where the task comes from, the <pre> is the step")
+    void explain() {
+        ObjectNode d = ActionCatalog.describe(HarnessLeashIIAR.class, "explain", SCHEMAS, MANIFEST);
+        assertEquals("args", d.get("argument").get("name").asText(), d.toString());
+        assertEquals("ignored", d.get("argument").get("description").asText());
+        assertTrue(d.get("details").asText().contains("run input's target"), d.toString());
+        assertEquals("- actor: harness\n  method: explain", d.get("example").asText());
+        assertEquals(d.get("example").asText(), ActionStepYaml.of("harness", "explain", d),
+                "the Javadoc's own example is the step shown");
+    }
+
+    @Test
+    @DisplayName("harness.check: the Javadoc example keeps its braces and jexl; the details tell the onlyIf pattern")
+    void checkExample() {
+        ObjectNode d = ActionCatalog.describe(HarnessLeashIIAR.class, "check", SCHEMAS, MANIFEST);
+        String example = d.get("example").asText();
+        assertTrue(example.startsWith("- actor: harness\n  method: check\n  arguments: {question: \"jexl: state.getString('condition')\"}"), example);
+        assertTrue(example.contains("method: onlyIf"), example);
+        assertTrue(d.get("details").asText().contains("onlyIf"), d.toString());
+    }
+
+    @Test
+    @DisplayName("queue.enqueue: the record's field and the example agree on the key")
+    void enqueue() {
+        ObjectNode d = ActionCatalog.describe(QueueBridgeIIAR.class, "enqueue", SCHEMAS, MANIFEST);
+        assertTrue(d.get("schema").get("properties").has("text"));
+        assertTrue(d.get("example").asText().contains("arguments: {text:"), d.toString());
+    }
+
+    @Test
     @DisplayName("the actor table names the classes whose @Action methods the YAML calls")
     void actorTable() {
         assertTrue(ActionCatalog.actionNamesOf(ClaudeHarnessRunner.ACTOR_CLASSES.get("harness")).contains("check"));

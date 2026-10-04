@@ -7,6 +7,7 @@ import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.WatchdogActor;
 import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.iolog.IoLogView;
+import com.scivicslab.chatui.core.workflow.ActionStepYaml;
 import com.scivicslab.chatui.core.workflow.ClaudeHarnessRunner;
 import com.scivicslab.chatui.core.workflow.WorkflowApprovalRegistry;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
@@ -773,7 +774,10 @@ public class ChatResource {
         return Response.ok(Map.of("actors", new java.util.TreeSet<>(ClaudeHarnessRunner.ACTOR_CLASSES.keySet()))).build();
     }
 
-    /** The actions of one actor: {@code {actor, class, actions:[...]}}. */
+    /**
+     * The actions of one actor, each with the first sentence of its Javadoc:
+     * {@code {actor, class, actions:[{name, description}, ...]}}.
+     */
     @GET
     @Path("/workflows/actions/{actor}")
     @Produces(MediaType.APPLICATION_JSON)
@@ -784,13 +788,20 @@ public class ChatResource {
         if (cls == com.scivicslab.turingworkflow.workflow.InterpreterIIAR.class) {
             names = new java.util.TreeSet<>(ClaudeHarnessRunner.INTERPRETER_ACTIONS);
         }
-        return Response.ok(Map.of("actor", actor, "class", cls.getName(), "actions", names)).build();
+        List<Map<String, String>> actions = new ArrayList<>();
+        for (String name : names) {
+            var doc = ACTION_MANIFEST.docFor(cls, name);
+            actions.add(Map.of("name", name, "description", doc == null ? "" : doc.description()));
+        }
+        return Response.ok(Map.of("actor", actor, "class", cls.getName(), "actions", actions)).build();
     }
 
     /**
      * The description of one action: its JSON Schema with the record's {@code @param} prose on each
-     * property, and the action method's first Javadoc sentence. The same answer {@code ActionCatalog}
-     * gives for a running actor, without a run.
+     * property, or for a raw-String action the method's own {@code @param} as {@code argument}; from the
+     * Javadoc the first sentence, the rest as {@code details} and its {@code <pre>} block as
+     * {@code example}; and {@code yaml}, the step as a workflow writes it ({@link ActionStepYaml}). The
+     * same answer {@code ActionCatalog} gives for a running actor, without a run.
      */
     @GET
     @Path("/workflows/actions/{actor}/{action}")
@@ -804,6 +815,7 @@ public class ChatResource {
         if (!known) return Response.status(404).entity(Map.of("error", "actor " + actor + " has no action " + action)).build();
         var node = com.scivicslab.pojoactor.action.schema.ActionCatalog.describe(cls, action, ACTION_SCHEMAS, ACTION_MANIFEST);
         node.put("actor", actor);
+        node.put("yaml", ActionStepYaml.of(actor, action, node));
         return Response.ok(node.toString()).build();
     }
 

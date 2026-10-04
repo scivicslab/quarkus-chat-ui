@@ -1033,7 +1033,11 @@
             .catch(function (e) { actStatus(e.message); });
     }
 
-    /** One row: the actor and action in the heading, then the description, the fields or a problem. */
+    /**
+     * One row: the actor and action in the heading, then the first sentence, the rest of the Javadoc,
+     * what the action takes (the record's fields, or the String the method documents), and the step
+     * as a workflow YAML writes it — or a problem line.
+     */
     function actRow(actor, action, d) {
         var row = document.createElement('div');
         row.className = 'act-item';
@@ -1054,6 +1058,12 @@
             desc.textContent = d.description;
             row.appendChild(desc);
         }
+        if (d.details) {
+            var det = document.createElement('p');
+            det.className = 'act-details';
+            det.textContent = d.details;
+            row.appendChild(det);
+        }
         var schema = d.schema;
         if (schema && schema.properties) {
             var required = schema.required || [];
@@ -1071,11 +1081,31 @@
                 ul.appendChild(li);
             });
             row.appendChild(ul);
+        } else if (d.argument) {
+            // A raw-String action: what its Javadoc says of the String is all that is declared of it.
+            var pa = document.createElement('p');
+            pa.className = 'act-fields';
+            var ca = document.createElement('code');
+            ca.textContent = d.argument.name || 'args';
+            pa.appendChild(ca);
+            pa.appendChild(document.createTextNode(' (string)'
+                + (d.argument.description ? ' — ' + d.argument.description : '')));
+            row.appendChild(pa);
         } else if (d.note) {
             var pn = document.createElement('p');
             pn.className = 'act-fields';
             pn.textContent = d.note;
             row.appendChild(pn);
+        }
+        if (d.yaml) {
+            var lab = document.createElement('div');
+            lab.className = 'act-example-label';
+            lab.textContent = d.example ? 'as the workflow YAML writes it' : 'as the workflow YAML writes it (composed from the declaration)';
+            row.appendChild(lab);
+            var pre = document.createElement('pre');
+            pre.className = 'act-example';
+            pre.textContent = d.yaml;
+            row.appendChild(pre);
         }
         return row;
     }
@@ -1123,7 +1153,9 @@
                 cls.textContent = d['class'] || '';
                 head.appendChild(cls);
                 panel.appendChild(head);
-                (d.actions || []).forEach(function (name) {
+                // Each action with the first sentence of its Javadoc; the name opens the full description.
+                (d.actions || []).forEach(function (a) {
+                    var name = typeof a === 'string' ? a : a.name;
                     var item = document.createElement('div');
                     item.className = 'act-item';
                     var b = document.createElement('button');
@@ -1136,6 +1168,12 @@
                         actShowAction(actor, name);
                     });
                     item.appendChild(b);
+                    if (a && a.description) {
+                        var p = document.createElement('p');
+                        p.className = 'act-desc';
+                        p.textContent = a.description;
+                        item.appendChild(p);
+                    }
                     panel.appendChild(item);
                 });
                 actStatus(String((d.actions || []).length) + ' actions');
