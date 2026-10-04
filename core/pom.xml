@@ -95,8 +95,10 @@
           </execution>
         </executions>
       </plugin>
-      <!-- META-INF/turing-plugin.json: each @Action method's Javadoc first sentence and its record's @param
-           prose, read back by ActionManifest (ActionCatalogWithJavadoc_260930_oo01). -->
+      <!-- This module's action manifest: each @Action method's Javadoc (first sentence, body, <pre> example,
+           @param prose), read back by ActionManifest (ActionCatalogWithJavadoc_260930_oo01). The resource is
+           named after the module and indexed in a services file, because the uber-jar keeps only one entry
+           per name and would drop every module's META-INF/turing-plugin.json but one. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-javadoc-plugin</artifactId>
@@ -118,8 +120,10 @@
               </docletArtifact>
               <useStandardDocletOptions>false</useStandardDocletOptions>
               <additionalOptions>
-                <additionalOption>-turingOutputDir</additionalOption>
-                <additionalOption>${project.build.outputDirectory}/META-INF</additionalOption>
+                <additionalOption>-turingClassesDir</additionalOption>
+                <additionalOption>${project.build.outputDirectory}</additionalOption>
+                <additionalOption>-turingManifestResource</additionalOption>
+                <additionalOption>META-INF/turing-plugin/${project.groupId}.${project.artifactId}.json</additionalOption>
               </additionalOptions>
               <doclint>none</doclint>
               <failOnError>false</failOnError>

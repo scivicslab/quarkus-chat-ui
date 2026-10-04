@@ -785,9 +785,6 @@ public class ChatResource {
         Class<?> cls = ClaudeHarnessRunner.ACTOR_CLASSES.get(actor);
         if (cls == null) return Response.status(404).entity(Map.of("error", "unknown actor: " + actor)).build();
         java.util.SortedSet<String> names = com.scivicslab.pojoactor.action.schema.ActionCatalog.actionNamesOf(cls);
-        if (cls == com.scivicslab.turingworkflow.workflow.InterpreterIIAR.class) {
-            names = new java.util.TreeSet<>(ClaudeHarnessRunner.INTERPRETER_ACTIONS);
-        }
         List<Map<String, String>> actions = new ArrayList<>();
         for (String name : names) {
             var doc = ACTION_MANIFEST.docFor(cls, name);
@@ -809,9 +806,7 @@ public class ChatResource {
     public Response workflowActionDescription(@PathParam("actor") String actor, @PathParam("action") String action) {
         Class<?> cls = ClaudeHarnessRunner.ACTOR_CLASSES.get(actor);
         if (cls == null) return Response.status(404).entity(Map.of("error", "unknown actor: " + actor)).build();
-        boolean known = com.scivicslab.pojoactor.action.schema.ActionCatalog.actionNamesOf(cls).contains(action)
-                || (cls == com.scivicslab.turingworkflow.workflow.InterpreterIIAR.class
-                    && ClaudeHarnessRunner.INTERPRETER_ACTIONS.contains(action));
+        boolean known = com.scivicslab.pojoactor.action.schema.ActionCatalog.actionNamesOf(cls).contains(action);
         if (!known) return Response.status(404).entity(Map.of("error", "actor " + actor + " has no action " + action)).build();
         var node = com.scivicslab.pojoactor.action.schema.ActionCatalog.describe(cls, action, ACTION_SCHEMAS, ACTION_MANIFEST);
         node.put("actor", actor);

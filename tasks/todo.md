@@ -235,6 +235,18 @@ returns `{name, description}` pairs; the tab shows all of it.
   its sentence; `explain` shows `args (string) — ignored`, the details and the two-line step; `check`
   shows the field and the 9-line example with its braces and jexl intact; `out.print` shows the
   composed step with the "(composed from the declaration)" label; no browser errors.
-- Not covered: the `this`/`interpreter` actions (`putJson`, `onlyIf`, ...) have no description, because
-  `InterpreterIIAR` dispatches them in a switch without `@Action`, so the doclet never sees them; the
-  tab shows their names and a composed two-line step only.
+- The `this`/`interpreter` actions had no description because `InterpreterIIAR` answered them from an
+  if-chain and `IIActorRef` answered the JSON State ones from a switch, neither an `@Action` method.
+  Turing-workflow `5bad4c4` makes each one an `@Action` method with Javadoc and a `<pre>` step, and
+  `ActionManifest.docFor` walks the hierarchy (putJson is declared on `IIActorRef`); the hand-written
+  `INTERPRETER_ACTIONS` list is gone. Converting also fixed `sleep`/`readYaml`/`print`, which read the
+  one-element JSON array a bare `arguments:` string becomes as literal text.
+- The uber-jar kept only one `META-INF/turing-plugin.json` (core's), so at runtime the engine's and the
+  plugin's actions had no prose even before this work, while unit tests on separate jars saw them all.
+  Turing-workflow `1ae8a57`: each jar writes `META-INF/turing-plugin/<groupId>.<artifactId>.json` and
+  one line in a `META-INF/services/...ActionManifestSource` index, which the uber-jar concatenates; the
+  built jar now holds three manifests and a three-line index.
+- Verified on the built jar: `this` lists 17 actions, all described; `harness` 18 (12 own + the 6 JSON
+  State ones it inherits); `this.putJson` shows its argument shape and the `judge.verdict` step;
+  `onlyIf` its jexl example. `out` (6 of 9) and `calc` (11 of 22) are described only where
+  turing-workflow's own Javadoc has a first sentence.

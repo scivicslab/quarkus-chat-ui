@@ -240,10 +240,13 @@ Three endpoints serve it, all without a running workflow: `GET /api/workflows/ac
 names), `GET /api/workflows/actions/{actor}` (`{name, description}` per action), and
 `GET /api/workflows/actions/{actor}/{action}` (`description`, `details`, `example`, the JSON
 `schema` of a record argument or the `argument` of a raw-String one, and `yaml`). Everything comes
-from the build: `action-schemas/` from the argument records' `@NotNull` annotations and
-`META-INF/turing-plugin.json` from the Javadoc, so it is the same text `ActionCatalog` gives for a
-running actor. To document a new action, write its Javadoc: the first sentence, the body, a
-`<pre>{@code ...}</pre>` block holding the YAML step, and `@param` lines.
+from the build: `action-schemas/` from the argument records' `@NotNull` annotations and each
+module's `META-INF/turing-plugin/<groupId>.<artifactId>.json` from the Javadoc (named per module and
+indexed in a services file, because the uber-jar keeps only one entry per name), so it is the same
+text `ActionCatalog` gives for a running actor. The engine's own actions — `this.putJson`,
+`this.onlyIf`, `this.call`, ... — are `@Action` methods of `IIActorRef` and `InterpreterIIAR` in
+turing-workflow and are described the same way. To document a new action, write its Javadoc: the
+first sentence, the body, a `<pre>{@code ...}</pre>` block holding the YAML step, and `@param` lines.
 
 ## Agent Loop for the Local LLM provider
 

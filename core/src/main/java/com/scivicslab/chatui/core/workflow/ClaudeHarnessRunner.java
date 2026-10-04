@@ -83,14 +83,6 @@ public class ClaudeHarnessRunner {
             Map.entry("list", com.scivicslab.turingworkflow.workflow.ListActor.class),
             Map.entry("str", com.scivicslab.turingworkflow.workflow.StringActor.class));
 
-    /**
-     * The interpreter's own actions, answered by {@code callByActionName} rather than declared with
-     * {@code @Action}, so reflection does not find them.
-     */
-    public static final List<String> INTERPRETER_ACTIONS = List.of(
-            "putJson", "getJson", "hasJson", "clearJson", "printJson", "appendJson",
-            "onlyIf", "print", "sleep", "doNothing", "setCurrentState", "call", "apply");
-
     /** Starts the named bundled workflow on a virtual thread (returns immediately). */
     public void launch(String workflowName, String inputJson) {
         String yaml = readBundledYaml(workflowName);

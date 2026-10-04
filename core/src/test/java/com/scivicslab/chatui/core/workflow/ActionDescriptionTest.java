@@ -74,6 +74,17 @@ class ActionDescriptionTest {
         assertTrue(ActionCatalog.actionNamesOf(ClaudeHarnessRunner.ACTOR_CLASSES.get("harness")).contains("check"));
         assertTrue(ActionCatalog.actionNamesOf(ClaudeHarnessRunner.ACTOR_CLASSES.get("queue")).containsAll(java.util.List.of("enqueue", "requeue")));
         assertTrue(ActionCatalog.actionNamesOf(ClaudeHarnessRunner.ACTOR_CLASSES.get("out")).contains("print"));
-        assertTrue(ClaudeHarnessRunner.INTERPRETER_ACTIONS.contains("onlyIf"));
+        assertTrue(ActionCatalog.actionNamesOf(ClaudeHarnessRunner.ACTOR_CLASSES.get("this")).containsAll(
+                java.util.List.of("onlyIf", "putJson", "appendJson", "call", "print")),
+                "the interpreter's own actions and the JSON State ones it inherits are @Action methods now");
+    }
+
+    @Test
+    @DisplayName("this.putJson: declared on IIActorRef, documented there, found from the interpreter class")
+    void putJsonInherited() {
+        ObjectNode d = ActionCatalog.describe(ClaudeHarnessRunner.ACTOR_CLASSES.get("this"), "putJson", SCHEMAS, MANIFEST);
+        assertTrue(d.get("description").asText().startsWith("Stores one value"), d.toString());
+        assertTrue(d.get("example").asText().contains("method: putJson"), d.toString());
+        assertTrue(d.get("argument").get("description").asText().contains("path"), d.toString());
     }
 }
