@@ -240,6 +240,23 @@ public class ChatUiActorSystem {
      * Uses only non-queue calls ({@code isAlive} / {@code listActorNames}) plus {@code askNow} for the
      * wrapped POJO's type, so it never blocks behind a busy actor's mailbox.
      */
+    /**
+     * The class of the object a live actor holds — where its {@code @Action} methods, if any, are —
+     * or null when no actor has the name. Non-blocking, like {@link #getActorTree()}.
+     */
+    public Class<?> actorClassOf(String name) {
+        if (actorSystem == null || name == null) return null;
+        ActorRef<?> ref = actorSystem.getActor(name);
+        if (ref == null) return null;
+        try {
+            @SuppressWarnings("unchecked")
+            ActorRef<Object> r = (ActorRef<Object>) ref;
+            return r.askNow(o -> (Class<?>) o.getClass()).get(2, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     public ActorNode getActorTree() {
         if (actorSystem == null) {
             return new ActorNode("chat-ui", "ActorSystem", false, java.util.List.of());

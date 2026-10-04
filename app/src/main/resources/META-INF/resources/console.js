@@ -993,232 +993,303 @@
 
     // ── Actions tab ─────────────────────────────────────────────────────────
     //
-    // An actor name alone lists that actor's actions; an action name as well shows what the action does
-    // and what it takes. Both answers come from the action catalog over
-    // /api/workflows/actions, so no workflow has to be running
+    // Upper pane: every actor a workflow may name, grouped by where it comes from; a row selects
+    // it. Lower pane: the selected actor's actions, each with the first sentence of its Javadoc;
+    // a row shows what that action does, what it takes and the step as a workflow YAML writes it.
+    // Both come from the action catalog over /api/actions, so no workflow has to be running
     // (ActionCatalogWithJavadoc_260930_oo01).
 
+    var ACT_ACTORS_HEIGHT_KEY = "chat-ui-act-actors-height";
+    var actActors = [];          // the rows as the server gave them: {name, type, origin}
+    var actSelected = null;      // the selected row, or null
+
     function actStatus(text) {
-        var el = document.getElementById('act-status');
-        if (el) el.textContent = text || '';
+        var el = document.getElementById("act-status");
+        if (el) el.textContent = text || "";
     }
 
-    function actPanel() { return document.getElementById('act-list'); }
+    function actPanel() { return document.getElementById("act-list"); }
 
-    /** Loads the actor names into the actor field's datalist, once. */
-    var actActorsLoaded = false;
-    function actLoadActorNames() {
-        if (actActorsLoaded) return;
-        actActorsLoaded = true;
-        fetch('/api/workflows/actions')
+    /** How the upper pane names each origin. */
+    function actOriginLabel(origin) {
+        switch (origin) {
+            case "workflow": return "workflow run";
+            case "agent-loop": return "agent loop";
+            case "plan": return "plan";
+            case "application": return "application";
+            default: return origin || "";
+        }
+    }
+
+    /** Draws the upper pane from actActors, keeping only the rows the filter text matches. */
+    function actRenderActors() {
+        var box = document.getElementById("act-actors");
+        if (!box) return;
+        var filter = ((document.getElementById("act-filter") || {}).value || "").trim().toLowerCase();
+        box.textContent = "";
+        var lastOrigin = null;
+        var shown = 0;
+        actActors.forEach(function (a) {
+            if (filter && (a.name + " " + a.type).toLowerCase().indexOf(filter) < 0) return;
+            if (a.origin !== lastOrigin) {
+                var h = document.createElement("div");
+                h.className = "act-origin";
+                h.textContent = actOriginLabel(a.origin);
+                box.appendChild(h);
+                lastOrigin = a.origin;
+            }
+            var row = document.createElement("button");
+            row.type = "button";
+            row.className = "act-actor-row" + (actSelected && actSelected.name === a.name && actSelected.origin === a.origin ? " selected" : "");
+            var name = document.createElement("span");
+            name.className = "act-actor-name";
+            name.textContent = a.name;
+            row.appendChild(name);
+            var type = document.createElement("span");
+            type.className = "act-actor-type";
+            type.textContent = a.type || "";
+            row.appendChild(type);
+            row.addEventListener("click", function () { actSelect(a); });
+            box.appendChild(row);
+            shown++;
+        });
+        if (shown === 0) {
+            var none = document.createElement("p");
+            none.className = "act-problem";
+            none.textContent = actActors.length ? "no actor matches the filter" : "no actors";
+            box.appendChild(none);
+        }
+    }
+
+    /** Fetches the rows and redraws; the selection survives when its row is still there. */
+    function actLoadActors() {
+        fetch("/api/actions")
             .then(function (r) { return r.json(); })
             .then(function (d) {
-                var list = document.getElementById('act-actor-names');
-                if (!list) return;
-                list.textContent = '';
-                (d.actors || []).forEach(function (name) {
-                    var o = document.createElement('option');
-                    o.value = name;
-                    list.appendChild(o);
-                });
+                actActors = d.actors || [];
+                if (actSelected && !actActors.some(function (a) { return a.name === actSelected.name && a.origin === actSelected.origin; })) {
+                    actSelected = null;
+                    var panel = actPanel();
+                    if (panel) panel.textContent = "";
+                }
+                actRenderActors();
             })
             .catch(function (e) { actStatus(e.message); });
     }
 
+    function actSelect(a) {
+        actSelected = a;
+        actRenderActors();
+        actListActions(a);
+    }
+
+    function actQuery(a) {
+        return "origin=" + encodeURIComponent(a.origin || "") + "&actor=" + encodeURIComponent(a.name);
+    }
+
     /**
-     * One row: the actor and action in the heading, then the first sentence, the rest of the Javadoc,
-     * what the action takes (the record's fields, or the String the method documents), and the step
-     * as a workflow YAML writes it — or a problem line.
+     * One action in full: the heading, the first sentence, the rest of the Javadoc, what the action
+     * takes (the record's fields, or the String the method documents), and the step as a workflow
+     * YAML writes it — or a problem line.
      */
     function actRow(actor, action, d) {
-        var row = document.createElement('div');
-        row.className = 'act-item';
-        var head = document.createElement('div');
-        head.className = 'act-head';
-        head.textContent = actor + '.' + action;
+        var row = document.createElement("div");
+        row.className = "act-item";
+        var head = document.createElement("div");
+        head.className = "act-head";
+        head.textContent = actor + "." + action;
         row.appendChild(head);
         if (!d || d.error) {
-            var pr = document.createElement('p');
-            pr.className = 'act-problem';
-            pr.textContent = (d && d.error) || 'no answer';
+            var pr = document.createElement("p");
+            pr.className = "act-problem";
+            pr.textContent = (d && d.error) || "no answer";
             row.appendChild(pr);
             return row;
         }
         if (d.description) {
-            var desc = document.createElement('p');
-            desc.className = 'act-desc';
+            var desc = document.createElement("p");
+            desc.className = "act-desc";
             desc.textContent = d.description;
             row.appendChild(desc);
         }
         if (d.details) {
-            var det = document.createElement('p');
-            det.className = 'act-details';
+            var det = document.createElement("p");
+            det.className = "act-details";
             det.textContent = d.details;
             row.appendChild(det);
         }
         var schema = d.schema;
         if (schema && schema.properties) {
             var required = schema.required || [];
-            var ul = document.createElement('ul');
-            ul.className = 'act-fields';
+            var ul = document.createElement("ul");
+            ul.className = "act-fields";
             Object.keys(schema.properties).forEach(function (name) {
                 var prop = schema.properties[name] || {};
-                var li = document.createElement('li');
-                var code = document.createElement('code');
+                var li = document.createElement("li");
+                var code = document.createElement("code");
                 code.textContent = name;
                 li.appendChild(code);
                 li.appendChild(document.createTextNode(
-                    ' (' + (prop.type || 'any') + (required.indexOf(name) >= 0 ? ', required' : '') + ')'
-                    + (prop.description ? ' — ' + prop.description : '')));
+                    " (" + (prop.type || "any") + (required.indexOf(name) >= 0 ? ", required" : "") + ")"
+                    + (prop.description ? " — " + prop.description : "")));
                 ul.appendChild(li);
             });
             row.appendChild(ul);
         } else if (d.argument) {
             // A raw-String action: what its Javadoc says of the String is all that is declared of it.
-            var pa = document.createElement('p');
-            pa.className = 'act-fields';
-            var ca = document.createElement('code');
-            ca.textContent = d.argument.name || 'args';
+            var pa = document.createElement("p");
+            pa.className = "act-fields";
+            var ca = document.createElement("code");
+            ca.textContent = d.argument.name || "args";
             pa.appendChild(ca);
-            pa.appendChild(document.createTextNode(' (string)'
-                + (d.argument.description ? ' — ' + d.argument.description : '')));
+            pa.appendChild(document.createTextNode(" (string)"
+                + (d.argument.description ? " — " + d.argument.description : "")));
             row.appendChild(pa);
         } else if (d.note) {
-            var pn = document.createElement('p');
-            pn.className = 'act-fields';
+            var pn = document.createElement("p");
+            pn.className = "act-fields";
             pn.textContent = d.note;
             row.appendChild(pn);
         }
         if (d.yaml) {
-            var lab = document.createElement('div');
-            lab.className = 'act-example-label';
-            lab.textContent = d.example ? 'as the workflow YAML writes it' : 'as the workflow YAML writes it (composed from the declaration)';
+            var lab = document.createElement("div");
+            lab.className = "act-example-label";
+            lab.textContent = d.example ? "as the workflow YAML writes it" : "as the workflow YAML writes it (composed from the declaration)";
             row.appendChild(lab);
-            var pre = document.createElement('pre');
-            pre.className = 'act-example';
+            var pre = document.createElement("pre");
+            pre.className = "act-example";
             pre.textContent = d.yaml;
             row.appendChild(pre);
         }
         return row;
     }
 
-    /** Shows the description of one action. */
-    function actShowAction(actor, action) {
+    /** Shows one action in the lower pane, with a way back to the actor's list. */
+    function actShowAction(a, action) {
         var panel = actPanel();
         if (!panel) return;
-        actStatus('loading ' + actor + '.' + action + '…');
-        fetch('/api/workflows/actions/' + encodeURIComponent(actor) + '/' + encodeURIComponent(action))
+        actStatus("loading " + a.name + "." + action + "…");
+        fetch("/api/actions/describe?" + actQuery(a) + "&action=" + encodeURIComponent(action))
             .then(function (r) { return r.json(); })
             .then(function (d) {
-                panel.textContent = '';
-                panel.appendChild(actRow(actor, action, d));
-                actStatus('');
+                panel.textContent = "";
+                var back = document.createElement("button");
+                back.type = "button";
+                back.className = "act-back";
+                back.textContent = "← " + a.name + "'s actions";
+                back.addEventListener("click", function () { actListActions(a); });
+                panel.appendChild(back);
+                panel.appendChild(actRow(a.name, action, d));
+                actStatus("");
             })
             .catch(function (e) { actStatus(e.message); });
     }
 
-    /** Lists the actions of one actor; clicking a name shows that action's description. */
-    function actListActions(actor) {
+    /** Lists the selected actor's actions in the lower pane, each with its first sentence. */
+    function actListActions(a) {
         var panel = actPanel();
         if (!panel) return;
-        actStatus('loading ' + actor + '…');
-        fetch('/api/workflows/actions/' + encodeURIComponent(actor))
+        actStatus("loading " + a.name + "…");
+        fetch("/api/actions/list?" + actQuery(a))
             .then(function (r) { return r.json(); })
             .then(function (d) {
-                panel.textContent = '';
+                panel.textContent = "";
                 if (d.error) {
-                    var pr = document.createElement('p');
-                    pr.className = 'act-problem';
+                    var pr = document.createElement("p");
+                    pr.className = "act-problem";
                     pr.textContent = d.error;
                     panel.appendChild(pr);
-                    actStatus('');
+                    actStatus("");
                     return;
                 }
-                var head = document.createElement('div');
-                head.className = 'act-item';
-                var h = document.createElement('div');
-                h.className = 'act-head';
-                h.textContent = actor;
+                var head = document.createElement("div");
+                head.className = "act-item";
+                var h = document.createElement("div");
+                h.className = "act-head";
+                h.textContent = a.name;
                 head.appendChild(h);
-                var cls = document.createElement('p');
-                cls.className = 'act-desc';
-                cls.textContent = d['class'] || '';
+                var cls = document.createElement("p");
+                cls.className = "act-desc";
+                cls.textContent = d["class"] || "";
                 head.appendChild(cls);
                 panel.appendChild(head);
-                // Each action with the first sentence of its Javadoc; the name opens the full description.
-                (d.actions || []).forEach(function (a) {
-                    var name = typeof a === 'string' ? a : a.name;
-                    var item = document.createElement('div');
-                    item.className = 'act-item';
-                    var b = document.createElement('button');
-                    b.type = 'button';
-                    b.className = 'act-head';
+                (d.actions || []).forEach(function (x) {
+                    var name = typeof x === "string" ? x : x.name;
+                    var item = document.createElement("div");
+                    item.className = "act-item";
+                    var b = document.createElement("button");
+                    b.type = "button";
+                    b.className = "act-head";
                     b.textContent = name;
-                    b.addEventListener('click', function () {
-                        var field = document.getElementById('act-action');
-                        if (field) field.value = name;
-                        actShowAction(actor, name);
-                    });
+                    b.addEventListener("click", function () { actShowAction(a, name); });
                     item.appendChild(b);
-                    if (a && a.description) {
-                        var p = document.createElement('p');
-                        p.className = 'act-desc';
-                        p.textContent = a.description;
+                    if (x && x.description) {
+                        var p = document.createElement("p");
+                        p.className = "act-desc";
+                        p.textContent = x.description;
                         item.appendChild(p);
                     }
                     panel.appendChild(item);
                 });
-                actStatus(String((d.actions || []).length) + ' actions');
+                actStatus(String((d.actions || []).length) + " actions");
             })
             .catch(function (e) { actStatus(e.message); });
     }
 
-    /** The Show button and the Enter key: an action name shows one action, otherwise list the actor's. */
-    function actShow() {
-        var actor = (document.getElementById('act-actor') || {}).value;
-        var action = (document.getElementById('act-action') || {}).value;
-        actor = (actor || '').trim();
-        action = (action || '').trim();
-        if (!actor) { actStatus('name an actor'); return; }
-        if (action) actShowAction(actor, action); else actListActions(actor);
+    /** The Clear button: no selection, no filter, the lower pane empty — the tab as first opened. */
+    function actClear() {
+        actSelected = null;
+        var f = document.getElementById("act-filter");
+        if (f) f.value = "";
+        var panel = actPanel();
+        if (panel) panel.textContent = "";
+        actStatus("");
+        actRenderActors();
+    }
+
+    /** The line between the two panes: dragging it sets the upper pane's height, which is kept. */
+    function actInitResize() {
+        var box = document.getElementById("act-actors");
+        var handle = document.getElementById("act-resize-handle");
+        if (!box || !handle) return;
+        var saved = parseInt(localStorage.getItem(ACT_ACTORS_HEIGHT_KEY), 10);
+        if (saved && saved > 0) box.style.height = saved + "px";
+        var dragging = false, startY = 0, startHeight = 0;
+        handle.addEventListener("mousedown", function (e) {
+            e.preventDefault();
+            dragging = true;
+            startY = e.clientY;
+            startHeight = box.offsetHeight;
+            handle.classList.add("dragging");
+            document.body.style.cursor = "row-resize";
+            document.body.style.userSelect = "none";
+        });
+        document.addEventListener("mousemove", function (e) {
+            if (!dragging) return;
+            var room = box.parentElement ? box.parentElement.clientHeight : 0;
+            var most = room > 0 ? Math.max(80, room - 120) : 2000;
+            box.style.height = Math.max(60, Math.min(startHeight + (e.clientY - startY), most)) + "px";
+        });
+        document.addEventListener("mouseup", function () {
+            if (!dragging) return;
+            dragging = false;
+            handle.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            localStorage.setItem(ACT_ACTORS_HEIGHT_KEY, String(box.offsetHeight));
+        });
     }
 
     function actOnShow() {
-        actLoadActorNames();
-    }
-
-    /** The Clear button: both fields empty, the panel empty, the status line empty — the tab as first opened. */
-    function actClear() {
-        ['act-actor', 'act-action'].forEach(function (id) {
-            var el = document.getElementById(id);
-            if (el) el.value = '';
-        });
-        var panel = actPanel();
-        if (panel) panel.textContent = '';
-        actStatus('');
-        var actor = document.getElementById('act-actor');
-        if (actor) actor.focus();
+        actLoadActors();
     }
 
     function initActions() {
-        var show = document.getElementById('act-show');
-        if (show) show.addEventListener('click', actShow);
-        var clear = document.getElementById('act-clear');
-        if (clear) clear.addEventListener('click', actClear);
-        ['act-actor', 'act-action'].forEach(function (id) {
-            var el = document.getElementById(id);
-            if (el) el.addEventListener('keydown', function (e) {
-                if (e.key === 'Enter') { e.preventDefault(); actShow(); }
-            });
-        });
-        // Clearing the action field goes back to the actor's list.
-        var action = document.getElementById('act-action');
-        if (action) action.addEventListener('input', function () {
-            if (!action.value.trim()) {
-                var actor = (document.getElementById('act-actor') || {}).value;
-                if ((actor || '').trim()) actListActions(actor.trim());
-            }
-        });
+        var clear = document.getElementById("act-clear");
+        if (clear) clear.addEventListener("click", actClear);
+        var f = document.getElementById("act-filter");
+        if (f) f.addEventListener("input", actRenderActors);
+        actInitResize();
     }
 
     function initConfig() {

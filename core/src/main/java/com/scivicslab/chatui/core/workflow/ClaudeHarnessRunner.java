@@ -9,6 +9,10 @@ import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.pojoactor.action.ActionResult;
 import com.scivicslab.pojoactor.core.ActorRef;
+import com.scivicslab.chatui.core.plugin.WorkflowActorSource;
+import com.scivicslab.chatui.core.plugin.WorkflowActorSource.WorkflowActor;
+import com.scivicslab.turingworkflow.workflow.IIActorRef;
+import java.util.ArrayList;
 import com.scivicslab.turingworkflow.workflow.DynamicActorLoaderIIAR;
 import com.scivicslab.turingworkflow.workflow.IIActorSystem;
 import com.scivicslab.turingworkflow.workflow.Interpreter;
@@ -46,7 +50,7 @@ import java.util.logging.Logger;
  * ends. The browser treats it like the end of a prompt turn and moves on to the next queue item.</p>
  */
 @ApplicationScoped
-public class ClaudeHarnessRunner {
+public class ClaudeHarnessRunner implements WorkflowActorSource {
 
     private static final Logger LOG = Logger.getLogger(ClaudeHarnessRunner.class.getName());
     private static final int MAX_ITERATIONS = 1_000_000;
@@ -64,24 +68,77 @@ public class ClaudeHarnessRunner {
     WorkflowApprovalRegistry approvalRegistry;
 
     /**
-     * The actors a run registers, by the name the YAML uses, with the class whose {@code @Action}
-     * methods are their actions. Fixed for every run, so a Workflow-tab reader can describe a step's
-     * actor before any run exists ({@code ActionCatalogWithJavadoc_260930_oo01}); the engine's
-     * built-ins {@code calc}, {@code list}, {@code str} and {@code out} are created by the engine on
-     * first use and are listed here under their plain names.
+     * The engine creates these on first use rather than having them registered, so a run's actor
+     * system does not list them; a workflow names them all the same.
      */
-    public static final Map<String, Class<?>> ACTOR_CLASSES = Map.ofEntries(
-            Map.entry("harness", HarnessLeashIIAR.class),
-            Map.entry("queue", QueueBridgeIIAR.class),
-            Map.entry("this", InterpreterIIAR.class),
-            Map.entry("interpreter", InterpreterIIAR.class),
-            Map.entry("loader", DynamicActorLoaderIIAR.class),
-            Map.entry("log", MultiplexerAccumulatorIIAR.class),
-            Map.entry("vars", VarsActor.class),
-            Map.entry("out", com.scivicslab.turingworkflow.workflow.OutActor.class),
-            Map.entry("calc", com.scivicslab.turingworkflow.workflow.CalcActor.class),
-            Map.entry("list", com.scivicslab.turingworkflow.workflow.ListActor.class),
-            Map.entry("str", com.scivicslab.turingworkflow.workflow.StringActor.class));
+    static final List<WorkflowActor> ENGINE_ACTORS = List.of(
+            new WorkflowActor("out", com.scivicslab.turingworkflow.workflow.OutActor.class, "workflow"),
+            new WorkflowActor("calc", com.scivicslab.turingworkflow.workflow.CalcActor.class, "workflow"),
+            new WorkflowActor("list", com.scivicslab.turingworkflow.workflow.ListActor.class, "workflow"),
+            new WorkflowActor("str", com.scivicslab.turingworkflow.workflow.StringActor.class, "workflow"));
+
+    /**
+     * The actors a workflow run may name, answered by registering them: the same
+     * {@link #registerRunActors} a run calls is run on a throwaway actor system with inert leash and
+     * bridge, so the list cannot drift from what a run has. {@code this} is the engine's name for the
+     * interpreter and is listed beside it; the engine's own {@link #ENGINE_ACTORS} follow.
+     */
+    @Override
+    public List<WorkflowActor> workflowActors() {
+        return runActors();
+    }
+
+    /** Static form of {@link #workflowActors()}, for a caller without the bean. */
+    public static List<WorkflowActor> runActors() {
+        IIActorSystem system = new IIActorSystem("workflow-actors");
+        try {
+            Interpreter interpreter = new Interpreter.Builder().loggerName("interpreter").team(system).build();
+            List<WorkflowActor> registered = registerRunActors(system, interpreter, Map.of(),
+                    new HarnessLeash(null, e -> { }, null, "", null),
+                    new QueueBridge(null, e -> { }, "", "", ""));
+            List<WorkflowActor> actors = new ArrayList<>();
+            for (WorkflowActor a : registered) {
+                actors.add(a);
+                if (a.name().equals("interpreter")) actors.add(new WorkflowActor("this", a.type(), a.origin()));
+            }
+            actors.addAll(ENGINE_ACTORS);
+            return actors;
+        } finally {
+            system.terminateIIActors();
+            system.terminate();
+        }
+    }
+
+    /**
+     * Registers the actors of one run in its actor system and says what was registered.
+     *
+     * @param system      the run's own actor system
+     * @param interpreter the run's interpreter, which becomes {@code interpreter} (and {@code this})
+     * @param vars        the run input's variables, for {@code vars}
+     * @param leash       what {@code harness} wraps
+     * @param bridge      what {@code queue} wraps
+     * @return the actors in registration order, with the class whose {@code @Action} methods answer
+     */
+    static List<WorkflowActor> registerRunActors(IIActorSystem system, Interpreter interpreter,
+                                                 Map<String, String> vars, HarnessLeash leash, QueueBridge bridge) {
+        List<WorkflowActor> actors = new ArrayList<>();
+        actors.add(register(system, new DynamicActorLoaderIIAR("loader", system)));
+        MultiplexerAccumulator mux = new MultiplexerAccumulator();
+        mux.addTarget(new ConsoleAccumulator());
+        actors.add(register(system, new MultiplexerAccumulatorIIAR("log", mux, system)));
+        actors.add(register(system, new VarsActor(system, vars)));
+        InterpreterIIAR interpreterActor = new InterpreterIIAR("interpreter", interpreter, system);
+        interpreter.setSelfActorRef(interpreterActor);
+        actors.add(register(system, interpreterActor));
+        actors.add(register(system, new HarnessLeashIIAR("harness", leash, system)));
+        actors.add(register(system, new QueueBridgeIIAR("queue", bridge, system)));
+        return actors;
+    }
+
+    private static WorkflowActor register(IIActorSystem system, IIActorRef<?> actor) {
+        system.addIIActor(actor);
+        return new WorkflowActor(actor.getName(), actor.getClass(), "workflow");
+    }
 
     /** Starts the named bundled workflow on a virtual thread (returns immediately). */
     public void launch(String workflowName, String inputJson) {
@@ -162,25 +219,16 @@ public class ClaudeHarnessRunner {
                     .build();
             interpreter.setWorkflowBaseDir(".");
 
-            system.addIIActor(new DynamicActorLoaderIIAR("loader", system));
-            MultiplexerAccumulator mux = new MultiplexerAccumulator();
-            mux.addTarget(new ConsoleAccumulator());
-            system.addIIActor(new MultiplexerAccumulatorIIAR("log", mux, system));
             Map<String, String> vars = varsFromInput(mapper, input);
-            system.addIIActor(new VarsActor(system, vars));
-            InterpreterIIAR interpreterActor = new InterpreterIIAR("interpreter", interpreter, system);
-            interpreter.setSelfActorRef(interpreterActor);
-            system.addIIActor(interpreterActor);
+            TurnRunner turns = new ProviderTurnRunner(provider, emitter, ioLog);
+            QueueSink queue = new SseQueueSink(emitter, mapper);
+            registerRunActors(system, interpreter, vars,
+                    new HarnessLeash(turns, emitter, mapper, input, approvalRegistry),
+                    new QueueBridge(queue, emitter, title, yaml, input));
+            InterpreterIIAR interpreterActor = (InterpreterIIAR) (IIActorRef<?>) system.getIIActor("interpreter");
             // ${name} in action arguments expands from the interpreter's JSON state (as the CLI's -P does).
             putVariables(interpreterActor, vars);
             putParamDefaults(interpreterActor, yaml, vars);
-
-            TurnRunner turns = new ProviderTurnRunner(provider, emitter, ioLog);
-            QueueSink queue = new SseQueueSink(emitter, mapper);
-            system.addIIActor(new HarnessLeashIIAR("harness",
-                    new HarnessLeash(turns, emitter, mapper, input, approvalRegistry), system));
-            system.addIIActor(new QueueBridgeIIAR("queue",
-                    new QueueBridge(queue, emitter, title, yaml, input), system));
 
             try (InputStream in = new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8))) {
                 interpreter.readYaml(in);

@@ -7,7 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <!-- chat-ui stylesheet first (pristine), then the shell overrides/additions. -->
     <link rel="stylesheet" href="styles.css?v=34">
-    <link rel="stylesheet" href="console.css?v=6">
+    <link rel="stylesheet" href="console.css?v=7">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -223,16 +223,16 @@
                      does and what it takes (ActionCatalogWithJavadoc_260930_oo01). The answers come
                      from the action catalog, so no workflow has to be running. -->
                 <section id="tab-actions" class="rtab-content">
+                    <!-- Actions: the actors a workflow may name (upper pane) and the chosen one's actions
+                         (lower pane), from the action catalog, without a run
+                         (ActionCatalogWithJavadoc_260930_oo01). -->
                     <div class="tab-toolbar">
-                        <label for="act-actor">actor</label>
-                        <input id="act-actor" type="text" list="act-actor-names" placeholder="harness">
-                        <datalist id="act-actor-names"></datalist>
-                        <label for="act-action">action</label>
-                        <input id="act-action" type="text" placeholder="send">
-                        <button id="act-show" type="button">Show</button>
+                        <input id="act-filter" type="text" placeholder="filter actors">
                         <button id="act-clear" type="button">Clear</button>
                         <span id="act-status"></span>
                     </div>
+                    <div id="act-actors" class="act-actors"></div>
+                    <div id="act-resize-handle" class="act-resize-handle" title="Drag to resize"></div>
                     <div id="act-list" class="act-list"></div>
                 </section>
             </div>
@@ -271,6 +271,6 @@
 
     <!-- chat-ui application script (unchanged), then the shell script. -->
     <script src="app.js?v=44"></script>
-    <script src="console.js?v=11"></script>
+    <script src="console.js?v=12"></script>
 </body>
 </html>

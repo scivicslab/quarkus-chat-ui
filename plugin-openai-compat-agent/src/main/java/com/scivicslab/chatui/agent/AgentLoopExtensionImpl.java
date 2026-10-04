@@ -3,6 +3,7 @@ package com.scivicslab.chatui.agent;
 import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
+import com.scivicslab.chatui.core.plugin.WorkflowActorSource;
 import com.scivicslab.chatui.openaicompat.AgentLoopExtension;
 import com.scivicslab.chatui.openaicompat.client.ChatMessage;
 import com.scivicslab.chatui.openaicompat.client.OpenAiCompatClient;
@@ -27,7 +28,14 @@ import java.util.logging.Logger;
  * returns; the YAML's {@code finish} sends the turn's reply and terminal result to the browser.
  */
 @ApplicationScoped
-public class AgentLoopExtensionImpl implements AgentLoopExtension {
+public class AgentLoopExtensionImpl implements AgentLoopExtension, WorkflowActorSource {
+
+    /** The actors an inner-loop run registers, for the Actions tab ({@link AgentLoopRun#actors}). */
+    @Override
+    public java.util.List<WorkflowActorSource.WorkflowActor> workflowActors() {
+        return AgentLoopRun.actors();
+    }
+
 
     private static final Logger LOG = Logger.getLogger(AgentLoopExtensionImpl.class.getName());
 

@@ -70,12 +70,21 @@ class ActionDescriptionTest {
     }
 
     @Test
-    @DisplayName("the actor table names the classes whose @Action methods the YAML calls")
-    void actorTable() {
-        assertTrue(ActionCatalog.actionNamesOf(ClaudeHarnessRunner.ACTOR_CLASSES.get("harness")).contains("check"));
-        assertTrue(ActionCatalog.actionNamesOf(ClaudeHarnessRunner.ACTOR_CLASSES.get("queue")).containsAll(java.util.List.of("enqueue", "requeue")));
-        assertTrue(ActionCatalog.actionNamesOf(ClaudeHarnessRunner.ACTOR_CLASSES.get("out")).contains("print"));
-        assertTrue(ActionCatalog.actionNamesOf(ClaudeHarnessRunner.ACTOR_CLASSES.get("this")).containsAll(
+    @DisplayName("the workflow actors are answered by the run's own registration, not a table beside it")
+    void runActors() {
+        var actors = ClaudeHarnessRunner.runActors();
+        var byName = new java.util.LinkedHashMap<String, Class<?>>();
+        for (var a : actors) {
+            byName.put(a.name(), a.type());
+            assertEquals("workflow", a.origin());
+        }
+        assertEquals(HarnessLeashIIAR.class, byName.get("harness"));
+        assertEquals(QueueBridgeIIAR.class, byName.get("queue"));
+        assertEquals(byName.get("interpreter"), byName.get("this"), "this is the engine's name for the interpreter");
+        assertTrue(byName.keySet().containsAll(java.util.List.of("loader", "log", "vars", "out", "calc", "list", "str")), byName.keySet().toString());
+        assertTrue(ActionCatalog.actionNamesOf(byName.get("harness")).contains("check"));
+        assertTrue(ActionCatalog.actionNamesOf(byName.get("out")).contains("print"));
+        assertTrue(ActionCatalog.actionNamesOf(byName.get("this")).containsAll(
                 java.util.List.of("onlyIf", "putJson", "appendJson", "call", "print")),
                 "the interpreter's own actions and the JSON State ones it inherits are @Action methods now");
     }
@@ -83,7 +92,7 @@ class ActionDescriptionTest {
     @Test
     @DisplayName("this.putJson: declared on IIActorRef, documented there, found from the interpreter class")
     void putJsonInherited() {
-        ObjectNode d = ActionCatalog.describe(ClaudeHarnessRunner.ACTOR_CLASSES.get("this"), "putJson", SCHEMAS, MANIFEST);
+        ObjectNode d = ActionCatalog.describe(com.scivicslab.turingworkflow.workflow.InterpreterIIAR.class, "putJson", SCHEMAS, MANIFEST);
         assertTrue(d.get("description").asText().startsWith("Stores one value"), d.toString());
         assertTrue(d.get("example").asText().contains("method: putJson"), d.toString());
         assertTrue(d.get("argument").get("description").asText().contains("path"), d.toString());

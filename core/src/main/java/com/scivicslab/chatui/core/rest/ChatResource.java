@@ -9,6 +9,7 @@ import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.iolog.IoLogView;
 import com.scivicslab.pojoactor.action.schema.ActionStepYaml;
 import com.scivicslab.chatui.core.workflow.ClaudeHarnessRunner;
+import com.scivicslab.chatui.core.workflow.WorkflowActorCatalog;
 import com.scivicslab.chatui.core.workflow.WorkflowApprovalRegistry;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;
 import com.scivicslab.chatui.core.plugin.PromptPreprocessor;
@@ -758,39 +759,45 @@ public class ChatResource {
         return Response.ok(Map.of("params", parseWorkflowParams(yaml))).build();
     }
 
-    // ── The Actions tab: an actor's actions and one action's description, without a run
-    //    (ActionCatalogWithJavadoc_260930_oo01) ──
+    // ── The Actions tab: the actors a workflow may name, one actor's actions and one action's
+    //    description, without a run (ActionCatalogWithJavadoc_260930_oo01) ──
 
     private static final com.scivicslab.pojoactor.action.schema.ActionSchemaRegistry ACTION_SCHEMAS =
             new com.scivicslab.pojoactor.action.schema.ActionSchemaRegistry();
     private static final com.scivicslab.pojoactor.action.schema.ActionManifest ACTION_MANIFEST =
             new com.scivicslab.pojoactor.action.schema.ActionManifest();
 
-    /** The actor names a workflow YAML may use, for the Actions tab to offer: {@code {actors:[...]}}. */
+    @Inject
+    WorkflowActorCatalog actorCatalog;
+
+    /** The rows of the Actions tab's upper pane: {@code {actors:[{name, type, origin}, ...]}}. */
     @GET
-    @Path("/workflows/actions")
+    @Path("/actions")
     @Produces(MediaType.APPLICATION_JSON)
-    public Response workflowActors() {
-        return Response.ok(Map.of("actors", new java.util.TreeSet<>(ClaudeHarnessRunner.ACTOR_CLASSES.keySet()))).build();
+    public Response actionActors() {
+        return Response.ok(Map.of("actors", actorCatalog.rows())).build();
     }
 
     /**
      * The actions of one actor, each with the first sentence of its Javadoc:
-     * {@code {actor, class, actions:[{name, description}, ...]}}.
+     * {@code {actor, class, origin, actions:[{name, description}, ...]}}.
+     *
+     * @param origin the row's origin, since a name may be both a workflow actor and a live one
+     * @param actor  the actor name
      */
     @GET
-    @Path("/workflows/actions/{actor}")
+    @Path("/actions/list")
     @Produces(MediaType.APPLICATION_JSON)
-    public Response workflowActorActions(@PathParam("actor") String actor) {
-        Class<?> cls = ClaudeHarnessRunner.ACTOR_CLASSES.get(actor);
+    public Response actionList(@QueryParam("origin") String origin, @QueryParam("actor") String actor) {
+        Class<?> cls = actorCatalog.classOf(origin, actor);
         if (cls == null) return Response.status(404).entity(Map.of("error", "unknown actor: " + actor)).build();
-        java.util.SortedSet<String> names = com.scivicslab.pojoactor.action.schema.ActionCatalog.actionNamesOf(cls);
         List<Map<String, String>> actions = new ArrayList<>();
-        for (String name : names) {
+        for (String name : com.scivicslab.pojoactor.action.schema.ActionCatalog.actionNamesOf(cls)) {
             var doc = ACTION_MANIFEST.docFor(cls, name);
             actions.add(Map.of("name", name, "description", doc == null ? "" : doc.description()));
         }
-        return Response.ok(Map.of("actor", actor, "class", cls.getName(), "actions", actions)).build();
+        return Response.ok(Map.of("actor", actor, "class", cls.getName(), "origin", origin == null ? "" : origin,
+                "actions", actions)).build();
     }
 
     /**
@@ -801,13 +808,15 @@ public class ChatResource {
      * same answer {@code ActionCatalog} gives for a running actor, without a run.
      */
     @GET
-    @Path("/workflows/actions/{actor}/{action}")
+    @Path("/actions/describe")
     @Produces(MediaType.APPLICATION_JSON)
-    public Response workflowActionDescription(@PathParam("actor") String actor, @PathParam("action") String action) {
-        Class<?> cls = ClaudeHarnessRunner.ACTOR_CLASSES.get(actor);
+    public Response actionDescription(@QueryParam("origin") String origin, @QueryParam("actor") String actor,
+                                      @QueryParam("action") String action) {
+        Class<?> cls = actorCatalog.classOf(origin, actor);
         if (cls == null) return Response.status(404).entity(Map.of("error", "unknown actor: " + actor)).build();
-        boolean known = com.scivicslab.pojoactor.action.schema.ActionCatalog.actionNamesOf(cls).contains(action);
-        if (!known) return Response.status(404).entity(Map.of("error", "actor " + actor + " has no action " + action)).build();
+        if (action == null || !com.scivicslab.pojoactor.action.schema.ActionCatalog.actionNamesOf(cls).contains(action)) {
+            return Response.status(404).entity(Map.of("error", "actor " + actor + " has no action " + action)).build();
+        }
         var node = com.scivicslab.pojoactor.action.schema.ActionCatalog.describe(cls, action, ACTION_SCHEMAS, ACTION_MANIFEST);
         node.put("actor", actor);
         node.put("yaml", ActionStepYaml.of(actor, action, node));

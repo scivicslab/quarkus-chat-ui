@@ -2,6 +2,10 @@ package com.scivicslab.chatui.agent;
 
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.pojoactor.action.ActionResult;
+import com.scivicslab.chatui.core.plugin.WorkflowActorSource.WorkflowActor;
+import com.scivicslab.turingworkflow.workflow.IIActorRef;
+import java.util.ArrayList;
+import java.util.List;
 import com.scivicslab.turingworkflow.workflow.DynamicActorLoaderIIAR;
 import com.scivicslab.turingworkflow.workflow.IIActorSystem;
 import com.scivicslab.turingworkflow.workflow.Interpreter;
@@ -53,17 +57,10 @@ public final class AgentLoopRun {
             Interpreter interpreter = new Interpreter.Builder().loggerName("interpreter").team(system).build();
             interpreter.setWorkflowBaseDir(".");
             if (onInterpreter != null) onInterpreter.accept(interpreter);
-            system.addIIActor(new DynamicActorLoaderIIAR("loader", system));
-            MultiplexerAccumulator mux = new MultiplexerAccumulator();
-            mux.addTarget(new ConsoleAccumulator());
-            system.addIIActor(new MultiplexerAccumulatorIIAR("log", mux, system));
-            system.addIIActor(new VarsActor(system, new HashMap<>()));
-            InterpreterIIAR interpreterActor = new InterpreterIIAR("interpreter", interpreter, system);
-            interpreter.setSelfActorRef(interpreterActor);
-            system.addIIActor(interpreterActor);
+            registerRunActors(system, interpreter, turn);
+            InterpreterIIAR interpreterActor = (InterpreterIIAR) (IIActorRef<?>) system.getIIActor("interpreter");
             interpreterActor.callByActionName("putJson", new org.json.JSONObject()
                     .put("path", "user.prompt").put("value", userPrompt == null ? "" : userPrompt).toString());
-            system.addIIActor(new AgentTurnIIAR("agent", turn, system));
             try (InputStream in = new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8))) {
                 interpreter.readYaml(in);
             }
@@ -77,5 +74,51 @@ public final class AgentLoopRun {
     /** Emits the error the browser sees when a run did not reach its end. */
     static ChatEvent failure(ActionResult result) {
         return ChatEvent.error("agent loop failed: " + result.getResult());
+    }
+
+    /**
+     * Registers the actors of one inner-loop run and says what was registered — the same list the
+     * Actions tab shows, so it cannot drift from what a run has
+     * ({@code ActionCatalogWithJavadoc_260930_oo01}).
+     *
+     * @param system      the run's own actor system
+     * @param interpreter the run's interpreter, which becomes {@code interpreter} (and {@code this})
+     * @param turn        what {@code agent} wraps; null when only the list is wanted
+     * @return the actors in registration order, with the class whose {@code @Action} methods answer
+     */
+    static List<WorkflowActor> registerRunActors(IIActorSystem system, Interpreter interpreter, AgentTurn turn) {
+        List<WorkflowActor> actors = new ArrayList<>();
+        actors.add(register(system, new DynamicActorLoaderIIAR("loader", system)));
+        MultiplexerAccumulator mux = new MultiplexerAccumulator();
+        mux.addTarget(new ConsoleAccumulator());
+        actors.add(register(system, new MultiplexerAccumulatorIIAR("log", mux, system)));
+        actors.add(register(system, new VarsActor(system, new HashMap<>())));
+        InterpreterIIAR interpreterActor = new InterpreterIIAR("interpreter", interpreter, system);
+        interpreter.setSelfActorRef(interpreterActor);
+        actors.add(register(system, interpreterActor));
+        actors.add(register(system, new AgentTurnIIAR("agent", turn, system)));
+        return actors;
+    }
+
+    private static WorkflowActor register(IIActorSystem system, IIActorRef<?> actor) {
+        system.addIIActor(actor);
+        return new WorkflowActor(actor.getName(), actor.getClass(), "agent-loop");
+    }
+
+    /** The actors an inner-loop run may name, answered by registering them on a throwaway system. */
+    public static List<WorkflowActor> actors() {
+        IIActorSystem system = new IIActorSystem("agent-loop-actors");
+        try {
+            Interpreter interpreter = new Interpreter.Builder().loggerName("interpreter").team(system).build();
+            List<WorkflowActor> actors = new ArrayList<>();
+            for (WorkflowActor a : registerRunActors(system, interpreter, null)) {
+                actors.add(a);
+                if (a.name().equals("interpreter")) actors.add(new WorkflowActor("this", a.type(), a.origin()));
+            }
+            return actors;
+        } finally {
+            system.terminateIIActors();
+            system.terminate();
+        }
     }
 }

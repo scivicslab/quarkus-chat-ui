@@ -250,3 +250,31 @@ returns `{name, description}` pairs; the tab shows all of it.
   State ones it inherits); `this.putJson` shows its argument shape and the `judge.verdict` step;
   `onlyIf` its jexl example. `out` (6 of 9) and `calc` (11 of 22) are described only where
   turing-workflow's own Javadoc has a first sentence.
+
+---
+
+# Actions tab: the actors above, the chosen actor's actions below; no hand-written actor table
+
+## Plan
+The tab named its actors from `ClaudeHarnessRunner.ACTOR_CLASSES`, a table written beside the
+registration code, so an actor a plugin registers (`agent`) never appeared, and the actor field asked
+the reader to know the name. Actors are not a fixed set. Answer the list from the code that registers
+them, add the actors alive in the application, and show them as a list to pick from.
+
+## Tasks
+- [x] `WorkflowActorSource` SPI; `ClaudeHarnessRunner` and the agent plugin's `AgentLoopExtensionImpl`
+      implement it by running their own `registerRunActors` on a throwaway actor system
+- [x] `WorkflowActorCatalog`: every source plus the live `ChatUiActorSystem` actors, keyed by origin + name
+      (`queue` is both the workflow's `QueueBridgeIIAR` and the application's `QueueActor`)
+- [x] `GET /api/actions`, `/api/actions/list?origin&actor`, `/api/actions/describe?origin&actor&action`
+      replace `/api/workflows/actions/*`; `ACTOR_CLASSES` is gone
+- [x] Upper pane with origin headings and a filter; lower pane with the actions, an action's description
+      and a back button; draggable line; Clear
+- [x] README; tests; built jar driven in a headless browser
+
+## Review
+- 25 rows: 11 from the workflow run (`this` listed beside `interpreter`, plus the engine's `out`/`calc`/
+  `list`/`str`), 6 from the agent loop including `agent` (11 actions, all described), 8 live application
+  actors. `harness` selected lists 18 actions all described; `check` opens with its sentence and step;
+  back, filter, Clear and the drag all work; no browser errors.
+- The same two-pane tab, from one script template, went into chat-ui-with-audit-trail (`21f06f0` there).
