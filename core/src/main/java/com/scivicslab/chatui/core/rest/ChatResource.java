@@ -757,14 +757,23 @@ public class ChatResource {
         return Response.ok(Map.of("params", parseWorkflowParams(yaml))).build();
     }
 
-    // ── Describing a step's actor and action before any run (ActionCatalogWithJavadoc_260930_oo01) ──
+    // ── The Actions tab: an actor's actions and one action's description, without a run
+    //    (ActionCatalogWithJavadoc_260930_oo01) ──
 
     private static final com.scivicslab.pojoactor.action.schema.ActionSchemaRegistry ACTION_SCHEMAS =
             new com.scivicslab.pojoactor.action.schema.ActionSchemaRegistry();
     private static final com.scivicslab.pojoactor.action.schema.ActionManifest ACTION_MANIFEST =
             new com.scivicslab.pojoactor.action.schema.ActionManifest();
 
-    /** The actions of one actor the Workflow tab may name: {@code {actor, class, actions:[...]}}. */
+    /** The actor names a workflow YAML may use, for the Actions tab to offer: {@code {actors:[...]}}. */
+    @GET
+    @Path("/workflows/actions")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response workflowActors() {
+        return Response.ok(Map.of("actors", new java.util.TreeSet<>(ClaudeHarnessRunner.ACTOR_CLASSES.keySet()))).build();
+    }
+
+    /** The actions of one actor: {@code {actor, class, actions:[...]}}. */
     @GET
     @Path("/workflows/actions/{actor}")
     @Produces(MediaType.APPLICATION_JSON)

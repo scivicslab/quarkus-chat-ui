@@ -63,6 +63,7 @@
             if (tab === 'syslog') refreshLogs();
             if (tab === 'workflow') wfOnShow();
             if (tab === 'agentloop') alOnShow();
+            if (tab === 'actions') actOnShow();
         });
     }
 
@@ -682,131 +683,6 @@
         ta.value = yaml || '';
         try { localStorage.setItem(WF_YAML_KEY, ta.value); } catch (e) { /* ignore */ }
         if (params) wfRenderForm(params); else wfRefreshParams();
-        wfRenderActions();
-    }
-
-    // ── The actions panel: for each step's actor/method, what it does and what it takes ─────────
-
-    // Pulls (actor, method, argument keys) out of each step of the YAML. Text-level: a step starts
-    // at a line "  - ", an action at "      - actor:"; argument keys are read from an inline map
-    // {k: v, k2: v} or from the indented lines under "arguments:". Enough for the catalog lookup.
-    function wfExtractActions(yaml) {
-        var lines = (yaml || '').split(/\r?\n/);
-        var out = [];
-        var step = -1, cur = null;
-        function flush() { if (cur) { out.push(cur); cur = null; } }
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            if (/^  - /.test(line)) { flush(); step++; }
-            var m = line.match(/^\s*-\s*actor:\s*(\S+)/);
-            if (m) { flush(); cur = { step: step, actor: m[1].replace(/^["']|["']$/g, ''), method: '', keys: [], hasArgs: false, line: i + 1 }; continue; }
-            if (!cur) continue;
-            var mm = line.match(/^\s*method:\s*(\S+)/);
-            if (mm) { cur.method = mm[1].replace(/^["']|["']$/g, ''); continue; }
-            var ma = line.match(/^(\s*)arguments:\s*(.*)$/);
-            if (ma) {
-                cur.hasArgs = true;
-                var rest = ma[2].trim();
-                if (rest.indexOf('{') === 0) {
-                    rest.replace(/^\{|\}$/g, '').split(',').forEach(function (kv) {
-                        var k = kv.split(':')[0].trim().replace(/^["']|["']$/g, '');
-                        if (k) cur.keys.push(k);
-                    });
-                } else if (rest === '') {
-                    var indent = ma[1].length;
-                    for (var j = i + 1; j < lines.length; j++) {
-                        var l2 = lines[j];
-                        if (!l2.trim()) continue;
-                        var ind = l2.match(/^(\s*)/)[1].length;
-                        if (ind <= indent) break;
-                        var mk = l2.match(/^\s*([A-Za-z_][\w.-]*)\s*:/);
-                        if (mk) cur.keys.push(mk[1]);
-                    }
-                }
-                continue;
-            }
-        }
-        flush();
-        return out;
-    }
-
-    var wfDescribeCache = {};
-    function wfDescribe(actor, method) {
-        var key = actor + '/' + method;
-        if (wfDescribeCache[key]) return wfDescribeCache[key];
-        var p = fetch('/api/workflows/actions/' + encodeURIComponent(actor) + '/' + encodeURIComponent(method))
-            .then(function (r) { return r.ok ? r.json() : r.json().then(function (e) { return { error: e.error || ('HTTP ' + r.status) }; }); })
-            .catch(function (e) { return { error: e.message }; });
-        wfDescribeCache[key] = p;
-        return p;
-    }
-
-    function wfRenderActions() {
-        var panel = document.getElementById('wf-actions');
-        if (!panel) return;
-        var actions = wfExtractActions(wfYaml());
-        if (!actions.length) { panel.textContent = ''; return; }
-        Promise.all(actions.map(function (a) { return a.method ? wfDescribe(a.actor, a.method) : Promise.resolve({ error: 'no method' }); }))
-            .then(function (descs) {
-                panel.textContent = '';
-                actions.forEach(function (a, i) {
-                    var d = descs[i];
-                    var row = document.createElement('div');
-                    row.className = 'wf-action';
-                    var head = document.createElement('div');
-                    head.className = 'wf-action-head';
-                    var no = document.createElement('span');
-                    no.className = 'wf-step-no';
-                    no.textContent = 'step ' + a.step;
-                    head.appendChild(no);
-                    head.appendChild(document.createTextNode(a.actor + '.' + a.method));
-                    row.appendChild(head);
-                    if (d.error) {
-                        var pr = document.createElement('p');
-                        pr.className = 'wf-action-problem';
-                        pr.textContent = d.error;
-                        row.appendChild(pr);
-                        panel.appendChild(row);
-                        return;
-                    }
-                    if (d.description) {
-                        var desc = document.createElement('p');
-                        desc.className = 'wf-action-desc';
-                        desc.textContent = d.description;
-                        row.appendChild(desc);
-                    }
-                    var schema = d.schema;
-                    if (schema && schema.properties) {
-                        var required = schema.required || [];
-                        var ul = document.createElement('ul');
-                        ul.className = 'wf-action-fields';
-                        Object.keys(schema.properties).forEach(function (name) {
-                            var prop = schema.properties[name] || {};
-                            var li = document.createElement('li');
-                            var code = document.createElement('code');
-                            code.textContent = name;
-                            li.appendChild(code);
-                            li.appendChild(document.createTextNode(' (' + (prop.type || 'any') + (required.indexOf(name) >= 0 ? ', required' : '') + ')'
-                                + (prop.description ? ' — ' + prop.description : '')));
-                            ul.appendChild(li);
-                        });
-                        row.appendChild(ul);
-                        var missing = required.filter(function (r) { return a.keys.indexOf(r) < 0; });
-                        if (missing.length) {
-                            var pm = document.createElement('p');
-                            pm.className = 'wf-action-problem';
-                            pm.textContent = 'arguments: is missing the required key' + (missing.length > 1 ? 's ' : ' ') + missing.join(', ');
-                            row.appendChild(pm);
-                        }
-                    } else if (d.note) {
-                        var pn = document.createElement('p');
-                        pn.className = 'wf-action-fields';
-                        pn.textContent = d.note;
-                        row.appendChild(pn);
-                    }
-                    panel.appendChild(row);
-                });
-            });
     }
 
     var wfParamsTimer = null;
@@ -967,7 +843,7 @@
         if (ta) ta.addEventListener('input', function () {
             try { localStorage.setItem(WF_YAML_KEY, ta.value); } catch (e) { /* ignore */ }
             clearTimeout(wfParamsTimer);
-            wfParamsTimer = setTimeout(function () { wfRefreshParams(); wfRenderActions(); }, 600);
+            wfParamsTimer = setTimeout(wfRefreshParams, 600);
         });
         var box = document.getElementById('wf-run-input');
         if (box) box.addEventListener('input', function () {
@@ -1122,6 +998,184 @@
         });
     }
 
+
+    // ── Actions tab ─────────────────────────────────────────────────────────
+    //
+    // An actor name alone lists that actor's actions; an action name as well shows what the action does
+    // and what it takes. Both answers come from the action catalog over
+    // /api/workflows/actions, so no workflow has to be running
+    // (ActionCatalogWithJavadoc_260930_oo01).
+
+    function actStatus(text) {
+        var el = document.getElementById('act-status');
+        if (el) el.textContent = text || '';
+    }
+
+    function actPanel() { return document.getElementById('act-list'); }
+
+    /** Loads the actor names into the actor field's datalist, once. */
+    var actActorsLoaded = false;
+    function actLoadActorNames() {
+        if (actActorsLoaded) return;
+        actActorsLoaded = true;
+        fetch('/api/workflows/actions')
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                var list = document.getElementById('act-actor-names');
+                if (!list) return;
+                list.textContent = '';
+                (d.actors || []).forEach(function (name) {
+                    var o = document.createElement('option');
+                    o.value = name;
+                    list.appendChild(o);
+                });
+            })
+            .catch(function (e) { actStatus(e.message); });
+    }
+
+    /** One row: the actor and action in the heading, then the description, the fields or a problem. */
+    function actRow(actor, action, d) {
+        var row = document.createElement('div');
+        row.className = 'act-item';
+        var head = document.createElement('div');
+        head.className = 'act-head';
+        head.textContent = actor + '.' + action;
+        row.appendChild(head);
+        if (!d || d.error) {
+            var pr = document.createElement('p');
+            pr.className = 'act-problem';
+            pr.textContent = (d && d.error) || 'no answer';
+            row.appendChild(pr);
+            return row;
+        }
+        if (d.description) {
+            var desc = document.createElement('p');
+            desc.className = 'act-desc';
+            desc.textContent = d.description;
+            row.appendChild(desc);
+        }
+        var schema = d.schema;
+        if (schema && schema.properties) {
+            var required = schema.required || [];
+            var ul = document.createElement('ul');
+            ul.className = 'act-fields';
+            Object.keys(schema.properties).forEach(function (name) {
+                var prop = schema.properties[name] || {};
+                var li = document.createElement('li');
+                var code = document.createElement('code');
+                code.textContent = name;
+                li.appendChild(code);
+                li.appendChild(document.createTextNode(
+                    ' (' + (prop.type || 'any') + (required.indexOf(name) >= 0 ? ', required' : '') + ')'
+                    + (prop.description ? ' — ' + prop.description : '')));
+                ul.appendChild(li);
+            });
+            row.appendChild(ul);
+        } else if (d.note) {
+            var pn = document.createElement('p');
+            pn.className = 'act-fields';
+            pn.textContent = d.note;
+            row.appendChild(pn);
+        }
+        return row;
+    }
+
+    /** Shows the description of one action. */
+    function actShowAction(actor, action) {
+        var panel = actPanel();
+        if (!panel) return;
+        actStatus('loading ' + actor + '.' + action + '…');
+        fetch('/api/workflows/actions/' + encodeURIComponent(actor) + '/' + encodeURIComponent(action))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                panel.textContent = '';
+                panel.appendChild(actRow(actor, action, d));
+                actStatus('');
+            })
+            .catch(function (e) { actStatus(e.message); });
+    }
+
+    /** Lists the actions of one actor; clicking a name shows that action's description. */
+    function actListActions(actor) {
+        var panel = actPanel();
+        if (!panel) return;
+        actStatus('loading ' + actor + '…');
+        fetch('/api/workflows/actions/' + encodeURIComponent(actor))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                panel.textContent = '';
+                if (d.error) {
+                    var pr = document.createElement('p');
+                    pr.className = 'act-problem';
+                    pr.textContent = d.error;
+                    panel.appendChild(pr);
+                    actStatus('');
+                    return;
+                }
+                var head = document.createElement('div');
+                head.className = 'act-item';
+                var h = document.createElement('div');
+                h.className = 'act-head';
+                h.textContent = actor;
+                head.appendChild(h);
+                var cls = document.createElement('p');
+                cls.className = 'act-desc';
+                cls.textContent = d['class'] || '';
+                head.appendChild(cls);
+                panel.appendChild(head);
+                (d.actions || []).forEach(function (name) {
+                    var item = document.createElement('div');
+                    item.className = 'act-item';
+                    var b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'act-head';
+                    b.textContent = name;
+                    b.addEventListener('click', function () {
+                        var field = document.getElementById('act-action');
+                        if (field) field.value = name;
+                        actShowAction(actor, name);
+                    });
+                    item.appendChild(b);
+                    panel.appendChild(item);
+                });
+                actStatus(String((d.actions || []).length) + ' actions');
+            })
+            .catch(function (e) { actStatus(e.message); });
+    }
+
+    /** The Show button and the Enter key: an action name shows one action, otherwise list the actor's. */
+    function actShow() {
+        var actor = (document.getElementById('act-actor') || {}).value;
+        var action = (document.getElementById('act-action') || {}).value;
+        actor = (actor || '').trim();
+        action = (action || '').trim();
+        if (!actor) { actStatus('name an actor'); return; }
+        if (action) actShowAction(actor, action); else actListActions(actor);
+    }
+
+    function actOnShow() {
+        actLoadActorNames();
+    }
+
+    function initActions() {
+        var show = document.getElementById('act-show');
+        if (show) show.addEventListener('click', actShow);
+        ['act-actor', 'act-action'].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) el.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') { e.preventDefault(); actShow(); }
+            });
+        });
+        // Clearing the action field goes back to the actor's list.
+        var action = document.getElementById('act-action');
+        if (action) action.addEventListener('input', function () {
+            if (!action.value.trim()) {
+                var actor = (document.getElementById('act-actor') || {}).value;
+                if ((actor || '').trim()) actListActions(actor.trim());
+            }
+        });
+    }
+
     function initConfig() {
         cfgLoad();
         var t = document.getElementById('cfg-temp');
@@ -1141,6 +1195,7 @@
         initConfig();
         initWorkflow();
         initAgentLoop();
+        initActions();
         ioOnShow();   // Sessions is the default active tab; load it on startup.
     });
 })();

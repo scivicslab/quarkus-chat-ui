@@ -146,3 +146,42 @@ Spec: doc_SCIVICS002 quarkus-chat-ui/020_specs/110_AgentLoopTab_260930_oo01 (con
 - Not done: server-side `ChatActor.busy` is not held during a workflow run (pre-existing: an MCP
   `submitPrompt` during a run would reach the provider concurrently). Jar copied to
   `~/works/quarkus-chat-ui-3.0.0-SNAPSHOT.jar`; the `quarkus-chat-ui.jar` link and running ports untouched.
+
+---
+
+# Actions tab: an actor's actions, and one action's description
+
+## Plan
+The action catalog that `f7ad469` exposed is useful, but the place it was shown is wrong: it put a
+panel inside the Workflow tab, beside the YAML editor, which rewrote a tab whose job is editing and
+queueing a workflow. Put the catalog in its own tab instead — type an actor name, get its actions;
+name an action, get its description — and give the Workflow tab back the shape it had at `8ea372c`.
+
+## Tasks
+- [x] index.html: drop `#wf-actions` from the Workflow tab; add the `Actions` tab button and panel
+- [x] console.js: remove `wfRenderActions` / `wfExtractActions` / `wfDescribe` / `wfDescribeCache`
+      and the input listener that called them; restore the `wfRefreshParams` debounce
+- [x] console.js: `actLoadActorNames`, `actListActions`, `actShowAction`, `actShow`, `initActions`
+- [x] console.css: rename the `.wf-action*` rules to `.act-*`; the list fills the panel
+- [x] ChatResource: `GET /api/workflows/actions` — the actor names, for the `actor` field's datalist
+- [x] Replace the JUnit `WorkflowActionsPanelE2E` with `ActionsTabE2E` (`main()`, outside the build)
+- [x] rm -rf target && mvn install
+- [x] Drive the tab in a headless browser against a freshly built jar
+- [x] README: the Actions tab and its three endpoints
+
+## Review
+- The Workflow tab is back to its `8ea372c` content: no actions panel, the YAML editor and the
+  queue buttons only.
+- The Actions tab asks three endpoints, none of which needs a running workflow: `GET
+  /api/workflows/actions` (new here, the actor names), and the two `f7ad469` already had for an
+  actor's actions and one action's description.
+- Typing an actor and pressing Show lists its actions as buttons; clicking one fills the `action`
+  field and shows the description; clearing that field lists the actions again. An unknown actor or
+  action is a problem line, not an empty panel.
+- Verified in a headless browser against the built jar on a scratch port: `harness` lists its 12
+  actions, `send` shows "Sends one instruction to the LLM as one turn; the message is the reply."
+  with the field `instruction (string, required) — the text sent to the LLM as this turn's prompt`,
+  an unknown action is reported, the Workflow tab holds no actions panel and still has `#wf-yaml`,
+  and the browser logged no unexpected error.
+- The running instances on 28020 and 28021 and the `~/works/quarkus-chat-ui-3.jar` link are
+  untouched; deploying this build is a separate decision.

@@ -222,6 +222,22 @@ Endpoints: `POST /api/workflows/run-yaml` (`{yaml, input}`), `POST /api/workflow
 `GET /api/workflows`, `GET /api/workflows/{name}`. A running workflow enqueues through the SSE event
 `queue_add`, whose content is the queue item JSON.
 
+## Actions tab
+
+The right pane's **Actions** tab answers, without a run, what a workflow YAML may write in an
+`actor:` / `method:` pair. Type an actor name — the field offers the known ones — and **Show** lists
+that actor's actions; click one, or type it in the `action` field, and the tab shows the action's
+first Javadoc sentence and each of its fields with type, required mark and the record's `@param`
+prose. Clearing the `action` field lists the actions again. An actor or action name that does not
+exist is reported as a problem line.
+
+Three endpoints serve it, all without a running workflow: `GET /api/workflows/actions` (the actor
+names), `GET /api/workflows/actions/{actor}` (that actor's action names), and
+`GET /api/workflows/actions/{actor}/{action}` (the description and the JSON Schema of its
+arguments). The descriptions are generated at build time — `action-schemas/` from the argument
+records' `@NotNull` annotations and `META-INF/turing-plugin.json` from their Javadoc — so they are
+the same text `ActionCatalog` gives for a running actor.
+
 ## Agent Loop for the Local LLM provider
 
 With `-Dchat-ui.provider=openai-compat`, one prompt is answered by an inner loop that is itself a

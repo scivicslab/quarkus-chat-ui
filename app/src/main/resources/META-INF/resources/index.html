@@ -7,7 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <!-- chat-ui stylesheet first (pristine), then the shell overrides/additions. -->
     <link rel="stylesheet" href="styles.css?v=34">
-    <link rel="stylesheet" href="console.css?v=4">
+    <link rel="stylesheet" href="console.css?v=5">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -141,6 +141,7 @@
                 <button class="rtab-btn" data-tab="syslog">System Log</button>
                 <button class="rtab-btn" data-tab="workflow">Workflow</button>
                 <button class="rtab-btn" data-tab="agentloop">Agent Loop</button>
+                <button class="rtab-btn" data-tab="actions">Actions</button>
                 <!-- Add new feature tabs here. -->
             </div>
 
@@ -202,9 +203,6 @@
                         <input id="wf-run-input" type="text"
                                placeholder='input JSON, e.g. {"path":"~/works/.../checklist.md"}'>
                     </div>
-                    <!-- What each step's actor.method does and takes, from the action catalog
-                         (ActionCatalogWithJavadoc_260930_oo01); refreshed as the YAML is edited. -->
-                    <div id="wf-actions" class="wf-actions"></div>
                     <textarea id="wf-yaml" class="wf-yaml" spellcheck="false"
                               placeholder="Turing Workflow YAML (actors: harness, queue, out, calc, list, str, interpreter)"></textarea>
                 </section>
@@ -221,6 +219,21 @@
                         <span id="al-status"></span>
                     </div>
                     <div id="al-list"></div>
+                </section>
+                <!-- Actions tab: name an actor to list its actions, name an action to read what it
+                     does and what it takes (ActionCatalogWithJavadoc_260930_oo01). The answers come
+                     from the action catalog, so no workflow has to be running. -->
+                <section id="tab-actions" class="rtab-content">
+                    <div class="tab-toolbar">
+                        <label for="act-actor">actor</label>
+                        <input id="act-actor" type="text" list="act-actor-names" placeholder="harness">
+                        <datalist id="act-actor-names"></datalist>
+                        <label for="act-action">action</label>
+                        <input id="act-action" type="text" placeholder="send">
+                        <button id="act-show" type="button">Show</button>
+                        <span id="act-status"></span>
+                    </div>
+                    <div id="act-list" class="act-list"></div>
                 </section>
             </div>
         </div>
@@ -258,6 +271,6 @@
 
     <!-- chat-ui application script (unchanged), then the shell script. -->
     <script src="app.js?v=43"></script>
-    <script src="console.js?v=7"></script>
+    <script src="console.js?v=8"></script>
 </body>
 </html>
