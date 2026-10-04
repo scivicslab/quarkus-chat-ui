@@ -28,7 +28,7 @@ class BundledWorkflowsTest {
             throws Exception {
         String yaml = ClaudeHarnessRunner.readBundledYaml(name);
         assertNotNull(yaml, name);
-        return ClaudeHarnessRunner.runWorkflow(name, yaml, input, provider, events::add, null, MAPPER, null);
+        return ClaudeHarnessRunner.runWorkflow(name, yaml, input, provider, events::add, null, MAPPER, null, null);
     }
 
     private static List<ChatEvent> ofType(List<ChatEvent> events, String type) {
@@ -117,7 +117,7 @@ class BundledWorkflowsTest {
 
         ScriptedProvider yes = new ScriptedProvider("YES\nready", "deployed");
         List<ChatEvent> yesEvents = new ArrayList<>();
-        assertTrue(ClaudeHarnessRunner.runWorkflow("t", yaml, input, yes, yesEvents::add, null, MAPPER, null).isSuccess());
+        assertTrue(ClaudeHarnessRunner.runWorkflow("t", yaml, input, yes, yesEvents::add, null, MAPPER, null, null).isSuccess());
         assertEquals(2, yes.prompts.size());
         assertTrue(yes.prompts.get(0).startsWith("Is it ready?"));
         assertTrue(yes.prompts.get(0).contains("YES or NO"), "the answer format is appended to the question");
@@ -126,7 +126,7 @@ class BundledWorkflowsTest {
 
         ScriptedProvider no = new ScriptedProvider("NO\nnot yet");
         List<ChatEvent> noEvents = new ArrayList<>();
-        assertTrue(ClaudeHarnessRunner.runWorkflow("t", yaml, input, no, noEvents::add, null, MAPPER, null).isSuccess());
+        assertTrue(ClaudeHarnessRunner.runWorkflow("t", yaml, input, no, noEvents::add, null, MAPPER, null, null).isSuccess());
         assertEquals(1, no.prompts.size(), "only the check turn ran");
         List<ChatEvent> adds = ofType(noEvents, "queue_add");
         assertEquals(1, adds.size(), "the workflow put itself back into the queue");
@@ -153,7 +153,7 @@ class BundledWorkflowsTest {
                 """;
         ScriptedProvider p = new ScriptedProvider("first", "second");
         List<ChatEvent> events = new ArrayList<>();
-        assertTrue(ClaudeHarnessRunner.runWorkflow("t", yaml, "{}", p, events::add, null, MAPPER, null).isSuccess());
+        assertTrue(ClaudeHarnessRunner.runWorkflow("t", yaml, "{}", p, events::add, null, MAPPER, null, null).isSuccess());
         List<ChatEvent> results = ofType(events, "result");
         assertEquals(2, results.size(), "one result per turn is still forwarded (it closes the bubble)");
         for (ChatEvent r : results) assertNull(r.busy(), "the turn's busy=false must not reach the browser");
@@ -179,7 +179,7 @@ class BundledWorkflowsTest {
                 """;
         List<ChatEvent> events = new ArrayList<>();
         assertTrue(ClaudeHarnessRunner.runWorkflow("t", yaml, "{\"target\":\"foo.jar\"}", new ScriptedProvider(),
-                events::add, null, MAPPER, null).isSuccess());
+                events::add, null, MAPPER, null, null).isSuccess());
         List<ChatEvent> adds = ofType(events, "queue_add");
         assertEquals(1, adds.size(), "the empty enqueue failed and the second transition was taken");
         var item = MAPPER.readTree(adds.get(0).content());

@@ -3,6 +3,7 @@ package com.scivicslab.chatui.agent;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.pojoactor.action.ActionResult;
 import com.scivicslab.chatui.core.plugin.WorkflowActorSource.WorkflowActor;
+import com.scivicslab.chatui.core.workflow.WorkflowActorCatalog;
 import com.scivicslab.turingworkflow.workflow.IIActorRef;
 import java.util.ArrayList;
 import java.util.List;
@@ -48,11 +49,14 @@ public final class AgentLoopRun {
      * @param turn      this turn's state and work
      * @param userPrompt this turn's prompt, put into the interpreter's JSON state as {@code user.prompt}
      * @param onInterpreter receives the interpreter so a cancel can call {@code requestStop}; may be null
+     * @param catalog   told that this run's actor system exists, so the Actions tab lists it; may be null
      * @return the interpreter's final result
      */
     public static ActionResult run(String yaml, AgentTurn turn, String userPrompt,
-                                   Consumer<Interpreter> onInterpreter) throws Exception {
+                                   Consumer<Interpreter> onInterpreter,
+                                   WorkflowActorCatalog catalog) throws Exception {
         IIActorSystem system = new IIActorSystem("agent-loop");
+        WorkflowActorCatalog.Run run = catalog == null ? null : catalog.runStarted("agent-loop", system);
         try {
             Interpreter interpreter = new Interpreter.Builder().loggerName("interpreter").team(system).build();
             interpreter.setWorkflowBaseDir(".");
@@ -66,6 +70,7 @@ public final class AgentLoopRun {
             }
             return interpreter.runUntilEnd(MAX_ITERATIONS);
         } finally {
+            if (catalog != null) catalog.runEnded(run);
             system.terminateIIActors();
             system.terminate();
         }

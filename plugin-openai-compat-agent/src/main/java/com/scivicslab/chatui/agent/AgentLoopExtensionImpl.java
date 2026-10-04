@@ -4,6 +4,7 @@ import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.chatui.core.plugin.WorkflowActorSource;
+import com.scivicslab.chatui.core.workflow.WorkflowActorCatalog;
 import com.scivicslab.chatui.openaicompat.AgentLoopExtension;
 import com.scivicslab.chatui.openaicompat.client.ChatMessage;
 import com.scivicslab.chatui.openaicompat.client.OpenAiCompatClient;
@@ -61,6 +62,10 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension, WorkflowActor
     @Inject
     IoLogStore ioLog;
 
+    /** Told when a turn's actor system comes and goes, so the Actions tab lists what is running. */
+    @Inject
+    WorkflowActorCatalog actorCatalog;
+
     private volatile String workflow;
     private volatile LlmCall llm;
     private volatile ToolCaller tools;
@@ -102,7 +107,7 @@ public class AgentLoopExtensionImpl implements AgentLoopExtension, WorkflowActor
         AgentTurn watchedTurn = new AgentTurn(llm, tools, model, history, watching, ctx, ioLog, turnNo);
         currentTurn = watchedTurn;
         try {
-            ActionResult result = AgentLoopRun.run(yaml, watchedTurn, userPrompt, i -> running = i);
+            ActionResult result = AgentLoopRun.run(yaml, watchedTurn, userPrompt, i -> running = i, actorCatalog);
             if (!result.isSuccess()) emitter.accept(AgentLoopRun.failure(result));
         } catch (Exception e) {
             LOG.log(Level.WARNING, "agent loop run error", e);

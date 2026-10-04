@@ -230,7 +230,10 @@ actor comes from: the ones an outer-workflow run registers (`harness`, `queue`, 
 ones the Local LLM provider's agent loop registers (`agent`, ...), and the actors alive in the
 application itself. The list is asked of the registration code and of the live actor system each
 time the tab opens, so a plugin that registers an actor, or an actor created while the application
-runs, appears without any table to maintain; a filter field narrows the rows. Selecting a row fills
+runs, appears without any table to maintain; a filter field narrows the rows. While a workflow or an
+agent-loop turn is running, its own actor system is listed too, under `running: <name> #n`, with
+every actor actually in it — a plugin that registers actors there without declaring them is seen
+all the same. Selecting a row fills
 the lower pane with that actor's actions, each with the first sentence of its Javadoc. Selecting an
 action shows the whole description: the first sentence, the rest of the Javadoc, what the action
 takes — each field of its argument record with type, required mark and `@param` prose, or for an

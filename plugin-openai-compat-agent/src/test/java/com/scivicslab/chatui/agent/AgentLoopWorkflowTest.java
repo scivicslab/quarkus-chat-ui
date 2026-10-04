@@ -69,7 +69,7 @@ class AgentLoopWorkflowTest {
         List<ChatEvent> events = new ArrayList<>();
         AgentTurn turn = new AgentTurn(llm, tools, "m", history, events::add, ProviderContext.simple(null), null, 1);
 
-        ActionResult result = AgentLoopRun.run(yaml(), turn, "what is in /x?", null);
+        ActionResult result = AgentLoopRun.run(yaml(), turn, "what is in /x?", null, null);
 
         assertTrue(result.isSuccess(), result.getResult());
         assertEquals(2, llm.requests.size(), "two model calls");
@@ -97,7 +97,7 @@ class AgentLoopWorkflowTest {
         LinkedList<ChatMessage> history = new LinkedList<>(List.of(new ChatMessage.User("hi")));
         List<ChatEvent> events = new ArrayList<>();
         AgentTurn turn = new AgentTurn(llm, tools, "m", history, events::add, ProviderContext.simple(null), null, 1);
-        assertTrue(AgentLoopRun.run(yaml(), turn, "hi", null).isSuccess());
+        assertTrue(AgentLoopRun.run(yaml(), turn, "hi", null, null).isSuccess());
         assertEquals(1, llm.requests.size());
         assertTrue(tools.calls.isEmpty());
         assertEquals("Hello.", ofType(events, "delta").get(0).content());
@@ -112,7 +112,7 @@ class AgentLoopWorkflowTest {
         List<ChatEvent> events = new ArrayList<>();
         AgentTurn turn = new AgentTurn(llm, tools, "m", history, events::add, ProviderContext.simple(null), null, 1);
         String y = yaml().replace(">= 30", ">= 3");
-        assertTrue(AgentLoopRun.run(y, turn, "loop", null).isSuccess());
+        assertTrue(AgentLoopRun.run(y, turn, "loop", null, null).isSuccess());
         assertEquals(3, llm.requests.size(), "three model calls, then the limit");
         assertEquals(3, tools.calls.size());
         assertTrue(ofType(events, "delta").get(0).content().contains("step limit"));
@@ -127,7 +127,7 @@ class AgentLoopWorkflowTest {
         LinkedList<ChatMessage> history = new LinkedList<>(List.of(new ChatMessage.User("hi")));
         List<ChatEvent> events = new ArrayList<>();
         AgentTurn turn = new AgentTurn(llm, new ScriptedTools(), "m", history, events::add, ProviderContext.simple(null), null, 1);
-        assertTrue(AgentLoopRun.run(yaml(), turn, "hi", null).isSuccess());
+        assertTrue(AgentLoopRun.run(yaml(), turn, "hi", null, null).isSuccess());
         assertEquals(1, ofType(events, "result").size());
     }
 
@@ -139,7 +139,7 @@ class AgentLoopWorkflowTest {
         List<ChatEvent> events = new ArrayList<>();
         AgentTurn turn = new AgentTurn(llm, new ScriptedTools(), "m", history, events::add, ProviderContext.simple(null), null, 1);
         turn.cancel();
-        assertTrue(AgentLoopRun.run(yaml(), turn, "hi", null).isSuccess());
+        assertTrue(AgentLoopRun.run(yaml(), turn, "hi", null, null).isSuccess());
         assertEquals(0, llm.requests.size());
         assertEquals("(cancelled)", ofType(events, "delta").get(0).content());
         assertEquals(1, ofType(events, "result").size());

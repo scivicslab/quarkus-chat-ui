@@ -278,3 +278,7 @@ them, add the actors alive in the application, and show them as a list to pick f
   actors. `harness` selected lists 18 actions all described; `check` opens with its sentence and step;
   back, filter, Clear and the drag all work; no browser errors.
 - The same two-pane tab, from one script template, went into chat-ui-with-audit-trail (`21f06f0` there).
+- Added after review: a run in progress is listed from its actor system itself. `ClaudeHarnessRunner`
+  and the agent plugin's `AgentLoopRun` tell `WorkflowActorCatalog` when their system comes and goes;
+  its actors appear under `running:<title> #n` whoever registered them, and go when the run ends.
+  Verified with a 20-second `this.sleep` workflow: 7 rows while it ran, 0 afterwards.

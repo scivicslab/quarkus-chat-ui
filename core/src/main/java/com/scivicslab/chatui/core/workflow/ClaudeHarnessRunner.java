@@ -67,6 +67,10 @@ public class ClaudeHarnessRunner implements WorkflowActorSource {
     @Inject
     WorkflowApprovalRegistry approvalRegistry;
 
+    /** Told when a run's actor system comes and goes, so the Actions tab lists what is running. */
+    @Inject
+    WorkflowActorCatalog actorCatalog;
+
     /**
      * The engine creates these on first use rather than having them registered, so a run's actor
      * system does not list them; a workflow names them all the same.
@@ -188,7 +192,7 @@ public class ClaudeHarnessRunner implements WorkflowActorSource {
         Consumer<ChatEvent> emitter = ev -> sseRef.tell(a -> a.emit(ev));
         try {
             ActionResult result = runWorkflow(title, yaml, inputJson, provider, emitter, ioLog, mapper,
-                    approvalRegistry);
+                    approvalRegistry, actorCatalog);
             if (!result.isSuccess()) {
                 emitter.accept(ChatEvent.error("workflow failed: " + result.getResult()));
             }
@@ -209,9 +213,11 @@ public class ClaudeHarnessRunner implements WorkflowActorSource {
      */
     static ActionResult runWorkflow(String title, String yaml, String inputJson, LlmProvider provider,
                                     Consumer<ChatEvent> emitter, IoLogStore ioLog, ObjectMapper mapper,
-                                    WorkflowApprovalRegistry approvalRegistry) throws Exception {
+                                    WorkflowApprovalRegistry approvalRegistry,
+                                    WorkflowActorCatalog catalog) throws Exception {
         String input = inputJson == null ? "" : inputJson;
         IIActorSystem system = new IIActorSystem("workflow-" + title);
+        WorkflowActorCatalog.Run run = catalog == null ? null : catalog.runStarted(title, system);
         try {
             Interpreter interpreter = new Interpreter.Builder()
                     .loggerName("interpreter")
@@ -235,6 +241,7 @@ public class ClaudeHarnessRunner implements WorkflowActorSource {
             }
             return interpreter.runUntilEnd(MAX_ITERATIONS);
         } finally {
+            if (catalog != null) catalog.runEnded(run);
             system.terminateIIActors();
             system.terminate();
         }
