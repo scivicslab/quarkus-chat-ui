@@ -1195,9 +1195,24 @@
         actLoadActorNames();
     }
 
+    /** The Clear button: both fields empty, the panel empty, the status line empty — the tab as first opened. */
+    function actClear() {
+        ['act-actor', 'act-action'].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) el.value = '';
+        });
+        var panel = actPanel();
+        if (panel) panel.textContent = '';
+        actStatus('');
+        var actor = document.getElementById('act-actor');
+        if (actor) actor.focus();
+    }
+
     function initActions() {
         var show = document.getElementById('act-show');
         if (show) show.addEventListener('click', actShow);
+        var clear = document.getElementById('act-clear');
+        if (clear) clear.addEventListener('click', actClear);
         ['act-actor', 'act-action'].forEach(function (id) {
             var el = document.getElementById(id);
             if (el) el.addEventListener('keydown', function (e) {

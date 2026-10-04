@@ -233,8 +233,8 @@ Javadoc, what the action takes — each field of its argument record with type, 
 (`args (string) — ignored` for the ones that take nothing) — and the step as a workflow YAML writes
 it. That step is the `<pre>` block of the action's Javadoc when it has one, otherwise it is composed
 from the declaration: `actor:`, `method:` and an `arguments:` map with the schema type as each
-value's placeholder. Clearing the `action` field lists the actions again. An actor or action name
-that does not exist is reported as a problem line.
+value's placeholder. Clearing the `action` field lists the actions again; **Clear** empties both fields and the panel.
+An actor or action name that does not exist is reported as a problem line.
 
 Three endpoints serve it, all without a running workflow: `GET /api/workflows/actions` (the actor
 names), `GET /api/workflows/actions/{actor}` (`{name, description}` per action), and
