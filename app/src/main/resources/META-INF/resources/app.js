@@ -1626,17 +1626,6 @@
         queueArea.scrollTop = queueArea.scrollHeight;
     }
 
-    // Puts the workflow at the front of the pending queue and starts it unless something is running
-    // (then it runs next). Same rule as sendPromptText() for prompts.
-    function runWorkflowNow(yaml, input) {
-        queue.splice(queuePos, 0, { kind: 'workflow', text: workflowTitle(yaml), yaml: yaml, input: input || '', auto: true });
-        trimQueue();
-        showQueue();
-        renderQueue();
-        saveQueue();
-        if (!busy) processQueue();
-    }
-
     // Same rule as the server (ClaudeHarnessRunner.workflowTitle): the name: value, else the first line.
     function workflowTitle(yaml) {
         var lines = (yaml || '').split(/\r?\n/);
@@ -2243,7 +2232,7 @@
     sendBtn.addEventListener('click', sendPrompt);
 
     // The Workflow tab (console.js) enqueues through this.
-    window.chatUiQueue = { addWorkflow: addWorkflowToQueue, runWorkflowNow: runWorkflowNow, workflowTitle: workflowTitle };
+    window.chatUiQueue = { addWorkflow: addWorkflowToQueue, workflowTitle: workflowTitle };
 
     function showQueue() {
         queueArea.style.display = 'block';

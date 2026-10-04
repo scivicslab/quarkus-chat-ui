@@ -172,8 +172,8 @@ claude mcp add --transport http chat-ui-28900 http://localhost:28900/mcp
 
 The right pane's **Workflow** tab is a YAML editor. **Add to queue** puts the YAML (plus its input JSON)
 into the prompt queue as a workflow item; the item shows as `⚙ Workflow: <name>` and runs when its turn
-comes, exactly like a queued prompt (the browser is busy until the run ends). **Run now** puts it at the
-front of the queue. **Load** copies a bundled template into the editor.
+comes, exactly like a queued prompt (the browser is busy until the run ends). **Load** copies a bundled
+template into the editor.
 
 Actors available to the YAML, besides the engine's built-ins (`this`, `calc`, `list`, `str`, `interpreter`):
 

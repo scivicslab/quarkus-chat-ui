@@ -867,14 +867,6 @@
             window.chatUiQueue.addWorkflow(w.yaml, w.input);
             wfStatus('added to the queue: ' + window.chatUiQueue.workflowTitle(w.yaml));
         });
-        var run = document.getElementById('wf-run');
-        if (run) run.addEventListener('click', function () {
-            var w = collect();
-            if (!w) return;
-            if (!window.chatUiQueue) { wfStatus('queue not ready'); return; }
-            window.chatUiQueue.runWorkflowNow(w.yaml, w.input);
-            wfStatus('running ' + window.chatUiQueue.workflowTitle(w.yaml) + ' — watch the chat (left pane)');
-        });
         window.chatUiWorkflow = { open: wfOpen };
     }
 
