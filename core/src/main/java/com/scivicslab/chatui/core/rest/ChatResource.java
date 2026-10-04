@@ -7,7 +7,7 @@ import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.WatchdogActor;
 import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.iolog.IoLogView;
-import com.scivicslab.chatui.core.workflow.ActionStepYaml;
+import com.scivicslab.pojoactor.action.schema.ActionStepYaml;
 import com.scivicslab.chatui.core.workflow.ClaudeHarnessRunner;
 import com.scivicslab.chatui.core.workflow.WorkflowApprovalRegistry;
 import com.scivicslab.chatui.core.multiuser.MultiUserExtension;

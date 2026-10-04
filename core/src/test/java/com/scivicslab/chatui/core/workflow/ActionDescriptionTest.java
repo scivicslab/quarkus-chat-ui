@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scivicslab.pojoactor.action.schema.ActionCatalog;
 import com.scivicslab.pojoactor.action.schema.ActionManifest;
 import com.scivicslab.pojoactor.action.schema.ActionSchemaRegistry;
+import com.scivicslab.pojoactor.action.schema.ActionStepYaml;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
