@@ -785,6 +785,7 @@
                 });
             });
             footer.appendChild(copyBtn);
+            footer.appendChild(translateSelect(currentAssistantMsg, mdText, true));
 
             var timeSpan = document.createElement('span');
             timeSpan.textContent = formatTime(new Date());
@@ -1044,6 +1045,7 @@
                 });
             });
             footer.appendChild(copyBtn);
+            footer.appendChild(translateSelect(div, promptText, false));
             div.appendChild(footer);
         }
         chatArea.appendChild(div);
@@ -1170,6 +1172,7 @@
                             });
                         })(entry.text, copyBtn);
                         footer.appendChild(copyBtn);
+                        footer.appendChild(translateSelect(div, entry.text, false));
                         div.appendChild(footer);
                     }
                     chatArea.appendChild(div);
@@ -1204,6 +1207,95 @@
                 }
             }
         } catch (e) { /* ignore */ }
+    }
+
+    // ── Translate one message (QuarkusChatUiMessageTranslation_261011_oo01) ──────────────────
+    // The languages come from the server once; every message's footer gets a list drawn from them.
+    // Choosing a language asks the server for that message in it and shows the result inside the
+    // message, above the footer. Nothing is added to the conversation.
+    var translationLanguages = [];
+
+    function loadTranslationLanguages() {
+        fetch('api/translate/languages')
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (list) {
+                translationLanguages = list || [];
+                // Messages restored before the list arrived were drawn with an empty list; fill them now.
+                document.querySelectorAll('.translate-select').forEach(function (s) {
+                    if (s.fillLanguages) s.fillLanguages();
+                });
+            })
+            .catch(function () { translationLanguages = []; });
+    }
+
+    // div: the message's box; sourceText: the message as written; asMarkdown: draw the result as
+    // markdown (an answer) or as text (a prompt).
+    function translateSelect(div, sourceText, asMarkdown) {
+        var select = document.createElement('select');
+        select.className = 'translate-select';
+        select.title = 'Translate this message';
+        var first = document.createElement('option');
+        first.value = '';
+        first.textContent = 'Translate\u2026';
+        select.appendChild(first);
+        // A message restored as the page loads may be drawn before the list has arrived: the list
+        // fills it when it arrives, and opening it fills it too if it still holds only the first one.
+        function fillLanguages() {
+            if (select.options.length > 1) return;
+            translationLanguages.forEach(function (l) {
+                var o = document.createElement('option');
+                o.value = l.code;
+                o.textContent = l.name;
+                select.appendChild(o);
+            });
+        }
+        fillLanguages();
+        select.fillLanguages = fillLanguages;
+        select.addEventListener('focus', fillLanguages);
+        select.addEventListener('mousedown', fillLanguages);
+        select.addEventListener('change', function () {
+            var code = select.value;
+            if (!code) return;
+            var box = div.querySelector(':scope > .translated');
+            if (!box) {
+                box = document.createElement('div');
+                box.className = 'translated';
+                div.insertBefore(box, div.querySelector(':scope > .message-footer'));
+            }
+            var name = select.options[select.selectedIndex].textContent;
+            box.textContent = 'Translating into ' + name + '\u2026';
+            select.disabled = true;
+            fetch('api/translate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: sourceText, language: code })
+            })
+                .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+                .then(function (res) {
+                    if (!res.ok) {
+                        box.textContent = name + ': ' + (res.body.message || 'translation failed');
+                        box.classList.add('translated-error');
+                        return;
+                    }
+                    box.classList.remove('translated-error');
+                    box.textContent = '';
+                    var label = document.createElement('div');
+                    label.className = 'translated-label';
+                    label.textContent = name + (res.body.model ? ' \u2014 ' + res.body.model : '');
+                    box.appendChild(label);
+                    var body = document.createElement('div');
+                    if (asMarkdown) {
+                        body.innerHTML = renderMd(res.body.translation);
+                        decorateCodeBlocks(body);
+                    } else {
+                        body.textContent = res.body.translation;
+                    }
+                    box.appendChild(body);
+                })
+                .catch(function (e) { box.textContent = name + ': ' + e.message; })
+                .then(function () { select.disabled = false; select.value = ''; });
+        });
+        return select;
     }
 
     // ── Code blocks: wrap toggle and copy (QuarkusChatUiCodeBlockWrapAndCopy_261011_oo01) ───
@@ -1283,6 +1375,7 @@
             });
         });
         footer.appendChild(copyBtn);
+        footer.appendChild(translateSelect(div, text, true));
         div.appendChild(footer);
         return div;
     }
@@ -2451,6 +2544,7 @@
 
     // --- Initial data load ---
     loadModels();
+    loadTranslationLanguages();
     restoreHistory();
     restoreQueue();
     connectSSE();
