@@ -1,5 +1,7 @@
 # quarkus-chat-ui
 
+> **No longer developed.** This repository was the prototype of [chat-ui-with-audit-trail](https://github.com/scivicslab/chat-ui-with-audit-trail), which is its final form. It is kept read-only for reference; use chat-ui-with-audit-trail instead.
+
 A multi-provider chat UI for Large Language Models, built with [Quarkus](https://quarkus.io/) and [POJO-actor](https://github.com/scivicslab/pojo-actor).
 
 ![quarkus-chat-ui screenshot](chat_UI01.png)
