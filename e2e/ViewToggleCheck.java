@@ -19,7 +19,8 @@ import java.util.List;
  * java -cp ~/works/w206-e2e-test/target/w206-e2e-test-1.0.0-shaded.jar e2e/ViewToggleCheck.java http://localhost:28975
  * </pre>
  *
- * It exits 0 when every check passes, and writes screenshots to /tmp/uitest/ (create the directory first).
+ * It exits 0 when every check passes, and writes screenshots to /tmp/uitest/ (create the directory first). Start the
+ * instance with {@code -Dchat-ui.timekeeper.child-reply-warn-minutes=1}: the last part waits for a timekeeper notice.
  */
 public class ViewToggleCheck {
 
@@ -55,6 +56,33 @@ public class ViewToggleCheck {
     static final String HIDDEN = "#chat-area .message.turn-other:not(.turn-answer)";
     /** What it keeps of those turns: each one's final answer. */
     static final String OTHER_ANSWERS = "#chat-area .message.turn-other.turn-answer";
+
+    /**
+     * Counts the final answers of the turns other actors started, by the origin of the user bubble that opened each
+     * turn (its origin badge): "asker" for a turn that answers another conversation's or a plan's request
+     * ({@code chat <name>}, {@code workflow <name>}), whose answer goes back to the asker as the reply; "notice" for
+     * a timekeeper notice; "kept" for every other such answer. "...Shown" counts the visible ones, and
+     * "askerFooterShown" the asker answers whose "Request: ..." footer is visible.
+     */
+    static final String ANSWER_KINDS = "() => { const r = {asker: 0, askerShown: 0, askerFooterShown: 0, notice: 0,"
+            + " noticeShown: 0, kept: 0, keptShown: 0}; let origin = '';"
+            + " for (const e of document.querySelectorAll('#chat-area > .message')) {"
+            + "  if (e.classList.contains('user')) { const b = e.querySelector('.origin-badge'); origin = b ? b.textContent : ''; continue; }"
+            + "  if (!e.classList.contains('turn-answer') || !e.classList.contains('turn-other')) continue;"
+            + "  const shown = getComputedStyle(e).display !== 'none';"
+            + "  if (/^(chat|workflow) \\S/.test(origin)) { r.asker++; if (shown) r.askerShown++;"
+            + "    const f = e.querySelector('.footer-ids'); if (f && f.getClientRects().length > 0) r.askerFooterShown++; }"
+            + "  else if (origin === 'timekeeper notice') { r.notice++; if (shown) r.noticeShown++; }"
+            + "  else { r.kept++; if (shown) r.keptShown++; } }"
+            + " return r; }";
+
+    static int kind(Page page, String key) {
+        return ((Number) ((java.util.Map<?, ?>) page.evaluate(ANSWER_KINDS)).get(key)).intValue();
+    }
+
+    static String kinds(Page page) {
+        return String.valueOf(page.evaluate(ANSWER_KINDS));
+    }
 
     static int visible(Page page, String selector) {
         int n = 0;
@@ -128,8 +156,12 @@ public class ViewToggleCheck {
             check(page.querySelectorAll(HIDDEN).size() >= 2 && visible(page, HIDDEN) == 0,
                     "no input or step of another actor's turn is visible");
             int otherAnswers = page.querySelectorAll(OTHER_ANSWERS).size();
-            check(otherAnswers >= 2 && visible(page, OTHER_ANSWERS) == otherAnswers,
-                    "every final answer of another actor's turn stays visible: " + otherAnswers);
+            int keptAnswers = kind(page, "kept");
+            System.out.println("answers of other turns: " + kinds(page));
+            check(kind(page, "asker") >= 1 && kind(page, "askerShown") == 0,
+                    "the final answers of the job's requests (workflow <plan>), which go back to the job, are hidden: " + kinds(page));
+            check(keptAnswers >= 1 && kind(page, "keptShown") == keptAnswers,
+                    "every other final answer of another actor's turn (the API turn) stays visible: " + kinds(page));
             int personVisible = visible(page, "#chat-area .message.turn-person");
             check(personVisible >= 2 && personVisible == page.querySelectorAll("#chat-area .message.turn-person").size(),
                     "the person's turn (input and answer) is visible: " + personVisible);
@@ -142,9 +174,9 @@ public class ViewToggleCheck {
             waitIdle("02");
             page.waitForFunction("document.querySelectorAll('#chat-area .message.assistant.turn-other').length >= " + (otherBefore + 1));
             check(visible(page, HIDDEN) == 0, "a live turn from the API: its input arrives hidden");
-            check(visible(page, OTHER_ANSWERS) == page.querySelectorAll(OTHER_ANSWERS).size()
-                            && page.querySelectorAll(OTHER_ANSWERS).size() == otherAnswers + 1,
-                    "and its final answer arrives visible");
+            check(page.querySelectorAll(OTHER_ANSWERS).size() == otherAnswers + 1
+                            && kind(page, "kept") == keptAnswers + 1 && kind(page, "keptShown") == keptAnswers + 1,
+                    "and its final answer arrives visible: " + kinds(page));
             page.fill("#prompt-input", "Second person turn: name one prime number.");
             page.click("#send-btn");
             page.waitForFunction("document.querySelectorAll('#chat-area .message.user.turn-person').length >= 2");
@@ -201,9 +233,10 @@ public class ViewToggleCheck {
                             && page.querySelectorAll("#chat-area .message.user.turn-other").size() == otherUsersBeforeReload,
                     "restored history marks the turns the same way");
             check(visible(page, HIDDEN) == 0, "after reload the other turns' inputs are hidden");
-            check(page.querySelectorAll(OTHER_ANSWERS).size() >= 4 && visible(page, OTHER_ANSWERS) == page.querySelectorAll(OTHER_ANSWERS).size(),
-                    "after reload the other turns' final answers are visible, the reply turn's among them: "
-                            + page.querySelectorAll(OTHER_ANSWERS).size());
+            check(kind(page, "kept") >= 3 && kind(page, "keptShown") == kind(page, "kept"),
+                    "after reload the final answers of the API and reply turns are visible: " + kinds(page));
+            check(kind(page, "asker") >= 1 && kind(page, "askerShown") == 0,
+                    "after reload the final answers of the job's requests are still hidden: " + kinds(page));
             check(page.querySelectorAll(OTHER_ANSWERS).stream().anyMatch(e -> e.textContent().contains("FINAL-FOR-PERSON") && e.isVisible()),
                     "after reload the reply turn's final answer is still visible");
             check(visible(page, "#chat-area .message.turn-person") == page.querySelectorAll("#chat-area .message.turn-person").size(),
@@ -224,7 +257,72 @@ public class ViewToggleCheck {
             page.click("#view-mode-btn");
             check("Show all messages".equals(page.textContent("#view-mode-btn").strip()), "toggled back to 'Show all messages'");
             check(visible(page, "#chat-area .message") == page.querySelectorAll("#chat-area .message").size(), "everything is visible again");
+            check(kind(page, "asker") >= 1 && kind(page, "askerShown") == kind(page, "asker"),
+                    "with the filter off, the final answers of the job's requests are visible again: " + kinds(page));
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/4-all-again.png")));
+
+            // chat-03: a turn that answers another conversation's request (SCENARIO-R had chat-02 ask chat-03), whose
+            // answer goes back to chat-02 as the reply, and a timekeeper-notice turn, whose answer stays.
+            page.evaluate("window.chatUiSwitchChat('project1','03')");
+            page.waitForSelector("#chat-area .message.user", ATTACHED);
+            page.waitForFunction("() => Array.from(document.querySelectorAll('#chat-area .message.assistant'))"
+                    + ".some(e => e.textContent.includes('R42 is the result.'))");
+            System.out.println("chat-03, all messages: " + kinds(page));
+            check(kind(page, "asker") >= 2 && kind(page, "askerShown") == kind(page, "asker")
+                            && kind(page, "askerFooterShown") == kind(page, "asker"),
+                    "chat-03 with the filter off: the answers to the job's and chat-02's requests are visible, with their Request footer");
+            page.click("#view-mode-btn");
+            check("Show person-facing messages only".equals(page.textContent("#view-mode-btn").strip()), "chat-03 now shows person-facing messages only");
+            check(kind(page, "asker") >= 2 && kind(page, "askerShown") == 0 && kind(page, "askerFooterShown") == 0,
+                    "the answers to the requests are hidden from history, their Request footer with them: " + kinds(page));
+            int askerBefore = kind(page, "asker");
+
+            // Live: chat-02 asks chat-03 again while chat-03's pane is open and filtered.
+            rest("POST", "/api/projects/project1/chats/02/chat", "{\"text\":\"SCENARIO-R ask chat-03 for the result.\"}");
+            page.waitForFunction("() => Array.from(document.querySelectorAll('#chat-area .message.assistant.turn-answer'))"
+                    + ".filter(e => e.textContent.includes('R42 is the result.')).length >= 2", null,
+                    new Page.WaitForFunctionOptions().setTimeout(120_000));
+            waitIdle("03");
+            Thread.sleep(500);
+            check(kind(page, "asker") == askerBefore + 1 && kind(page, "askerShown") == 0,
+                    "a live turn answering chat-02's request: its final answer arrives hidden: " + kinds(page));
+            check(visible(page, HIDDEN) == 0, "and its input and steps are hidden");
+
+            // A timekeeper notice: chat-03 sends chat-02 a request that is not answered in time (the instance warns
+            // after one minute).
+            rest("POST", "/api/projects/project1/chats/03/chat", "{\"text\":\"SCENARIO-A send chat-02 two requests, one urgent.\"}");
+            page.waitForFunction("() => Array.from(document.querySelectorAll('#chat-area .message.user .origin-badge'))"
+                    + ".some(b => b.textContent === 'timekeeper notice')", null, new Page.WaitForFunctionOptions().setTimeout(240_000));
+            waitIdle("03");
+            page.waitForFunction("() => { let o = ''; let n = 0; for (const e of document.querySelectorAll('#chat-area > .message')) {"
+                    + " if (e.classList.contains('user')) { const b = e.querySelector('.origin-badge'); o = b ? b.textContent : ''; }"
+                    + " else if (o === 'timekeeper notice' && e.classList.contains('turn-answer')) n++; } return n >= 1; }", null,
+                    new Page.WaitForFunctionOptions().setTimeout(60_000));
+            Thread.sleep(500);
+            check(kind(page, "notice") >= 1 && kind(page, "noticeShown") == kind(page, "notice"),
+                    "a live timekeeper-notice turn: its final answer is visible: " + kinds(page));
+            check(kind(page, "askerShown") == 0, "the answers to the requests stay hidden");
+            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/5-chat03-person-only.png")));
+
+            page.reload();
+            page.waitForLoadState(LoadState.DOMCONTENTLOADED);
+            page.waitForSelector("#chat-area .message.user", ATTACHED);
+            page.waitForFunction("window.chatUiCurrentChatId() === '03'");
+            page.waitForFunction("document.querySelectorAll('#chat-area .message.assistant').length >= 4");
+            System.out.println("chat-03 after reload: " + kinds(page));
+            check(kind(page, "asker") == askerBefore + 1 && kind(page, "askerShown") == 0,
+                    "after reload, chat-03's answers to requests are hidden: " + kinds(page));
+            check(kind(page, "notice") >= 1 && kind(page, "noticeShown") == kind(page, "notice"),
+                    "after reload, the timekeeper-notice answer is visible");
+            check(kind(page, "kept") >= 1 && kind(page, "keptShown") == kind(page, "kept"),
+                    "after reload, the other answers (the API turn) are visible");
+
+            page.click("#view-mode-btn");
+            check("Show all messages".equals(page.textContent("#view-mode-btn").strip()), "chat-03 toggled back to 'Show all messages'");
+            check(visible(page, "#chat-area .message") == page.querySelectorAll("#chat-area .message").size()
+                            && kind(page, "askerFooterShown") == kind(page, "asker"),
+                    "with the filter off everything on chat-03 is visible again, the answers to requests and their footers too");
+            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/6-chat03-all.png")));
             browser.close();
         }
         System.out.println(failures == 0 ? "ALL PASSED" : failures + " FAILED");

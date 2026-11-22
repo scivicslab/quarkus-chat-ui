@@ -68,9 +68,13 @@
     // Whether the turn being drawn was started by the person at this pane (ChatDisplayToggle_261110_oo01). Every
     // bubble is marked turn-person or turn-other when it is placed, so one class on the chat area hides the
     // other turns' inputs and steps. A line with no origin is taken for the person's, as appendMessage takes it
-    // for no badge. A turn's final answer is also marked turn-answer (markAnswer): it is addressed to the person
-    // whoever started the turn, so the filter never hides it.
+    // for no badge. A turn's final answer is also marked turn-answer (markAnswer), and the filter keeps it, with one
+    // exception: the answer of a turn that answers another conversation's or a plan's request goes back to the asker
+    // as the reply, not to the person, so it is also marked answer-to-asker and hidden with the rest.
     var turnFromPerson = true;
+    // Whether the turn being drawn answers a request: its user bubble's origin is "chat <name>" or "workflow <name>"
+    // (ChatSession.originOf). A bare "workflow" is the person's own work done by a workflow, and is not one.
+    var turnAnswersAsker = false;
 
     // Enable KaTeX math rendering inside markdown so LaTeX ($...$, $$...$$) in assistant answers
     // is typeset. Optional: if the CDN scripts did not load, fall back to plain markdown.
@@ -631,15 +635,26 @@
     // ChatSession sends once per turn with the confirmed answer, and an assistant line of GET /conversation,
     // which records nothing but those answers. Provisional answers and steps stay unmarked.
     function markAnswer(div) {
-        if (div) div.classList.add("turn-answer");
+        if (div) {
+            div.classList.add("turn-answer");
+            if (turnAnswersAsker) div.classList.add("answer-to-asker");
+        }
         return div;
+    }
+
+    // Whether a turn opened by a prompt of this origin answers a request, so that its final answer is the reply.
+    function answersAsker(origin) {
+        return /^(chat|workflow) \S/.test(String(origin || ""));
     }
 
     function appendMessage(role, text, images, origin, at, ids) {
         var div = document.createElement("div");
         div.className = "message " + role;
         // A user bubble opens a turn: the assistant, info and error bubbles after it belong to it.
-        if (role === "user") turnFromPerson = !origin || origin === "screen";
+        if (role === "user") {
+            turnFromPerson = !origin || origin === "screen";
+            turnAnswersAsker = answersAsker(origin);
+        }
         if (role === "user" && origin && origin !== "screen") {
             div.classList.add("from-" + String(origin).split(" ")[0]);
         }
@@ -1489,6 +1504,7 @@
         localStorage.setItem(CHAT_ID_KEY, chatId);
         chatArea.textContent = "";
         turnFromPerson = true;
+        turnAnswersAsker = false;
         streamingEl = null;
         streamingMarkdown = "";
         thinkingEl = null;
@@ -1529,6 +1545,7 @@
     function clearChatDisplay() {
         chatArea.textContent = "";
         turnFromPerson = true;
+        turnAnswersAsker = false;
         streamingEl = null;
         streamingMarkdown = "";
         thinkingEl = null;
@@ -1542,8 +1559,9 @@
     // ── Display toggle: every message, or only what is addressed to the person ─────────────────
     // ChatDisplayToggle_261110_oo01. A ConversationSquad actor's pane also draws the turns other actors start
     // (an ask_chat request, a reply, a notice, a reminder, a job, a resumed turn). "Show person-facing messages only" hides
-    // those turns' inputs and steps with one class on the chat area, and keeps every turn's final answer
-    // (turn-answer), since that answer is written to the person; the person's own turns stay whole. Nothing
+    // those turns' inputs and steps with one class on the chat area, and keeps their final answers (turn-answer),
+    // since those are written to the person -- except the answer of a turn that answers another conversation's or a
+    // plan's request (answer-to-asker), which is the reply to the asker; the person's own turns stay whole. Nothing
     // is deleted and the Queue panel, Save Chat and the server are not touched. The choice is kept per
     // browser, per project and chat.
     var VIEW_MODE_KEY_PREFIX = "chat-ui-view-mode:";
@@ -1565,9 +1583,10 @@
         btn.textContent = personOnly ? "Show person-facing messages only" : "Show all messages";
         btn.setAttribute("aria-pressed", personOnly ? "true" : "false");
         btn.title = personOnly
-            ? "Showing the turns you started, and the final answer of every other turn. Click to show every message."
+            ? "Showing the turns you started, and the final answer of every other turn except the replies to "
+              + "requests from other conversations. Click to show every message."
             : "Showing every message of this ConversationSquad actor. Click to hide the inputs and steps of the turns "
-              + "you did not start, keeping their final answers.";
+              + "you did not start, and the replies to other conversations' requests, keeping the other final answers.";
     }
 
     function toggleViewMode() {
