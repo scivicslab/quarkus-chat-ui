@@ -1,0 +1,690 @@
+package com.scivicslab.chatui.core.actor;
+
+import com.scivicslab.chatui.core.iolog.IoLogStore;
+import com.scivicslab.chatui.core.provider.LlmProvider;
+import com.scivicslab.chatui.core.rest.ChatEvent;
+import com.scivicslab.pojoactor.action.Action;
+import com.scivicslab.pojoactor.action.ActionResult;
+import jakarta.validation.constraints.NotNull;
+import com.scivicslab.pojoactor.core.ActorRef;
+import com.scivicslab.turingworkflow.workflow.IIActorSystem;
+import com.scivicslab.turingworkflow.workflow.InterpreterIIAR;
+
+import java.io.InputStream;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+
+/**
+ * {@code IIActorRef} adapter that lets a Turing workflow call a ConversationSquad's
+ * {@link ChatSession} by name — see {@code ChatSessionIIAR_260810_oo01}.
+ *
+ * <p>Extends {@link InterpreterIIAR} (rather than {@code IIActorRef<ChatSession>} directly)
+ * because {@link ChatSession} itself extends {@code Interpreter}
+ * ({@code ChatSessionAgentLoop_260823_oo01}): this lets an outer workflow drive a session's
+ * turn with the same vocabulary (e.g. {@code runUntilEnd}) it would use for any other
+ * sub-workflow, inherited for free from {@link InterpreterIIAR}.</p>
+ */
+public class ChatSessionIIAR extends InterpreterIIAR {
+
+    /**
+     * This ConversationSquad's agent-loop workflow, by classpath-relative file name under {@code /workflows/} —
+     * a per-instance setting (mirrors {@link ChatSession#promptWorkflowFile}), not a fixed value.
+     * Different reusable workflow files can exist (today only {@code chat-session-agent-loop.yaml},
+     * a plain tool-call loop; others — e.g. a paper-search loop — can be added later), and each ConversationSquad
+     * picks which one it runs; multiple ConversationSquads may point at the same file. All ConversationSquads default to the
+     * same file today since it's the only one that exists, not because ConversationSquads are forced to share it.
+     */
+    private String agentLoopWorkflowFile = "chat-session-agent-loop.yaml";
+
+    public ChatSessionIIAR(String actorName, LlmProvider provider, Optional<String> configApiKey,
+                     IoLogStore ioLog, IIActorSystem system) {
+        super(actorName, new ChatSession(provider, configApiKey, ioLog), system);
+        chatSession().setActorSystem(system);
+        // InterpreterIIAR's constructor does not call this itself — without it, "actor: this" in
+        // chat-session-agent-loop.yaml resolves through Interpreter.action()'s selfActorRef==null
+        // fallback (system.getIIActor("this")), which finds nothing ("Actor not found: this").
+        chatSession().setSelfActorRef(this);
+        loadAgentLoopWorkflow();
+    }
+
+    /**
+     * Reads the agent-loop workflow and installs it, together with the prompt construction it names.
+     *
+     * <p>The agent loop decides how the conversation runs, and that includes how the prompt each
+     * step sends is built. A loop says so with a top-level {@code promptWorkflow: <file>}; a loop
+     * that says nothing gets {@link ChatSession#DEFAULT_PROMPT_WORKFLOW}, so switching from one loop
+     * to another never leaves the earlier loop's prompt construction behind
+     * ({@code AgentLoopDecidesThePrompt_261020_oo01}).</p>
+     */
+    private void loadAgentLoopWorkflow() {
+        String resource = "/workflows/" + agentLoopWorkflowFile;
+        byte[] yaml;
+        try (InputStream in = getClass().getResourceAsStream(resource)) {
+            if (in == null) {
+                throw new IllegalStateException("Agent-loop workflow not found on classpath: " + resource);
+            }
+            yaml = in.readAllBytes();
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("Failed to load agent-loop workflow: " + resource, e);
+        }
+        String promptWorkflow = promptWorkflowNamedBy(yaml, resource);
+        if (getClass().getResource("/workflows/" + promptWorkflow) == null) {
+            throw new IllegalStateException(resource + " names promptWorkflow " + promptWorkflow
+                    + ", which is not on the classpath under /workflows/");
+        }
+        chatSession().readYaml(new java.io.ByteArrayInputStream(yaml));
+        chatSession().setPromptWorkflowFile(promptWorkflow);
+    }
+
+    /**
+     * @param yaml     an agent-loop workflow's text
+     * @param resource its name, for the message when it cannot be read
+     * @return the file its top-level {@code promptWorkflow} names, or the default when it names none
+     */
+    public static String promptWorkflowNamedBy(byte[] yaml, String resource) {
+        Object parsed;
+        try {
+            parsed = new org.yaml.snakeyaml.Yaml().load(new String(yaml, java.nio.charset.StandardCharsets.UTF_8));
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("Agent-loop workflow is not valid YAML: " + resource, e);
+        }
+        if (parsed instanceof java.util.Map<?, ?> map && map.get("promptWorkflow") instanceof String named
+                && !named.isBlank()) {
+            return named.strip();
+        }
+        return ChatSession.DEFAULT_PROMPT_WORKFLOW;
+    }
+
+    /** @return this ConversationSquad's agent-loop workflow file name (classpath-relative, under {@code /workflows/}) */
+    public String getAgentLoopWorkflowFile() { return agentLoopWorkflowFile; }
+
+    /**
+     * Replaces this conversation's agent loop with another workflow, the same way the
+     * {@code set_agent_loop} tool does — reset first, then read
+     * ({@code WorkflowReloadReset_260828_oo01}). Used to select a variant from outside the
+     * conversation ({@code DocRetrievalAgentLoop_260830_oo01}).
+     *
+     * @param file classpath file name under {@code /workflows/}
+     * @return {@code null} on success, or an {@code error: ...} string
+     */
+    public String setAgentLoopWorkflowFile(String file) {
+        return setAgentLoopWorkflowFile(file, true);
+    }
+
+    /**
+     * @param record whether the conversation records the loop; a restore puts back what it recorded and writes nothing
+     */
+    public String setAgentLoopWorkflowFile(String file, boolean record) {
+        String error = putAgentLoopWorkflowFile(file);
+        if (error == null && record) chatSession().recordAgentLoop(ChatSession.AGENT_LOOP_FILE + file);
+        return error;
+    }
+
+    private String putAgentLoopWorkflowFile(String file) {
+        String previous = agentLoopWorkflowFile;
+        agentLoopWorkflowFile = file;
+        try {
+            chatSession().reset();
+            loadAgentLoopWorkflow();
+            return null;
+        } catch (RuntimeException e) {
+            agentLoopWorkflowFile = previous;
+            // reset() above already emptied the conversation's loop; put the previous one back, so
+            // a refused loop leaves the conversation running as it was.
+            try {
+                loadAgentLoopWorkflow();
+            } catch (RuntimeException restoreFailed) {
+                e.addSuppressed(restoreFailed);
+            }
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Reads this ConversationSquad's busy flag directly, bypassing the actor's mailbox — safe even while a long
+     * turn (e.g. {@code ask_chat}) is in progress, since {@code ChatSession.busy} is {@code volatile}
+     * and only ever written from this actor's own thread ({@code BusyStateReadableSnapshot_260828_oo01}).
+     *
+     * @return {@code true} if this ConversationSquad is currently processing a turn
+     */
+    public boolean isBusyDirect() { return chatSession().isBusy(); }
+
+    /** When the running turn started, or {@code null} when none runs, read without waiting like {@link #isBusyDirect()}. */
+    public Long runningSinceDirect() { return chatSession().runningSince(); }
+
+    /** The sent requests with a promised report pending, read without waiting for a running turn. */
+    public java.util.Set<String> promisedRequestsDirect() { return chatSession().promisedRequests(); }
+
+    /** The child requests still out, read without waiting for a running turn, as {@link #isBusyDirect()} is. */
+    public java.util.List<OpenRequests.Outstanding> outstandingChildrenDirect() {
+        return chatSession().outstandingChildren();
+    }
+
+    /**
+     * Whether the provider treats {@code input} as one of its commands, asked without going through
+     * the actor's mailbox. It is a read of the line alone, so it can be answered while a turn is
+     * running, when a question put to the actor would wait behind the turn.
+     */
+    public boolean isCommandDirect(String input) { return chatSession().isCommand(input); }
+
+    /**
+     * One completion from exactly the given messages, bypassing the actor's mailbox: it works while
+     * a turn is running, because it uses none of the conversation's state
+     * ({@code RequestMessagesControl_261018_oo01}).
+     */
+    public com.scivicslab.chatui.core.provider.OneShotReply completeOneShotDirect(
+            String messagesJson, String model, Boolean noThink) {
+        return chatSession().completeOneShot(messagesJson, model, noThink);
+    }
+
+    /**
+     * Reads this ConversationSquad's conversation-history snapshot directly, bypassing the actor's mailbox — same
+     * rationale as {@link #isBusyDirect()}.
+     *
+     * @return an immutable snapshot of the conversation history as of the last recorded turn
+     */
+    public java.util.List<ChatSession.HistoryEntry> getHistorySnapshotDirect() {
+        return chatSession().historySnapshot();
+    }
+
+    /**
+     * Reads which model this ConversationSquad is on, bypassing the actor's mailbox — same rationale as
+     * {@link #isBusyDirect()}, and needed for the same reason: the screen asks for it while the ConversationSquad
+     * may be in the middle of a turn ({@code ModelBelongsToTheConversation_260906_oo01}).
+     *
+     * @return the model name, or {@code null} when none has been settled on yet
+     */
+    public String getModelDirect() { return chatSession().getModel(); }
+
+    /** @return whether the conversation is working on that received request now; does not wait for a running turn */
+    public boolean isWorkingOnDirect(String requestId, String asker) { return chatSession().isWorkingOn(requestId, asker); }
+
+    /**
+     * Has the conversation write its settings now, without waiting for a running turn: a change made on the provider
+     * (model, effort, temperature) is recorded at once, as it was before the conversation recorded itself.
+     *
+     * @param model the model just set, which the provider may not be on yet, or {@code null}
+     */
+    public void recordSettingsDirect(String model) { chatSession().recordSettings(model); }
+
+    /** Has the conversation write the agent loop just put on it, without waiting for a running turn. */
+    public void recordAgentLoopDirect(String entry) { chatSession().recordAgentLoop(entry); }
+
+    /**
+     * Reads the conversation's history from its provider's own record, without waiting for a running turn
+     * ({@code GetChatLogReadsPersistedHistory_261119_oo01}).
+     *
+     * @return the entries, or {@code null} when the provider keeps no record and the I/O log is to be read
+     */
+    public com.scivicslab.chatui.core.provider.PersistedLog persistedLogDirect(int limit, long before) {
+        return chatSession().persistedLog(limit, before);
+    }
+
+    /** The conversation's provider kind ({@code openai-compat}, {@code claude}, {@code codex}), read directly. */
+    public String getProviderIdDirect() { return chatSession().getProviderId(); }
+
+    /** The conversation's tool set, read directly ({@code CliHarnessProvider_260912_oo01}). */
+    public String getToolSetDirect() { return chatSession().getToolSet().id(); }
+
+    /** Whether this conversation asks its model to skip the thinking phase, read directly. */
+    public boolean isNoThinkDirect() { return chatSession().isNoThink(); }
+
+    /** How hard this conversation's provider was told to work, read directly; null when it has no such setting. */
+    public String getEffortDirect() { return chatSession().getEffort(); }
+
+    private ChatSession chatSession() { return (ChatSession) object; }
+
+    /**
+     * {@code this}'s static type is {@code ActorRef<Interpreter>} (inherited from
+     * {@link InterpreterIIAR}), not {@code ActorRef<ChatSession>} — Java generics are
+     * invariant, so extending {@code InterpreterIIAR} instead of {@code IIActorRef<ChatSession>}
+     * loses that direct assignability even though the wrapped object really is a
+     * {@code ChatSession}. This cast is safe: at runtime {@code object} is the
+     * {@code ChatSession} passed to the constructor above.
+     */
+    @SuppressWarnings("unchecked")
+    private ActorRef<ChatSession> self() { return (ActorRef<ChatSession>) (ActorRef<?>) this; }
+
+    /**
+     * Public form of {@link #self()}, for callers outside this class that need to pass this
+     * session's {@code ActorRef<ChatSession>} to another actor's method (e.g. {@code ChatResource}
+     * enqueuing a browser-typed prompt via {@code PromptQueue.enqueue(..., chatSessionRef, ...)}).
+     *
+     * @return this actor reference, viewed as {@code ActorRef<ChatSession>}
+     */
+    public ActorRef<ChatSession> asChatSessionRef() { return self(); }
+
+    // ── Actions the workflow YAML names ──────────────────────────────────────
+    // Annotated rather than dispatched by an overridden callByActionName: IIActorRef's own
+    // javadoc names that override as the pattern not to use, and it costs a registration step
+    // that is easy to forget — a method added without its entry fails as "action not found",
+    // which from outside is indistinguishable from a transition whose condition simply did not
+    // hold. IIActorRef's dispatcher looks for @Action on this adapter, and InterpreterIIAR
+    // passes anything it does not handle itself (execCode / runUntilEnd / call / readYaml /
+    // setCurrentState ...) down to it.
+
+    /**
+     * What {@code sendPrompt} takes.
+     *
+     * <p>Declared as a type rather than parsed by hand so that a caller in another process can be
+     * told the shape instead of having to know it ({@code ActionArgumentSchema_260807_oo01}).
+     *
+     * @param prompt  what to say to the conversation. Required
+     * @param model   which model to answer with, or null for the conversation's own
+     * @param noThink whether to suppress the model's reasoning output; absent means false
+     */
+    public record SendPromptArgs(@NotNull String prompt, String model, Boolean noThink) {}
+
+    /**
+     * What {@code getResult} takes.
+     *
+     * @param resultKey the key {@code sendPrompt} returned
+     */
+    public record GetResultArgs(@NotNull String resultKey) {}
+
+    /** @param maxObservationChars how much of each observation the model may see */
+    public record RunToolArgs(@NotNull Integer maxObservationChars) {}
+
+    /** @param maxSteps how many LLM calls one turn may make */
+    public record StepLimitArgs(@NotNull Integer maxSteps) {}
+
+    /** The {@code think-cut-off} transition's argument: how many cut-offs in a row the turn continues through. */
+    public record CutOffArgs(@NotNull Integer maxInARow) {}
+
+    /** @param prompt the text to queue as this turn's next prompt */
+    public record AppendPromptArgs(@NotNull String prompt) {}
+
+    /** @param messages the whole request messages for this turn's request, a JSON array whose last message is the user's */
+    public record AppendMessagesArgs(@NotNull String messages) {}
+
+    /** @param request what to ask the worker to do */
+    public record RequestFromWorkerArgs(@NotNull String request) {}
+
+    /** @param criteria what to judge the worker's reply against */
+    public record JudgeResultArgs(@NotNull String criteria) {}
+
+    /** @param maxRetries how many redos this phase may ask for */
+    public record RetryLimitArgs(@NotNull Integer maxRetries) {}
+
+    /**
+     * @param args the prompt, and optionally the model to answer it with
+     * @return the result key to poll {@code getResult} with
+     */
+    @Action(value = "sendPrompt", argsType = SendPromptArgs.class)
+    public ActionResult sendPromptAction(SendPromptArgs args) {
+        return sendPrompt(args);
+    }
+
+    /**
+     * @param args the result key returned by {@code sendPrompt}
+     * @return the answer once the turn has finished, or a failure carrying the turn's status
+     *         while it is still running
+     */
+    @Action(value = "getResult", argsType = GetResultArgs.class)
+    public ActionResult getResultAction(GetResultArgs args) {
+        return getResult(args);
+    }
+
+    /**
+     * One LLM call. Runs on ChatSession's own actor thread: the workflow reaches this from
+     * inside {@code Interpreter.execCode()}, itself only ever invoked as a plain
+     * {@code runUntilEnd()} call from within an existing {@code tell()} closure.
+     *
+     * @param arg unused
+     * @return success when the reply asked for a tool
+     */
+    @Action("stepExpectingAction")
+    public ActionResult stepExpectingActionAction(String arg) {
+        return chatSession().stepExpectingAction();
+    }
+
+    /**
+     * @param arg how much of each observation the model may see; absent, the session's default
+     *            applies ({@code TurnResourceLimits_260830_oo01})
+     * @return always successful
+     */
+    @Action(value = "runTool", argsType = RunToolArgs.class)
+    public ActionResult runToolAction(RunToolArgs args) {
+        return chatSession().runTool(String.valueOf(args.maxObservationChars()));
+    }
+
+    /**
+     * The same as {@code runTool}, except that a fetched web page is summarised rather than cut
+     * at its opening characters. Fails when this turn called no {@code web_search}, or when the
+     * provider cannot complete outside the conversation, so the workflow falls through to
+     * {@code run-tool}.
+     *
+     * @param args how much of each observation the model may see, as for {@code runTool}
+     * @return success once every pending tool call has been run and observed
+     */
+    @Action(value = "runToolSummarizingPages", argsType = RunToolArgs.class)
+    public ActionResult runToolSummarizingPagesAction(RunToolArgs args) {
+        return chatSession().runToolSummarizingPages(String.valueOf(args.maxObservationChars()));
+    }
+
+    /**
+     * The step-limit transition's guard. The number is the workflow's, not Java's.
+     *
+     * @param arg the step limit
+     * @return success once the turn has used its steps
+     */
+    @Action(value = "stepLimitReached", argsType = StepLimitArgs.class)
+    public ActionResult stepLimitReachedAction(StepLimitArgs args) {
+        return chatSession().stepLimitReached(String.valueOf(args.maxSteps()));
+    }
+
+    /**
+     * The {@code think-cut-off} transition: when the step that just ran was cut off at the output limit,
+     * queues a note as the next prompt so the turn continues; fails otherwise, or once too many steps in a
+     * row were cut off ({@code CutOffReplyContinues_261115_oo01}).
+     *
+     * @param args how many consecutive cut-offs the turn continues through
+     * @return success when the note was queued
+     */
+    @Action(value = "continueAfterCutOff", argsType = CutOffArgs.class)
+    public ActionResult continueAfterCutOffAction(CutOffArgs args) {
+        return chatSession().continueAfterCutOff(String.valueOf(args.maxInARow()));
+    }
+
+    /**
+     * The {@code think-repair} transition: when the step that just ran tried to call a tool but the call
+     * cannot be run as written, queues a note saying what was wrong and showing the exact form, so the turn
+     * continues; fails otherwise, or once too many broken calls came in a row
+     * ({@code BrokenToolCallRepair_261115_oo01}).
+     *
+     * @param args how many consecutive broken calls the turn repairs
+     * @return success when the note was queued
+     */
+    @Action(value = "repairBrokenCall", argsType = CutOffArgs.class)
+    public ActionResult repairBrokenCallAction(CutOffArgs args) {
+        return chatSession().repairBrokenCall(String.valueOf(args.maxInARow()));
+    }
+
+    /**
+     * @param arg unused
+     * @return always successful
+     */
+    @Action("finish")
+    public ActionResult finishAction(String arg) {
+        return chatSession().finish();
+    }
+
+    /**
+     * The "think-continue" transition's guard.
+     *
+     * @param arg unused
+     * @return success while constructed prompts remain queued
+     */
+    @Action("replyLeftUndecided")
+    public ActionResult replyLeftUndecidedAction(String arg) {
+        return chatSession().replyLeftUndecided();
+    }
+
+    /**
+     * The step at the end of every turn that arms again the reply-wait watch of each request still open
+     * ({@code ReplyWatchRearmedAtTheEndOfEveryTurn_261116_oo01}).
+     *
+     * @param arg unused
+     * @return always successful, so that the turn goes on to end
+     */
+    @Action("rearmReplyWatches")
+    public ActionResult rearmReplyWatchesAction(String arg) {
+        return chatSession().rearmReplyWatches();
+    }
+
+    /**
+     * At the end of a turn that began with a reply or a follow-up and recorded no decision on it: records one from
+     * facts only ({@code AutomaticReplyDecision_261119_oo01}). See {@link ChatSession#decideReplyAtTurnEnd()}.
+     *
+     * @param arg unused
+     * @return always successful, so that the turn goes on to end
+     */
+    @Action("decideReplyAtTurnEnd")
+    public ActionResult decideReplyAtTurnEndAction(String arg) {
+        return chatSession().decideReplyAtTurnEnd();
+    }
+
+    /**
+     * The first step of {@code think-asks-person}: succeeds only when the step that just ran asked the person
+     * with {@code ask_person}, so the turn ends there ({@code AskThePersonEndsTheTurn_261119_oo01}).
+     *
+     * @param arg unused
+     * @return successful when the person was asked
+     */
+    @Action("askedThePerson")
+    public ActionResult askedThePersonAction(String arg) {
+        return chatSession().askedThePerson();
+    }
+
+    /**
+     * The step at the end of a turn that decides whether the timekeeper must remind the conversation
+     * ({@code ReminderDecidedAtTheEndOfTheTurn_261114_oo01}).
+     *
+     * @param arg unused
+     * @return always successful, so that the turn goes on to {@code finish}
+     */
+    @Action("decideReminder")
+    public ActionResult decideReminderAction(String arg) {
+        return chatSession().decideReminder();
+    }
+
+    @Action("hasMoreConstructedPrompts")
+    public ActionResult hasMoreConstructedPromptsAction(String arg) {
+        return chatSession().hasMoreConstructedPrompts();
+    }
+
+    /**
+     * Dispatched by {@code prompt-construction-default.yaml} ({@code actor: ..}) from the
+     * sub-workflow {@code Interpreter.call()} creates.
+     *
+     * @param arg unused
+     * @return always successful
+     */
+    @Action("buildDefaultPrompt")
+    public ActionResult buildDefaultPromptAction(String arg) {
+        chatSession().buildDefaultPrompt();
+        return new ActionResult(true, "");
+    }
+
+    /**
+     * This turn's own text with no opening text in front.
+     *
+     * @param arg unused
+     * @return the text
+     */
+    @Action("turnText")
+    public ActionResult turnTextAction(String arg) {
+        return chatSession().turnText();
+    }
+
+    /** @param arg unused @return part 1 of the opening text: tool instructions for this conversation's tool set */
+    @Action("toolInstructions")
+    public ActionResult toolInstructionsAction(String arg) {
+        return chatSession().toolInstructions();
+    }
+
+    /** @param arg unused @return part 2 of the opening text: the skill catalog, or empty */
+    @Action("skillCatalog")
+    public ActionResult skillCatalogAction(String arg) {
+        return chatSession().skillCatalog();
+    }
+
+    /** @param arg unused @return part 3 of the opening text: this project's instructions, or empty */
+    @Action("projectInstructions")
+    public ActionResult projectInstructionsAction(String arg) {
+        return chatSession().projectInstructions();
+    }
+
+    /**
+     * What the conversation has said so far as questions and answers, without any {@code system}
+     * message, for a prompt-construction sub-workflow to put in the request or leave out.
+     *
+     * @param arg unused
+     * @return a JSON array
+     */
+    @Action("pastTurns")
+    public ActionResult pastTurnsAction(String arg) {
+        return chatSession().pastTurns();
+    }
+
+    /**
+     * Succeeds only on the first request of a turn; the later ones carry a tool's observation, which
+     * a sub-workflow sends as plain text.
+     *
+     * @param arg unused
+     * @return success iff this is the turn's first request
+     */
+    @Action("isFirstStep")
+    public ActionResult isFirstStepAction(String arg) {
+        return chatSession().isFirstStep();
+    }
+
+    /**
+     * Queues the whole request messages for this turn's request, built by the sub-workflow with
+     * PromptBuilder's {@code buildMessages}. They are used for this turn only.
+     *
+     * @param args the array; its last message is the user's
+     * @return success iff the array was usable
+     */
+    @Action(value = "appendConstructedMessages", argsType = AppendMessagesArgs.class)
+    public ActionResult appendConstructedMessagesAction(AppendMessagesArgs args) {
+        return chatSession().appendConstructedMessages(args.messages());
+    }
+
+    /**
+     * The turn's own text, for a sub-workflow that wraps it in something else
+     * ({@code DocRetrievalAgentLoop_260830_oo01}); it arrives in the workflow's {@code ${result}}.
+     *
+     * @param arg unused
+     * @return the text
+     */
+    @Action("currentPromptText")
+    public ActionResult currentPromptTextAction(String arg) {
+        return chatSession().currentPromptText();
+    }
+
+    /**
+     * The primitive any prompt-construction sub-workflow can call, more than once if it splits
+     * one turn into several prompts.
+     *
+     * @param arg the constructed prompt
+     * @return always successful
+     */
+    @Action(value = "appendConstructedPrompt", argsType = AppendPromptArgs.class)
+    public ActionResult appendConstructedPromptAction(AppendPromptArgs args) {
+        chatSession().appendConstructedPrompt(args.prompt());
+        return new ActionResult(true, "");
+    }
+
+    /**
+     * Entry point of a babysitter phase. What differs between phases is this argument, not the
+     * method name ({@code GenericBabysitterPhases_260829_oo01}).
+     *
+     * @param arg what to ask the worker to do
+     * @return success when the worker replied
+     */
+    @Action(value = "requestFromWorker", argsType = RequestFromWorkerArgs.class)
+    public ActionResult requestFromWorkerAction(RequestFromWorkerArgs args) {
+        return chatSession().requestFromWorker(args.request());
+    }
+
+    /**
+     * @param arg the criteria to judge the worker's reply against
+     * @return success when the reply meets them
+     */
+    @Action(value = "judgeResult", argsType = JudgeResultArgs.class)
+    public ActionResult judgeResultAction(JudgeResultArgs args) {
+        return chatSession().judgeResult(args.criteria());
+    }
+
+    /**
+     * @param arg this phase's redo budget
+     * @return success once the budget is spent
+     */
+    @Action(value = "retryLimitReached", argsType = RetryLimitArgs.class)
+    public ActionResult retryLimitReachedAction(RetryLimitArgs args) {
+        return chatSession().retryLimitReached(String.valueOf(args.maxRetries()));
+    }
+
+    /**
+     * The judging state's catch-all.
+     *
+     * @param arg unused
+     * @return always successful
+     */
+    @Action("judgeNeedsRedo")
+    public ActionResult judgeNeedsRedoAction(String arg) {
+        return chatSession().judgeNeedsRedo();
+    }
+
+    /**
+     * @param arg unused
+     * @return success when the worker replied to the redo request
+     */
+    @Action("requestRedo")
+    public ActionResult requestRedoAction(String arg) {
+        return chatSession().requestRedo();
+    }
+
+    /**
+     * Ends the turn with an explanation instead of leaving it stuck busy.
+     *
+     * @param arg unused
+     * @return always successful
+     */
+    @Action("reportCollaborationFailure")
+    public ActionResult reportCollaborationFailureAction(String arg) {
+        return chatSession().reportCollaborationFailure();
+    }
+
+
+    /**
+     * The first element of an action's {@code arguments}, or {@code ""} if it has none — the shape
+     * {@code Interpreter.convertArgumentsToJson} produces for a single string argument.
+     *
+     * @param arg the raw arguments JSON handed to {@link #callByActionName}
+     * @return the first argument, or {@code ""}
+     */
+    private static String firstArgument(String arg) {
+        if (arg == null || arg.isBlank()) return "";
+        try {
+            org.json.JSONArray a = new org.json.JSONArray(arg);
+            return a.isEmpty() ? "" : a.getString(0);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * Accepts a prompt without blocking: registers a result key, hands the prompt to
+     * {@code PromptQueue} (so a human typing in the browser at the same time is not clobbered —
+     * see {@code ChatSessionIIAR_260810_oo01} "なぜ PromptQueue を経由する必要があるか"), and
+     * returns the key immediately. Poll {@link #getResult} for the outcome.
+     */
+    private ActionResult sendPrompt(SendPromptArgs args) {
+        String prompt = args.prompt();
+        String model = args.model();
+        boolean noThink = Boolean.TRUE.equals(args.noThink());
+        ActorRef<PromptQueue> promptQueue = chatSession().getPromptQueue();
+        if (promptQueue == null) {
+            return new ActionResult(false, "PromptQueue not wired yet");
+        }
+        String resultKey = UUID.randomUUID().toString();
+        chatSession().registerPendingResultKey(resultKey);
+        promptQueue.tell(q -> q.enqueue(
+                prompt, model, "queue",
+                (ChatEvent event) -> {}, self(), "agent:workflow", resultKey,
+                new CompletableFuture<TurnReply>(), noThink));
+        return new ActionResult(true, resultKey);
+    }
+
+    private ActionResult getResult(GetResultArgs args) {
+        String resultKey = args.resultKey();
+        String status = chatSession().getResultStatus(resultKey);
+        if ("completed".equals(status)) {
+            return new ActionResult(true, chatSession().getCompletedResult(resultKey));
+        }
+        return new ActionResult(false, status);
+    }
+}

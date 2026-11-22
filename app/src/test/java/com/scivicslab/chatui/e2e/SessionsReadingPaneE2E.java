@@ -1,0 +1,284 @@
+package com.scivicslab.chatui.e2e;
+
+import com.microsoft.playwright.Browser;
+import com.microsoft.playwright.BrowserType;
+import com.microsoft.playwright.Locator;
+import com.microsoft.playwright.Page;
+import com.microsoft.playwright.Playwright;
+import com.microsoft.playwright.options.WaitUntilState;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * E2E: reading a conversation in the Sessions tab without losing sight of where you are.
+ *
+ * <p>Every message used to open where it sat, inside the one scroll that also held the sessions
+ * and their turns. Measured on a running instance: opening a session made that list 1,684 pixels
+ * tall in a 371-pixel window, and opening five message bodies made it 4,994 — the scroll ran to
+ * 3,028 and both the session's heading and the turn's heading, and the delete button in the
+ * session's heading, were above the top of the list. A message is now picked rather than opened,
+ * and shown in a region of its own below, so the list's height does not depend on what is being
+ * read.</p>
+ *
+ * <p>Per the project's testing standard, this is a {@code main()} program against an
+ * already-running instance — it neither starts nor stops one. Point it at an instance whose I/O
+ * log holds at least one conversation:</p>
+ * <pre>
+ *   mvn -o test-compile exec:java -Dexec.classpathScope=test \
+ *     -Dexec.mainClass=com.scivicslab.chatui.e2e.SessionsReadingPaneE2E
+ *
+ *   CHAT_UI_URL=http://localhost:28039/ mvn -o test-compile exec:java ...
+ * </pre>
+ */
+public class SessionsReadingPaneE2E {
+
+    private static final String BASE_URL =
+            System.getenv().getOrDefault("CHAT_UI_URL", "http://localhost:28011/");
+
+    /** How many messages are read in a row. The old layout grew with every one of them. */
+    private static final int MESSAGES_TO_READ = 5;
+
+    /** How many turns the screen lists at a time. Matches IO_TURN_WINDOW in console.js. */
+    private static final int TURN_WINDOW = 20;
+
+    private static int passed = 0;
+    private static int failed = 0;
+
+    public static void main(String[] args) {
+        new SessionsReadingPaneE2E().run();
+        System.out.printf("%nResults: %d passed, %d failed%n", passed, failed);
+        if (failed > 0) {
+            System.exit(1);
+        }
+    }
+
+    void run() {
+        System.out.println("--- SessionsReadingPaneE2E against " + BASE_URL + " ---");
+        try (Playwright playwright = Playwright.create()) {
+            Browser browser = playwright.chromium().launch(
+                    new BrowserType.LaunchOptions().setHeadless(true));
+            try {
+                readingManyMessagesDoesNotMoveTheListUnderThem(browser);
+                aLongSessionIsListedAWindowAtATime(browser);
+            } finally {
+                browser.close();
+            }
+        }
+        if (failed > 0) {
+            throw new AssertionError("SessionsReadingPaneE2E: " + failed + " check(s) failed");
+        }
+        System.out.println("SessionsReadingPaneE2E: PASSED");
+    }
+
+    private void readingManyMessagesDoesNotMoveTheListUnderThem(Browser browser) {
+        Page page = browser.newPage(new Browser.NewPageOptions().setViewportSize(1600, 900));
+        List<String> errors = new ArrayList<>();
+        page.onPageError(errors::add);
+        page.onConsoleMessage(m -> {
+            if ("error".equals(m.type())) {
+                errors.add("console: " + m.text());
+            }
+        });
+        try {
+            page.navigate(BASE_URL,
+                    new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
+            page.locator("details.sess").first().waitFor(
+                    new Locator.WaitForOptions().setTimeout(20_000));
+
+            check(fitsItsPanel(page, "#io-sessions"), "the list is inside the right panel");
+            check(fitsItsPanel(page, "#io-reading"), "the reading pane is inside the right panel");
+
+            page.locator("details.sess").first().locator("summary.sess-head").click();
+            page.locator("details.tr-turn").first().waitFor(
+                    new Locator.WaitForOptions().setTimeout(20_000));
+            page.locator("details.tr-turn").first().locator("summary").click();
+            page.locator(".trm").first().waitFor(new Locator.WaitForOptions().setTimeout(20_000));
+            int messages = page.locator(".trm").count();
+            check(messages > 0, "a session opens into its messages (" + messages + ")");
+
+            int listHeight = scrollHeight(page, "#io-sessions");
+            List<Integer> heights = new ArrayList<>();
+            String lastRead = "";
+            for (int i = 0; i < Math.min(messages, MESSAGES_TO_READ); i++) {
+                page.locator(".trm").nth(i).locator(".trm-sum").click();
+                page.waitForTimeout(700);
+                heights.add(scrollHeight(page, "#io-sessions"));
+                lastRead = page.locator("#io-reading-head").textContent().trim();
+            }
+
+            check(heights.stream().allMatch(h -> h == listHeight),
+                    "reading " + heights.size() + " messages leaves the list the same height ("
+                            + listHeight + "px, then " + heights + ")");
+            check(page.locator(".trm.selected").count() == 1,
+                    "exactly one message is marked as the one being read");
+            check(!lastRead.isBlank(),
+                    "the reading pane says which message it holds (" + lastRead + ")");
+            check(page.locator("#io-reading-body").textContent().length() > 0,
+                    "and holds it");
+
+            check(insideTheList(page, "summary.sess-head"),
+                    "the session's heading is still in view, with its delete button");
+            check(insideTheList(page, ".tr-turn-head"),
+                    "the turn's heading is still in view");
+            check(fitsItsPanel(page, "#io-sessions") && fitsItsPanel(page, "#io-reading"),
+                    "and both regions are still inside the right panel");
+
+            check(errors.isEmpty(), "no JavaScript errors: " + errors);
+        } finally {
+            page.close();
+        }
+    }
+
+    /**
+     * However many turns a session has, only a window of them is drawn.
+     *
+     * <p>The archive holds a session of 1,417 turns, and every one of them used to be drawn with
+     * its messages already open. What is in the page has to depend on the window, not on the
+     * session.</p>
+     */
+    private void aLongSessionIsListedAWindowAtATime(Browser browser) {
+        Page page = browser.newPage(new Browser.NewPageOptions().setViewportSize(1600, 900));
+        try {
+            page.navigate(BASE_URL,
+                    new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
+            page.locator("details.sess").first().waitFor(
+                    new Locator.WaitForOptions().setTimeout(20_000));
+
+            // The list is filtered to the chat being held, which on a fresh instance is a short
+            // one. Asking for the unfiltered list is a state the screen already has — it is what
+            // it shows when no chat is active — and it is where the long conversations are.
+            page.evaluate("() => { window.chatUiGetActiveChat = () => null; }");
+            page.locator("#io-refresh").click();
+            page.waitForTimeout(1500);
+            page.locator("details.sess").first().waitFor(
+                    new Locator.WaitForOptions().setTimeout(20_000));
+
+            // A conversation longer than one window: that is the case being checked, and the
+            // session at the top of the list is usually a few turns old.
+            int at = sessionWithManyTurns(page);
+            if (at < 0) {
+                System.out.println("  SKIP: no session here has more turns than one window");
+                return;
+            }
+            page.locator("details.sess").nth(at).locator("summary.sess-head").click();
+            page.locator("details.tr-turn").first().waitFor(
+                    new Locator.WaitForOptions().setTimeout(20_000));
+
+            int listed = page.locator("details.tr-turn").count();
+            check(listed <= TURN_WINDOW,
+                    "a session of many turns is listed a window at a time (" + listed
+                            + " drawn)");
+            check(page.locator(".tr-turn-q").first().textContent().length() > 0,
+                    "a turn says what was asked in it, so it can be found by that");
+
+            // No messages until a turn is opened: they are what a session's size multiplies.
+            check(page.locator(".trm").count() == 0,
+                    "no turn's messages are drawn until one is opened ("
+                            + page.locator(".trm").count() + ")");
+
+            page.locator("details.tr-turn").first().locator("summary").click();
+            page.locator(".trm").first().waitFor(new Locator.WaitForOptions().setTimeout(20_000));
+            int afterOne = page.locator(".trm").count();
+            check(afterOne > 0, "opening a turn draws its messages (" + afterOne + ")");
+
+            // Opening a second turn closes the first, so two turns of messages are never both there.
+            if (page.locator("details.tr-turn").count() > 1) {
+                page.locator("details.tr-turn").nth(1).locator("summary").click();
+                page.waitForTimeout(1200);
+                check(page.locator("details.tr-turn[open]").count() == 1,
+                        "only one turn is open at a time ("
+                                + page.locator("details.tr-turn[open]").count() + ")");
+                // The closed turn gives its messages back. Kept hidden, they piled up — a tool
+                // row's line carries its input, and reading fifty turns held fifty of those.
+                check(page.locator("details.tr-turn:not([open]) .trm").count() == 0,
+                        "a closed turn holds no message rows ("
+                                + page.locator("details.tr-turn:not([open]) .trm").count() + ")");
+            }
+
+            Locator older = page.locator(".tr-more");
+            if (older.count() > 0) {
+                older.first().click();
+                page.waitForTimeout(1500);
+                int after = page.locator("details.tr-turn").count();
+                check(after > listed && after <= listed + TURN_WINDOW,
+                        "asking for older turns adds one more window (" + listed + " -> "
+                                + after + ")");
+            } else {
+                System.out.println("  SKIP: this session is shorter than one window");
+            }
+        } finally {
+            page.close();
+        }
+    }
+
+    /**
+     * The index, among the sessions the screen has drawn, of one with more turns than a window —
+     * or {@code -1} when it shows none.
+     *
+     * <p>Read from the rows themselves, and their turn counts asked of the server. The list the
+     * screen draws is filtered to the active chat, so its order is not the order of an unfiltered
+     * {@code api/sessions}; and a session's entry count is not its turn count — the one with the
+     * most entries in this archive has 112 of them in a single turn.</p>
+     */
+    private int sessionWithManyTurns(Page page) {
+        Object index = page.evaluate(
+                "async (window) => {"
+                + "  const rows = [...document.querySelectorAll('details.sess')];"
+                + "  for (let i = 0; i < Math.min(rows.length, 60); i++) {"
+                + "    const id = rows[i].dataset.sessionId;"
+                + "    if (!id) continue;"
+                + "    const d = await (await fetch('api/sessions/' + id + '/turns?limit=1')).json();"
+                + "    if ((d.lastTurn || 0) > window) return i;"
+                + "  }"
+                + "  return -1;"
+                + "}", TURN_WINDOW);
+        return ((Number) index).intValue();
+    }
+
+    // --- measuring ------------------------------------------------------------------------------
+
+    private int scrollHeight(Page page, String selector) {
+        Object n = page.evaluate(
+                "(s) => Math.round(document.querySelector(s).scrollHeight)", selector);
+        return ((Number) n).intValue();
+    }
+
+    /** True when the element's box lies within the right panel's box. */
+    private boolean fitsItsPanel(Page page, String selector) {
+        Object ok = page.evaluate("""
+                (s) => {
+                  const el = document.querySelector(s);
+                  const panel = document.querySelector('#right-panel');
+                  if (!el || !panel) return false;
+                  const a = el.getBoundingClientRect(), b = panel.getBoundingClientRect();
+                  return a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
+                }
+                """, selector);
+        return Boolean.TRUE.equals(ok);
+    }
+
+    /** True when the element is present and visible within the list's own box. */
+    private boolean insideTheList(Page page, String selector) {
+        Object ok = page.evaluate("""
+                (s) => {
+                  const el = document.querySelector(s);
+                  const list = document.querySelector('#io-sessions');
+                  if (!el || !list) return false;
+                  const a = el.getBoundingClientRect(), b = list.getBoundingClientRect();
+                  return a.bottom > b.top && a.top < b.bottom;
+                }
+                """, selector);
+        return Boolean.TRUE.equals(ok);
+    }
+
+    private static void check(boolean ok, String message) {
+        if (ok) {
+            passed++;
+            System.out.println("  PASS: " + message);
+        } else {
+            failed++;
+            System.out.println("  FAIL: " + message);
+        }
+    }
+}

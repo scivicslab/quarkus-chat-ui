@@ -1,5 +1,5 @@
 /* Two-pane console shell (index.html), single-DOM / inline embed.
-   The chat-ui markup lives inside #left-panel unchanged; styles.css is loaded
+   The chat-ui markup lives inside #main-panel unchanged; styles.css is loaded
    first and left pristine — every rule here only ADDS the surrounding shell or
    OVERRIDES the few viewport-bound sizings (#app height) with higher specificity.
    The right pane reuses chat-ui's theme variables so it follows the active theme. */
@@ -8,11 +8,11 @@
 #console-root {
     display: flex;
     height: 100vh;
-    width: 100vw;
+    width: 100%;   /* Hallmark: 100vw overflows past the scrollbar on desktop */
     overflow: hidden;
 }
 
-#left-panel {
+#main-panel {
     width: 60%;            /* initial width; the splitter sets an inline width at runtime */
     flex-shrink: 0;
     min-width: 320px;
@@ -22,7 +22,7 @@
 }
 
 /* chat-ui's #app is height:100vh; inside the pane make it track the pane height. */
-#left-panel > #app { height: 100%; }
+#main-panel > #app { height: 100%; }
 
 /* Draggable splitter between the two panels */
 #splitter {
@@ -72,31 +72,29 @@
 #right-config-bar input[type=number] { width: 64px; }
 #cfg-status { color: var(--accent-blue, #a5b4fc); margin-left: auto; }
 
-/* ── Right-pane tabs ───────────────────────────────────────────── */
+/* ── Right-pane menu ───────────────────────────────────────────── */
 #right-tab-bar {
     display: flex;
-    gap: 4px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
     flex-shrink: 0;
     padding: 0 8px;
     background: var(--bg-secondary, #161616);
     border-bottom: 2px solid var(--border-color, #2c2c2c);
 }
-.rtab-btn {
-    appearance: none;
-    background: transparent;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--text-secondary, #9aa0a6);
+/* One menu instead of a row of tabs: the row no longer fitted the pane's width. The left pane's view menu
+   (#left-view-select) looks the same. */
+#right-tab-select, #left-view-select {
+    align-self: flex-start;
+    margin: 6px 0 0;
+    padding: 4px 8px;
     font-size: 13px;
-    padding: 10px 14px;
-    cursor: pointer;
-    margin-bottom: -2px;
-}
-.rtab-btn:hover { color: var(--text-primary, #d0d0d0); }
-.rtab-btn.active {
-    color: var(--accent-blue, #a5b4fc);
-    border-bottom-color: var(--accent-blue, #6366f1);
     font-weight: 600;
+    color: var(--accent-blue, #a5b4fc);
+    background: var(--bg-primary, #1e1e1e);
+    border: 1px solid var(--border-color, #2c2c2c);
+    cursor: pointer;
 }
 
 .rtab-body { flex: 1; min-height: 0; overflow: hidden; display: flex; }
@@ -206,11 +204,11 @@
 .log-time   { color: var(--text-secondary, #7a7a7a); }
 .log-logger { color: var(--text-secondary, #8a8a8a); }
 .log-level  { font-weight: 600; }
-.log-INFO    .log-level { color: #6ea8fe; }
-.log-WARNING .log-level, .log-WARN  .log-level { color: #ffca7a; }
-.log-SEVERE  .log-level, .log-ERROR .log-level, .log-FATAL .log-level { color: #ff8a8a; }
+.log-INFO    .log-level { color: var(--log-info); }
+.log-WARNING .log-level, .log-WARN  .log-level { color: var(--log-warn); }
+.log-SEVERE  .log-level, .log-ERROR .log-level, .log-FATAL .log-level { color: var(--log-error); }
 .log-FINE   .log-level, .log-CONFIG .log-level, .log-FINER .log-level,
-.log-FINEST .log-level, .log-DEBUG  .log-level, .log-TRACE .log-level { color: #7a7a7a; }
+.log-FINEST .log-level, .log-DEBUG  .log-level, .log-TRACE .log-level { color: var(--log-debug); }
 .log-empty { color: var(--text-secondary, #777); padding: 24px 4px; font-size: 13px; }
 
 /* ── Agent "thinking" block (live ReAct reasoning, collapsible, left pane) ──────── */
@@ -257,11 +255,18 @@
     padding-left: 12px;
     border-left: 1px solid var(--border-color, #2f2f2f);
 }
+.actor-children.collapsed { display: none; }
 .actor-label { display: flex; align-items: baseline; gap: 6px; padding: 1px 0; }
+.actor-label.actor-label-toggleable { cursor: pointer; }
+.actor-label.actor-label-toggleable:hover .actor-name { text-decoration: underline; }
+.actor-toggle { display: inline-block; width: 10px; flex-shrink: 0; text-align: center; color: var(--text-secondary, #8a8a8a); font-size: 10px; }
 .actor-dot { font-size: 9px; line-height: 1; }
-.actor-dot.alive { color: #5fd07a; }
-.actor-dot.dead  { color: #ff8a8a; }
+.actor-dot.alive { color: var(--dir-from-llm); }
+.actor-dot.dead  { color: var(--accent-red); }
 .actor-name { color: var(--text-primary, #e6e6e6); font-weight: 600; }
+.actor-name.tab-switchable { cursor: pointer; }
+.actor-name.tab-switchable:hover { text-decoration: underline; }
+.actor-name.tab-active { color: var(--accent-blue, #a5b4fc); }
 .actor-type { color: var(--text-secondary, #8a8a8a); }
 .actor-dead .actor-name { color: var(--text-secondary, #8a8a8a); text-decoration: line-through; }
 
@@ -269,7 +274,39 @@
 #io-session { background: var(--bg-secondary, #2a2a2a); color: var(--text-primary, #e6e6e6); border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 3px 6px; font-size: 12px; max-width: 340px; }
 #io-status { color: var(--text-secondary, #8a8a8a); margin-left: auto; }
 /* Log DB tab = session manager: a table of conversations with cleanup + open-in-Trace. */
-#io-sessions { flex: 1; min-height: 0; overflow: auto; padding: 6px 8px; }
+/* A fixed share, not a flexible one. What is read below has no length limit — one message can
+   be the whole of a request — and given room to shrink this list loses it to that text. */
+#io-sessions, #lsearch-hits { flex: 0 0 45%; min-height: 0; overflow: auto; padding: 6px 8px; }
+#io-reading, #lsearch-reading {
+    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+    border-top: 1px solid var(--border-color, #2c2c2c);
+}
+#io-reading-head, #lsearch-reading-head {
+    flex: 0 0 auto; padding: 5px 10px; font-size: 11px;
+    color: var(--text-secondary, #9a9a9a);
+    border-bottom: 1px solid var(--border-color, #2c2c2c);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#io-reading-body, #lsearch-reading-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 6px 8px; }
+/* The pane is about 500px wide, so anything long — a request, a JSON argument — has to wrap
+   rather than run off the side out of sight. */
+#io-reading-body pre, #lsearch-reading-body pre { white-space: pre-wrap; word-break: break-word; }
+
+/* ── Log Search tab (CrossConversationLogSearch_260913_oo01) ────── */
+/* The query box takes the width the toolbar has left: what is typed here is a phrase from a
+   conversation, not a keyword, and a narrow box shows the end of it only. */
+#lsearch-q { flex: 1 1 auto; min-width: 8em; background: var(--bg-secondary, #2a2a2a); color: var(--text-primary, #e6e6e6); border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+#lsearch-status { color: var(--text-secondary, #8a8a8a); white-space: nowrap; }
+details.lshit { border: 1px solid var(--border-color, #2f2f2f); border-radius: 6px; margin: 0 0 8px; background: var(--bg-secondary, #1a1a1a); }
+summary.lshit-head { padding: 5px 10px; cursor: pointer; user-select: none; }
+summary.lshit-head:hover { background: var(--bg-tertiary, #232323); }
+.lshit-where { display: flex; gap: 8px; font-size: 11px; color: var(--text-secondary, #9a9a9a); }
+.lshit-conv { color: var(--accent-blue, #a5b4fc); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lshit-when { flex-shrink: 0; margin-left: auto; }
+/* The snippet is the reason the row is there, so it is shown whole over as many lines as it
+   takes: cut to one line, a match in the middle of a sentence is a row of ellipses. */
+.lshit-snippet { font-size: 12px; color: var(--text-primary, #d4d4d4); margin-top: 2px; word-break: break-word; }
+.lshit-body { padding: 4px 8px; border-top: 1px solid var(--border-color, #2f2f2f); }
 .io-empty { color: var(--text-secondary, #8a8a8a); padding: 8px; font-size: 12px; }
 table.io-sessions { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.io-sessions th { text-align: left; color: var(--text-secondary, #8a8a8a); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border-color, #2c2c2c); position: sticky; top: 0; background: var(--bg-primary, #141414); }
@@ -313,7 +350,13 @@ details.sess:not([open]) > .sess-head { border-top: none; }
 #io-mode { background: var(--bg-tertiary, #2a2a2a); color: var(--text-primary, #e6e6e6); border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 12px; }
 #io-mode.active { background: var(--accent-blue, #4f46e5); color: #fff; border-color: var(--accent-blue, #4f46e5); }
 .tr-turn { border: 1px solid var(--border-color, #2f2f2f); border-radius: 6px; margin-bottom: 10px; background: var(--bg-secondary, #1b1b1b); overflow: hidden; }
-.tr-turn-head { padding: 5px 10px; font-weight: 600; color: var(--accent-blue, #a5b4fc); background: var(--bg-tertiary, #232323); border-bottom: 1px solid var(--border-color, #2f2f2f); cursor: pointer; user-select: none; list-style-position: inside; }
+.tr-turn-head { display: flex; gap: 8px; align-items: baseline; padding: 5px 10px; font-weight: 600; color: var(--accent-blue, #a5b4fc); background: var(--bg-tertiary, #232323); border-bottom: 1px solid var(--border-color, #2f2f2f); cursor: pointer; user-select: none; list-style-position: inside; }
+.tr-turn-num { flex-shrink: 0; }
+/* What was asked, so a turn can be found among hundreds by something other than its number. */
+.tr-turn-q { font-weight: 400; font-size: 11px; color: var(--text-secondary, #9a9a9a); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tr-more { display: block; width: 100%; margin: 4px 0 8px; padding: 5px 10px; font-size: 11px; cursor: pointer; background: var(--bg-secondary, #1b1b1b); color: var(--text-secondary, #9a9a9a); border: 1px dashed var(--border-color, #444); border-radius: 6px; }
+.tr-more:hover { color: var(--text-primary, #d4d4d4); border-color: var(--accent-blue, #6366f1); }
+.tr-more[disabled] { cursor: default; opacity: .5; }
 .tr-turn-head:hover { background: var(--bg-secondary, #2a2a2a); }
 .tr-turn:not([open]) > .tr-turn-head { border-bottom: none; }
 .tr-step { padding: 7px 10px 7px 14px; border-bottom: 1px solid var(--border-color, #232323); }
@@ -321,7 +364,7 @@ details.sess:not([open]) > .sess-head { border-top: none; }
 .tr-tool { border-left: 3px solid var(--accent-green, #4ade80); background: rgba(74,222,128,0.04); }
 .tr-llm { border-left: 3px solid var(--accent-blue, #6366f1); }
 .tr-line { color: var(--text-secondary, #9aa0a6); font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
-.tr-toolcall { margin-top: 4px; color: var(--accent-amber, #fbbf24); font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.tr-toolcall { margin-top: 4px; color: var(--dir-to-tool); font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 .tr-thought { margin-top: 4px; color: var(--text-primary, #d4d4d4); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .tr-toolexec { color: var(--accent-green, #4ade80); font-family: "SFMono-Regular", Consolas, monospace; word-break: break-word; }
 .tr-obs { margin-top: 3px; color: var(--text-secondary, #8a8a8a); font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
@@ -342,36 +385,38 @@ details.sess:not([open]) > .sess-head { border-top: none; }
 .tr-sec-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 3px; }
 .tr-sec-title { font-size: 11px; font-weight: 600; color: var(--text-primary, #d8d8d8); }
 .tr-sec-dir { font-size: 10px; padding: 1px 7px; border-radius: 9px; white-space: nowrap; }
-.tr-sec.to-llm   { border-left-color: #6366f1; }
-.tr-sec.to-llm   .tr-sec-dir { background: rgba(99,102,241,0.18); color: #a5b4fc; }
-.tr-sec.from-llm { border-left-color: #22c55e; }
-.tr-sec.from-llm .tr-sec-dir { background: rgba(34,197,94,0.16); color: #6ee7b7; }
-.tr-sec.to-tool  { border-left-color: #f59e0b; }
-.tr-sec.to-tool  .tr-sec-dir { background: rgba(245,158,11,0.16); color: #fbbf24; }
-.tr-sec.from-tool{ border-left-color: #14b8a6; }
-.tr-sec.from-tool .tr-sec-dir { background: rgba(20,184,166,0.16); color: #5eead4; }
-.tr-sec.meta     { border-left-color: #6b7280; }
-.tr-sec.meta     .tr-sec-dir { background: rgba(107,114,128,0.18); color: #b8b8b8; }
+.tr-sec.to-llm   { border-left-color: var(--dir-to-llm); }
+.tr-sec.to-llm   .tr-sec-dir { background: rgba(53,56,205,0.12); color: var(--dir-to-llm); }
+.tr-sec.from-llm { border-left-color: var(--dir-from-llm); }
+.tr-sec.from-llm .tr-sec-dir { background: rgba(21,128,61,0.12); color: var(--dir-from-llm); }
+.tr-sec.to-tool  { border-left-color: var(--dir-to-tool); }
+.tr-sec.to-tool  .tr-sec-dir { background: rgba(180,83,9,0.12); color: var(--dir-to-tool); }
+.tr-sec.from-tool{ border-left-color: var(--dir-from-tool); }
+.tr-sec.from-tool .tr-sec-dir { background: rgba(15,118,110,0.12); color: var(--dir-from-tool); }
+.tr-sec.meta     { border-left-color: var(--dir-meta); }
+.tr-sec.meta     .tr-sec-dir { background: rgba(75,85,99,0.12); color: var(--dir-meta); }
 
 /* ── Trace: directional MESSAGE rows (summary + click → that message's full text) ── */
 .trm { border-left: 3px solid var(--border-color, #444); margin: 4px 0; border-radius: 0 4px 4px 0; background: var(--bg-secondary, #1b1b1b); }
-.trm > summary { display: flex; gap: 10px; align-items: baseline; cursor: pointer; user-select: none; padding: 6px 10px; list-style: none; }
-.trm > summary::-webkit-details-marker { display: none; }
+.trm > .trm-sum { display: flex; gap: 10px; align-items: baseline; cursor: pointer; user-select: none; padding: 6px 10px; }
+.trm.selected { background: var(--bg-tertiary, #232323); }
+/* The theme's own text colour, not white: on a light theme the selected row's background is
+   near-white and white text on it cannot be read. */
+.trm.selected > .trm-sum .trm-txt { color: var(--text-primary, #d4d4d4); font-weight: 600; }
 .trm-dir { flex-shrink: 0; font-size: 10px; padding: 1px 7px; border-radius: 9px; white-space: nowrap; font-family: "SFMono-Regular", Consolas, monospace; }
 .trm-txt { font-size: 12px; color: var(--text-primary, #d4d4d4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.trm[open] > summary .trm-txt { white-space: normal; word-break: break-word; }
-.trm > summary:hover .trm-txt { color: #fff; }
+.trm > .trm-sum:hover .trm-txt { color: var(--text-primary, #d4d4d4); }
 .trm-body { padding: 0 10px 8px; }
-.trm.user      { border-left-color: #a78bfa; } .trm.user .trm-dir      { background: rgba(167,139,250,.18); color: #c4b5fd; }
-.trm.to-llm    { border-left-color: #6366f1; } .trm.to-llm .trm-dir    { background: rgba(99,102,241,.18); color: #a5b4fc; }
-.trm.from-llm  { border-left-color: #22c55e; } .trm.from-llm .trm-dir  { background: rgba(34,197,94,.16);  color: #6ee7b7; }
-.trm.to-tool   { border-left-color: #f59e0b; } .trm.to-tool .trm-dir   { background: rgba(245,158,11,.16); color: #fbbf24; }
-.trm.from-tool { border-left-color: #14b8a6; } .trm.from-tool .trm-dir { background: rgba(20,184,166,.16); color: #5eead4; }
+.trm.user      { border-left-color: var(--dir-user); }      .trm.user .trm-dir      { background: rgba(124,58,237,.12); color: var(--dir-user); }
+.trm.to-llm    { border-left-color: var(--dir-to-llm); }    .trm.to-llm .trm-dir    { background: rgba(53,56,205,.12);  color: var(--dir-to-llm); }
+.trm.from-llm  { border-left-color: var(--dir-from-llm); }  .trm.from-llm .trm-dir  { background: rgba(21,128,61,.12);  color: var(--dir-from-llm); }
+.trm.to-tool   { border-left-color: var(--dir-to-tool); }   .trm.to-tool .trm-dir   { background: rgba(180,83,9,.12);   color: var(--dir-to-tool); }
+.trm.from-tool { border-left-color: var(--dir-from-tool); } .trm.from-tool .trm-dir { background: rgba(15,118,110,.12);  color: var(--dir-from-tool); }
 
 /* ── Left-pane: per-turn number badge + non-UI source tag (server-authoritative chat) ── */
 .turn-badge { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .turn-no { font-size: 11px; font-weight: 600; color: var(--accent-blue, #6ea8fe); opacity: .85; }
-.turn-src { font-size: 10px; padding: 1px 7px; border-radius: 9px; background: rgba(245,158,11,.2); color: #fbbf24; }
+.turn-src { font-size: 10px; padding: 1px 7px; border-radius: 9px; background: rgba(180,83,9,.14); color: var(--dir-to-tool); }
 .message.user .msg-body { white-space: pre-wrap; word-break: break-word; }
 
 /* ── Global header spanning both panes (title / theme / model / status) ── */
@@ -379,12 +424,83 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
 #app-header { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
     padding: 6px 14px; background: var(--bg-secondary, #161616);
     border-bottom: 1px solid var(--border-color, #2c2c2c); color: var(--text-secondary, #b8b8b8); font-size: 13px; }
-#console-root { flex: 1 1 auto; min-height: 0; height: auto; width: 100%; }
+/* (3) main pane fills the row to the right of the left dock */
+#console-root { flex: 1 1 auto; min-height: 0; height: auto; width: auto; }
+
+/* ── (2) Collapsible left dock (actor tree, html-saurus-style) ── */
+#app-body { flex: 1 1 auto; min-height: 0; display: flex; width: 100%; overflow: hidden; }
+#left-dock {
+    flex: 0 0 auto;
+    width: 260px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg-secondary, #161616);
+    border-right: 1px solid var(--border-color, #2c2c2c);
+    transition: width .15s ease;
+}
+#left-dock.collapsed { width: 0; border-right: none; }
+#left-dock.resizing { transition: none; }
+#left-dock-resize-handle {
+    flex: 0 0 5px;
+    width: 5px;
+    cursor: ew-resize;
+    background: transparent;
+}
+#left-dock-resize-handle:hover,
+#left-dock-resize-handle.dragging {
+    background: var(--accent-blue, #6366f1);
+}
+#left-dock.collapsed + #left-dock-resize-handle { display: none; }
+.dock-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    padding: 6px 10px 4px;
+    font-size: 12px;
+    color: var(--text-secondary, #b8b8b8);
+    white-space: nowrap;
+}
+.dock-head button {
+    background: var(--bg-primary, #2a2a2a);
+    color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #444);
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.dock-head button:hover { filter: brightness(1.2); }
+#dock-toggle {
+    background: transparent;
+    border: 1px solid var(--border-color, #444);
+    color: var(--text-secondary, #b8b8b8);
+    border-radius: 4px;
+    padding: 2px 9px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+}
+#dock-toggle:hover { color: var(--text-primary, #e6e6e6); }
 #app-header #app-title { font-size: 15px; font-weight: 600; margin: 0; color: var(--text-primary, #e6e6e6); }
 #app-header label { display: inline-flex; align-items: center; gap: 4px; }
 #app-header select { background: var(--bg-primary, #2a2a2a); color: var(--text-primary, #e6e6e6);
     border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
-#app-header #activity-label { margin-left: auto; color: var(--accent-blue, #a5b4fc); }
+/* This chat's settings, in the chat's own header (ChatSettingsInTheChatHeader_261012_oo01). */
+.chat-settings { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px;
+    color: var(--text-secondary, #b8b8b8); min-width: 0; }
+.chat-settings label { display: inline-flex; align-items: center; gap: 4px; }
+.chat-settings select { background: var(--bg-primary, #2a2a2a); color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+.chat-settings input[type=number], .chat-settings input[type=text] { background: var(--bg-primary, #2a2a2a);
+    color: var(--text-primary, #e6e6e6); border: 1px solid var(--border-color, #444); border-radius: 4px;
+    padding: 3px 6px; font-size: 12px; width: 64px; }
+.chat-settings #activity-label { color: var(--accent-blue, #a5b4fc); }
+#main-panel header { gap: 12px; }
+#main-panel header .left-pane-actions { flex-shrink: 0; }
+#save-chat-btn, #clear-chat-btn, #view-mode-btn { white-space: nowrap; }
 #app-header #connection-status { font-size: 12px; }
 #app-header input[type=number] { background: var(--bg-primary, #2a2a2a); color: var(--text-primary, #e6e6e6); border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 3px 6px; font-size: 12px; width: 64px; }
 #app-header #cfg-status { color: var(--accent-blue, #a5b4fc); font-size: 12px; }
@@ -417,4 +533,405 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
     white-space: pre-wrap;     /* preserve newlines AND wrap long lines (no horizontal overflow) */
     overflow-wrap: anywhere;
     color: var(--text-primary, #e6e6e6);
+}
+
+/* ============================================================================
+   Hallmark redesign layer — modern-minimal · Cobalt (right pane)
+   JetBrains Mono for every machine-readable surface (logs, traces, actor tree,
+   YAML), tight radii on cards + controls, hairline tab separator.
+   ============================================================================ */
+#logs-list, #actors-tree, .trace-pre, .thinking-block .thinking-body,
+.io-entry-head, .io-entry-body, .tr-line, .tr-toolcall, .tr-toolexec, .tr-obs,
+.tr-full-body, .trm-dir, .wf-box-yaml {
+    font-family: var(--font-mono);
+}
+.trace-card, .io-entry, details.sess, .tr-turn, .wf-box, .tr-turn {
+    border-radius: var(--radius-lg);
+}
+.tab-toolbar button, .tab-toolbar select,
+.io-sess-actions button, .io-more, #io-session, #io-mode,
+.tr-full > summary, .io-filters input, .io-filters select, .io-filters button {
+    border-radius: var(--radius);
+}
+#right-tab-bar { border-bottom: 1px solid var(--border-color); }
+#right-tab-select, #left-view-select { font-family: var(--font-body); color: var(--accent-blue); border-radius: var(--radius); }
+/* The selected entry's description: at most two lines, so it does not push the panel far down in a
+   narrow pane; the whole text is in its tooltip. */
+#right-tab-desc {
+    margin: 0 0 6px;
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--text-secondary, #9aa0a6);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+}
+
+/* ── Extensions panel (SkillAndAgentsFile_260830_oo01) ── */
+.ext-menu { position: relative; }
+#extensions-btn { background: var(--bg-secondary, #2a2a2a); color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.ext-panel { position: absolute; right: 0; top: 28px; z-index: 40; width: 460px; max-height: 60vh; overflow: auto;
+    background: var(--bg-primary, #141414); border: 1px solid var(--border-color, #3a3a3a); border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
+.ext-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border-color, #2c2c2c); padding: 4px 4px 0; }
+.ext-tab { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--text-secondary, #9aa0a6);
+    padding: 5px 10px; font-size: 12px; cursor: pointer; }
+.ext-tab.active { color: var(--text-primary, #e6e6e6); border-bottom-color: var(--accent-blue, #6366f1); }
+.ext-content { padding: 8px 10px; }
+.ext-loading { color: var(--text-secondary, #8a8a8a); font-size: 12px; padding: 6px 0; }
+.ext-roots { color: var(--text-secondary, #7a7a7a); font-size: 11px; padding: 2px 0 6px; word-break: break-all; }
+.ext-item { padding: 6px 8px; border: 1px solid var(--border-color, #2a2a2a); border-radius: 4px; margin-bottom: 6px; cursor: pointer; }
+.ext-item:hover { border-color: var(--accent-blue, #6366f1); }
+.ext-item-name { color: var(--text-primary, #e6e6e6); font-weight: 600; font-size: 12px; }
+.ext-item-desc { color: var(--text-secondary, #b8b8b8); font-size: 11px; line-height: 1.45; margin-top: 2px; }
+.ext-item-dir { color: var(--text-secondary, #6f6f6f); font-size: 10px; margin-top: 3px; word-break: break-all; }
+.ext-problem { color: var(--error-text, #e06c75); font-size: 11px; padding: 3px 0; word-break: break-all; }
+.ext-action { margin-top: 6px; background: var(--bg-secondary, #2a2a2a); color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 3px 12px; font-size: 12px; cursor: pointer; }
+.ext-input { width: 100%; box-sizing: border-box; background: var(--bg-secondary, #2a2a2a); color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+#ext-dialog-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,0.55); display: flex;
+    align-items: center; justify-content: center; }
+#ext-dialog { width: min(900px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
+    background: var(--bg-primary, #141414); border: 1px solid var(--border-color, #3a3a3a); border-radius: 6px; }
+#ext-dialog-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border-bottom: 1px solid var(--border-color, #2c2c2c); color: var(--text-primary, #e6e6e6); font-weight: 600; font-size: 13px; }
+#ext-dialog-title { flex: 1; }
+#ext-dialog-close { background: transparent; border: none; color: var(--text-secondary, #9aa0a6); font-size: 16px; cursor: pointer; }
+#ext-dialog-body { padding: 10px 12px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; line-height: 1.5;
+    color: var(--text-primary, #d4d4d4); }
+
+/* アクターに、それを作ったワークフローの note が付いている印（ActorPurposeFromWorkflowNote_260831_oo01） */
+.actor-label.actor-has-note .actor-name { border-bottom: 1px dotted var(--text-secondary, #7a7a7a); }
+
+/* ── Perspective (ProjectPerspective_260911_oo01) ───────────────────────────
+   #console-root[data-perspective] decides which centre sub-pane and which right-pane sections are
+   shown (the menu's entries are offered per perspective by console.js). The selectors below are
+   more specific than .rtab-content.active, so a section of the other perspective stays hidden even
+   while it still carries "active". */
+#project-panel {
+    width: 60%;            /* same initial width as #main-panel; the splitter sets it at runtime */
+    flex-shrink: 0;
+    min-width: 320px;
+    height: 100%;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary, #1e1e1e);
+    color: var(--text-primary, #e6e6e6);
+}
+#project-panel > header {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-color, #2c2c2c);
+    flex-shrink: 0;
+}
+#project-panel > main {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 12px;
+}
+.project-panel-title { font-weight: 600; color: var(--text-primary, #e6e6e6); }
+.project-placeholder { color: var(--text-secondary, #9aa0a6); padding: 12px; }
+
+#console-root[data-perspective="chat"] #project-panel { display: none; }
+#console-root[data-perspective="project"] #main-panel { display: none; }
+#console-root[data-perspective="chat"] .rtab-content[data-perspective="project"] { display: none; }
+#console-root[data-perspective="project"] .rtab-content[data-perspective="chat"] { display: none; }
+
+/* The timekeeper perspective (TimekeeperViewInTheActorTree_261115_oo01): its own centre pane, laid out as
+   #project-panel is, and a right pane that shows only its one placeholder section. */
+#timekeeper-panel {
+    width: 60%;
+    flex-shrink: 0;
+    min-width: 320px;
+    height: 100%;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary, #1e1e1e);
+    color: var(--text-primary, #e6e6e6);
+}
+#timekeeper-panel > header {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-color, #2c2c2c);
+    flex-shrink: 0;
+}
+#timekeeper-panel > main { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+#console-root[data-perspective="chat"] #timekeeper-panel,
+#console-root[data-perspective="project"] #timekeeper-panel { display: none; }
+#console-root[data-perspective="timekeeper"] #main-panel,
+#console-root[data-perspective="timekeeper"] #project-panel { display: none; }
+#console-root[data-perspective="chat"] .rtab-content[data-perspective="timekeeper"],
+#console-root[data-perspective="project"] .rtab-content[data-perspective="timekeeper"] { display: none; }
+#console-root[data-perspective="timekeeper"] .rtab-content[data-perspective="chat"],
+#console-root[data-perspective="timekeeper"] .rtab-content[data-perspective="project"] { display: none; }
+
+.tk-section { margin-bottom: 18px; }
+.tk-section h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--text-secondary, #9aa0a6); }
+.tk-limits { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+.tk-limits dt { color: var(--text-secondary, #9aa0a6); font-family: monospace; }
+.tk-limits dd { margin: 0; }
+.tk-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.tk-table th, .tk-table td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border-color, #2c2c2c); vertical-align: top; }
+.tk-table th { color: var(--text-secondary, #9aa0a6); font-weight: 500; }
+.tk-none { color: var(--text-secondary, #9aa0a6); }
+.tk-late { color: #e0a040; }
+
+/* Project pane, centre: the workflow catalog above, the one being read below
+   (ProjectPerspective_260911_oo01, step 2). Same two-region shape as the Sessions tab. */
+#project-workflows { display: flex; flex-direction: column; padding: 0; }
+#project-workflows > .tab-toolbar { flex-shrink: 0; }
+#project-wf-search {
+    flex: 1; min-width: 120px;
+    padding: 4px 8px; font-size: 13px;
+    background: var(--bg-secondary, #262626); color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #333); border-radius: 4px;
+}
+#project-wf-list {
+    flex: 0 0 auto; max-height: 40%; overflow: auto;
+    border-bottom: 1px solid var(--border-color, #2c2c2c);
+}
+/* Drag to move the line between the catalog and the workflow being read. Same shape as
+   #splitter, turned through a right angle. */
+#project-wf-resize-handle {
+    height: 6px;
+    flex: 0 0 auto;
+    cursor: row-resize;
+    background: var(--border-color, #333);
+    box-shadow: inset 0 1px 0 rgba(0,0,0,.4), inset 0 -1px 0 rgba(0,0,0,.4);
+}
+#project-wf-resize-handle:hover,
+#project-wf-resize-handle.dragging { background: var(--accent-blue, #6366f1); }
+
+#project-wf-reading { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#project-wf-head {
+    flex-shrink: 0; padding: 8px 12px; font-size: 12px;
+    color: var(--text-secondary, #9aa0a6);
+    border-bottom: 1px solid var(--border-color, #2c2c2c);
+}
+#project-wf-view { flex: 1; min-height: 0; overflow: auto; padding: 8px 12px; }
+.pwf-row {
+    padding: 6px 12px; cursor: pointer;
+    border-bottom: 1px solid var(--border-color, #232323);
+    display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: baseline;
+}
+.pwf-row:hover { background: var(--bg-secondary, #262626); }
+.pwf-row.selected { background: var(--bg-secondary, #2a2a3a); }
+.pwf-name { font-weight: 600; color: var(--text-primary, #e6e6e6); }
+.pwf-origin {
+    font-size: 11px; padding: 1px 6px; border-radius: 3px;
+    color: var(--text-secondary, #9aa0a6); border: 1px solid var(--border-color, #444);
+}
+.pwf-origin-project { color: var(--accent-blue, #a5b4fc); border-color: var(--accent-blue, #6366f1); }
+.pwf-desc { grid-column: 1 / -1; font-size: 12px; color: var(--text-secondary, #9aa0a6); }
+
+/* Project pane, editing (ProjectPerspective_260911_oo01, step 3): the editor takes the reader's
+   place below the head; the name field and the buttons sit in one row above the text. */
+#project-wf-actions { flex-shrink: 0; border-bottom: 1px solid var(--border-color, #2c2c2c); }
+#project-wf-editor { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#project-wf-editor > .tab-toolbar { flex-shrink: 0; }
+#project-wf-edit-name {
+    width: 16em; padding: 3px 6px; font-size: 13px; font-family: var(--font-mono, monospace);
+    background: var(--bg-secondary, #262626); color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #333); border-radius: 4px;
+}
+#project-wf-edit-yaml {
+    flex: 1; min-height: 0; resize: none; margin: 0; padding: 8px 12px;
+    font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.5; tab-size: 2;
+    background: var(--bg-primary, #1e1e1e); color: var(--text-primary, #e6e6e6);
+    border: none; border-top: 1px solid var(--border-color, #2c2c2c); outline: none;
+}
+#project-wf-edit-status.pwf-error { color: var(--error-text, #f66); }
+
+/* Project pane, right: jobs and a job's log (ProjectPerspective_260911_oo01, step 4). */
+#jobs-list, #joblog-list { flex: 1; min-height: 0; overflow: auto; }
+.job-row { padding: 6px 12px; border-bottom: 1px solid var(--border-color, #232323); cursor: pointer; }
+.job-row:hover { background: var(--bg-secondary, #262626); }
+.job-row.selected { background: var(--bg-secondary, #2a2a3a); }
+.job-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.job-id { font-family: var(--font-mono, monospace); font-weight: 600; color: var(--text-primary, #e6e6e6); }
+.job-wf { color: var(--text-primary, #e6e6e6); }
+.job-state { font-size: 11px; padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border-color, #444); color: var(--text-secondary, #9aa0a6); }
+.job-running .job-state { color: var(--accent-blue, #a5b4fc); border-color: var(--accent-blue, #6366f1); }
+.job-finished .job-state { color: #7ccf8a; border-color: #4d8a57; }
+.job-failed .job-state { color: var(--error-text, #f66); border-color: var(--error-text, #a44); }
+.job-stopped .job-state { color: #e0b35a; border-color: #8a6d2f; }
+.job-when { font-size: 12px; color: var(--text-secondary, #9aa0a6); font-variant-numeric: tabular-nums; }
+.job-actions { margin-left: auto; display: flex; gap: 6px; }
+.job-actions button { font-size: 12px; padding: 2px 8px; }
+.job-result { margin-top: 4px; font-size: 12px; color: var(--text-secondary, #9aa0a6); white-space: pre-wrap; word-break: break-word; }
+.joblog-line { display: flex; gap: 8px; padding: 2px 12px; font-family: var(--font-mono, monospace); font-size: 12px; border-bottom: 1px solid var(--border-color, #1f1f1f); }
+.joblog-time { color: var(--text-secondary, #9aa0a6); flex-shrink: 0; }
+.joblog-type { color: var(--text-secondary, #9aa0a6); flex-shrink: 0; width: 5.5em; }
+.joblog-warning .joblog-type, .joblog-severe .joblog-type { color: var(--error-text, #f66); }
+.joblog-data { white-space: pre-wrap; word-break: break-word; }
+
+/* Sessions tab: the conversation's settings history above its turns (ConversationSettingsRecord_260913_oo01) */
+.sess-settings { margin: 4px 0 8px; padding: 4px 8px; border-left: 2px solid var(--accent, #6a8); font-size: 12px; }
+.sess-settings-head { color: var(--text-secondary, #888); margin-bottom: 2px; }
+.sess-settings-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Run tab: one field per input the open workflow declares (JobParameterForm_260913_oo01) */
+.jobrun-param { padding: 6px 12px; border-bottom: 1px solid var(--border-color, #1f1f1f); }
+.jobrun-param-key { display: block; font-size: 12px; margin-bottom: 2px; }
+.jobrun-param-required { color: var(--error-text, #f66); margin-left: 3px; }
+.jobrun-param input[type="text"], .jobrun-param textarea, .jobrun-param select {
+    width: 100%; box-sizing: border-box; font-size: 12px; padding: 3px 6px;
+    background: var(--bg-secondary, #1b1b1b); color: var(--text-primary, #ddd);
+    border: 1px solid var(--border-color, #333); border-radius: 3px;
+}
+.jobrun-param textarea { min-height: 4.5em; font-family: var(--font-mono, monospace); }
+.jobrun-param-desc { font-size: 11px; color: var(--text-secondary, #9aa0a6); margin-top: 2px; }
+.jobrun-param-missing input, .jobrun-param-missing textarea, .jobrun-param-missing select {
+    border-color: var(--error-text, #a44);
+}
+
+/* Project Property tab: the project's name, its working directory, and the button that adds a
+   conversation (ProjectProperty_260929_oo01). One field per row, each a label above its control:
+   the rtab-content is a flex column, so without a block layout here every label, input and button
+   sat on one line. */
+.projectprop-form { overflow-y: auto; flex: 1; min-height: 0; }
+.projectprop-field { padding: 10px 12px; border-bottom: 1px solid var(--border-color, #1f1f1f); }
+.projectprop-label {
+    display: block; font-size: 12px; margin-bottom: 4px;
+    color: var(--text-secondary, #b8b8b8);
+}
+.projectprop-control { display: flex; align-items: center; gap: 8px; }
+.projectprop-control input[type="text"] {
+    flex: 1; min-width: 0; box-sizing: border-box; font-size: 12px; padding: 4px 6px;
+    background: var(--bg-secondary, #1b1b1b); color: var(--text-primary, #ddd);
+    border: 1px solid var(--border-color, #333); border-radius: 3px;
+}
+.projectprop-control button {
+    flex-shrink: 0;
+    background: var(--bg-secondary, #2a2a2a); color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #444); border-radius: 4px;
+    padding: 5px 12px; cursor: pointer; font-size: 12px;
+}
+.projectprop-control button:hover { filter: brightness(1.2); }
+.projectprop-control button.projectprop-danger { border-color: var(--error-text, #f66); color: var(--error-text, #f66); }
+.projectprop-chats { list-style: none; margin: 8px 0 0 0; padding: 0; }
+.projectprop-chats li { display: flex; align-items: center; gap: 6px; padding: 3px 0;
+    font-size: 12px; border-top: 1px dotted var(--border-color, #2c2c2c); }
+.projectprop-chats li:first-child { border-top: none; }
+.projectprop-chats .projectprop-chat-id { flex-shrink: 0; min-width: 4.5em; }
+/* The conversation's name is a link to the conversation, like its name in the tree. */
+.projectprop-chats button.projectprop-chat-link {
+    background: none; border: none; padding: 0; text-align: left; cursor: pointer;
+    color: var(--link-color, #6cb2ff); font: inherit; text-decoration: underline;
+}
+.projectprop-chats button.projectprop-chat-link:hover { filter: brightness(1.25); }
+.projectprop-chats input[type="text"] {
+    flex: 1; min-width: 0; box-sizing: border-box; font-size: 11px; padding: 2px 6px;
+    background: var(--bg-secondary, #1b1b1b); color: var(--text-primary, #ddd);
+    border: 1px solid var(--border-color, #333); border-radius: 3px;
+}
+.projectprop-chats button.projectprop-chat-save {
+    flex-shrink: 0; background: var(--bg-secondary, #2a2a2a); color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #444); border-radius: 4px; padding: 1px 8px; font-size: 11px; cursor: pointer;
+}
+.projectprop-chats button.projectprop-danger {
+    background: var(--bg-secondary, #2a2a2a); border: 1px solid var(--error-text, #f66); color: var(--error-text, #f66);
+    border-radius: 4px; padding: 1px 8px; font-size: 11px; cursor: pointer;
+}
+.projectprop-desc { font-size: 11px; color: var(--text-secondary, #9aa0a6); margin-top: 4px; }
+.projectprop-outcome {
+    font-size: 11px; color: var(--text-secondary, #9aa0a6); margin-top: 4px;
+    font-family: var(--font-mono, monospace); word-break: break-all;
+}
+
+/* ── Actions tab: the actors a workflow may name above, the chosen one's actions below ──── */
+.act-actors { flex: 0 0 auto; height: 40%; min-height: 60px; overflow: auto; margin-top: 6px; font-size: 0.9em; }
+.act-origin { color: var(--text-secondary, #8a8a8a); font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.04em; margin: 6px 0 2px 0; }
+.act-actor-row { display: flex; width: 100%; gap: 8px; align-items: baseline; text-align: left; background: none; border: none; border-radius: 3px; padding: 2px 6px; cursor: pointer; font: inherit; color: var(--text-primary, #e6e6e6); }
+.act-actor-row:hover { background: var(--bg-tertiary, #2a2a3a); }
+.act-actor-row.selected { background: var(--accent-blue, #6366f1); color: #fff; }
+.act-actor-row.selected .act-actor-type { color: rgba(255,255,255,0.8); }
+.act-actor-name { font-weight: 600; }
+.act-actor-type { color: var(--text-secondary, #8a8a8a); font-size: 0.9em; }
+.act-resize-handle { height: 6px; flex: 0 0 auto; cursor: row-resize; margin-top: 4px; background: var(--border-color, #333); box-shadow: inset 0 1px 0 rgba(0,0,0,.4), inset 0 -1px 0 rgba(0,0,0,.4); }
+.act-resize-handle:hover, .act-resize-handle.dragging { background: var(--accent-blue, #6366f1); }
+.act-list { flex: 1; min-height: 0; overflow: auto; margin-top: 4px; font-size: 0.9em; }
+.act-back { background: none; border: none; padding: 2px 0; cursor: pointer; font: inherit; color: var(--accent-blue, #a5b4fc); }
+.act-item { padding: 4px 0; border-bottom: 1px dotted var(--border-color, #2c2c2c); }
+.act-item:last-child { border-bottom: none; }
+.act-head { color: var(--accent-blue, #a5b4fc); font-weight: 600; background: none; border: none; padding: 0; cursor: pointer; font: inherit; }
+.act-desc { color: var(--text-primary, #e6e6e6); margin: 2px 0 0 0; }
+.act-details { color: var(--text-secondary, #8a8a8a); margin: 2px 0 0 0; white-space: pre-line; }
+.act-fields { margin: 2px 0 0 12px; padding: 0; list-style: none; color: var(--text-secondary, #8a8a8a); }
+.act-fields code { color: var(--text-primary, #e6e6e6); }
+.act-example-label { color: var(--text-secondary, #8a8a8a); margin: 6px 0 0 0; font-size: 0.9em; }
+.act-example { margin: 2px 0 0 0; padding: 6px 8px; background: var(--bg-tertiary, #1e1e2e); color: var(--text-primary, #e6e6e6); border-radius: 4px; overflow: auto; font-size: 0.9em; }
+.act-problem { color: var(--accent-red, #f38ba8); margin: 2px 0 0 0; }
+
+/* ── Method Search tab (MethodSearch_261011_oo01): rows reuse the Actions tab's look ─────────── */
+#ms-query { flex: 1; min-width: 0; }
+#ms-list { padding: 0 8px; }
+.ms-class { color: var(--text-secondary, #8a8a8a); font-weight: normal; margin-left: 6px; }
+.ms-actors { color: var(--text-secondary, #8a8a8a); margin: 2px 0 0 0; font-size: 0.9em; word-break: break-all; }
+
+/* A turn's id and request id at the top of the opened turn (TurnAndRequestIds_261107_oo01). */
+.tr-turn-ids { font-size: 11px; color: var(--text-secondary, #888); padding: 4px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* The organization in the Project tab (ConversationReportingLines_261108_oo01). */
+.projectprop-chat-superior { margin-left: 8px; font-size: 12px; color: var(--text-secondary, #888); }
+.projectprop-org { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 12px; }
+
+/* ── Left dock: Actor Tree / Graph (ConversationGraphInTheLeftPane_261117_oo01) ── */
+/* Row 1 holds the view menu and the controls; it must fit the dock's usual width (260 px), so the menu is a
+   little tighter than the right pane's. Row 2 is the count. */
+.dock-head #left-view-select { align-self: center; margin: 0; padding: 2px 4px; font-size: 12px; min-width: 0; }
+.dock-status {
+    flex-shrink: 0;
+    padding: 0 10px 4px;
+    font-size: 11px;
+    color: var(--text-secondary, #9aa0a6);
+    border-bottom: 1px solid var(--border-color, #2c2c2c);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#conv-graph { flex: 1; min-height: 0; overflow: auto; padding: 6px 4px 12px 8px; }
+#conv-graph[hidden], #actors-tree[hidden] { display: none; }
+#conv-graph .cg-note { color: var(--text-secondary, #9aa0a6); font-size: 12px; padding: 4px; }
+#conv-graph svg { display: block; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; }
+#conv-graph .cg-node circle { fill: var(--bg-secondary, #161616); stroke: var(--accent-blue, #4a90d9); stroke-width: 1.5; }
+#conv-graph .cg-node.cg-liaison circle { fill: var(--accent-blue, #4a90d9); }
+#conv-graph .cg-node.cg-external circle { stroke-dasharray: 2 2; stroke: var(--text-secondary, #9aa0a6); }
+#conv-graph .cg-node text { fill: var(--text-primary, #e6e6e6); }
+#conv-graph .cg-node .cg-name { fill: var(--text-secondary, #9aa0a6); }
+#conv-graph .cg-node .cg-tag { fill: var(--accent-blue, #4a90d9); font-size: 10px; }
+#conv-graph .cg-node.cg-link { cursor: pointer; }
+#conv-graph .cg-node.cg-link:hover text { text-decoration: underline; }
+#conv-graph .cg-sup { fill: none; stroke: var(--text-secondary, #9aa0a6); stroke-width: 1.2; }
+#conv-graph .cg-legend text { fill: var(--text-secondary, #9aa0a6); font-size: 10px; }
+#conv-graph .cg-roles { font-family: "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif; }
+#conv-graph .cg-legend .cg-roles { font-size: 11px; }
+/* The Graph node's tooltip: what it runs on and the roles it plays, one per line. */
+#cg-tip {
+    display: none; position: fixed; z-index: 1000; max-width: 360px;
+    padding: 6px 9px; border-radius: 4px; white-space: pre; pointer-events: none;
+    font-size: 12px; line-height: 1.45;
+    background: var(--bg-primary, #1e1e1e); color: var(--text-primary, #e6e6e6);
+    border: 1px solid var(--border-color, #444); box-shadow: 0 2px 8px rgba(0, 0, 0, .25);
+}
+#conv-graph .cg-project { cursor: pointer; }
+#conv-graph .cg-project text { fill: var(--text-primary, #e6e6e6); }
+#conv-graph .cg-project .cg-project-name { font-weight: 600; }
+#conv-graph .cg-project .cg-project-id { fill: var(--text-secondary, #9aa0a6); font-size: 11px; }
+#conv-graph .cg-project .cg-fold { fill: var(--text-secondary, #9aa0a6); font-size: 11px; }
+#conv-graph .cg-project:hover .cg-project-name { text-decoration: underline; }
+
+/* Which build is running, beside the app's name: small and muted, so the name still reads first. */
+#app-version {
+    margin-left: 8px;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-secondary, #9aa0a6);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }

@@ -1,0 +1,237 @@
+package com.scivicslab.chatui.core.actor;
+
+import com.scivicslab.chatui.core.provider.LlmProvider;
+import com.scivicslab.chatui.core.provider.ProviderContext;
+import com.scivicslab.chatui.core.rest.ChatEvent;
+import com.scivicslab.pojoactor.core.ActorRef;
+import com.scivicslab.turingworkflow.workflow.IIActorSystem;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+/**
+ * Pure unit test for {@link PromptQueue}'s dispatch path — specifically the fix that moved
+ * {@code queue} mutation for dispatch off ChatSession's actor thread and back onto PromptQueue's
+ * own (via {@code self.ask(popFront)}), plus the new {@code auto}/{@code advance},
+ * {@code removeAt}, and {@code moveInQueue} browser-editing operations. No CDI, no network: a
+ * fake {@link LlmProvider} records prompts it receives and can be told to block the first call
+ * (via a latch) so a test can observe genuinely-pending queue state before releasing it.
+ */
+class PromptQueueDispatchTest {
+
+    private static final class RecordingProvider implements LlmProvider {
+        final List<String> receivedPrompts = Collections.synchronizedList(new ArrayList<>());
+        final List<List<String>> receivedImages = Collections.synchronizedList(new ArrayList<>());
+        final CountDownLatch holdLatch = new CountDownLatch(1);
+        volatile boolean holdNext = false;
+
+        @Override public String id() { return "fake"; }
+        @Override public String displayName() { return "Fake"; }
+        @Override public List<ModelEntry> getAvailableModels() { return List.of(); }
+        @Override public String getCurrentModel() { return "fake-model"; }
+        @Override public void setModel(String model) {}
+        @Override public void cancel() {}
+
+        @Override
+        public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
+            receivedPrompts.add(prompt);
+            receivedImages.add(ctx.imageDataUrls());
+            if (holdNext) {
+                holdNext = false;
+                try { holdLatch.await(2, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+            }
+            emitter.accept(ChatEvent.delta("reply #" + receivedPrompts.size()));
+            emitter.accept(ChatEvent.result(null, 0, 0));
+        }
+    }
+
+    private record Rig(ActorRef<ChatSession> chatRef, ActorRef<PromptQueue> queueRef, RecordingProvider provider) {}
+
+    private static Rig setUp() {
+        RecordingProvider provider = new RecordingProvider();
+        IIActorSystem system = new IIActorSystem("prompt-queue-dispatch-test");
+        ChatSessionIIAR iiar = new ChatSessionIIAR("chat", provider, Optional.empty(), null, system);
+        system.addIIActor(iiar);
+        ActorRef<LlmProvider> providerRef = iiar.<LlmProvider>createChild(iiar.getName() + ".provider", provider);
+        iiar.tellNow(a -> ((ChatSession) a).setProviderName(providerRef.getName())).join();
+
+        ActorRef<PromptQueue> queueRef = iiar.createChild(iiar.getName() + ".queue", new PromptQueue());
+        queueRef.tellNow(q -> q.setSelf(queueRef)).join();
+
+        return new Rig(iiar.asChatSessionRef(), queueRef, provider);
+    }
+
+    private static void waitUntil(BooleanSupplier cond, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (cond.getAsBoolean()) return;
+            try { Thread.sleep(20); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+        }
+        fail("condition not met within " + timeoutMs + "ms");
+    }
+
+    @Test
+    void enqueue_whenIdle_dispatchesImmediately() {
+        Rig r = setUp();
+        r.queueRef().tellNow(q -> q.enqueue("hello", null, "queue", e -> {}, r.chatRef(), "human")).join();
+        waitUntil(() -> !r.provider().receivedPrompts.isEmpty(), 2000);
+        assertEquals(1, r.provider().receivedPrompts.size());
+        // step 1 prefixes the system prompt (ChatSessionAgentLoop_260823_oo01) — check the tail.
+        assertTrue(r.provider().receivedPrompts.get(0).endsWith("\n\nhello"));
+    }
+
+    @Test
+    void enqueue_tellsThePaneTheQueueChanged_whateverSentIt() {
+        Rig r = setUp();
+        r.provider().holdNext = true;
+        r.queueRef().tellNow(q -> q.enqueue("first", null, "queue", e -> {}, r.chatRef(), "human")).join();
+        waitUntil(() -> r.provider().receivedPrompts.size() == 1, 2000); // "first" now occupies the conversation
+
+        // A prompt that arrives while the conversation is busy sits in the queue; the pane has to
+        // be told at once, not on its next poll.
+        List<ChatEvent> emitted = Collections.synchronizedList(new ArrayList<>());
+        r.queueRef().tellNow(q -> q.enqueue("second", null, "queue", emitted::add, r.chatRef(), "agent:ask_chat:other")).join();
+
+        assertTrue(emitted.stream().anyMatch(e -> "queue".equals(e.type())),
+                "the enqueue must emit a queue event: " + emitted);
+        assertEquals(1, r.queueRef().askNow(PromptQueue::getQueueSize).join());
+        r.provider().holdLatch.countDown();
+    }
+
+    @Test
+    void enqueue_withImages_reachesProviderAndIsEchoedToThePane() {
+        Rig r = setUp();
+        List<String> images = List.of("data:image/png;base64,QUJD");
+        List<ChatEvent> emitted = Collections.synchronizedList(new ArrayList<>());
+        r.queueRef().tellNow(q -> q.enqueue("what is this?", null, "queue", emitted::add, r.chatRef(),
+                "human", null, new java.util.concurrent.CompletableFuture<TurnReply>(), false, true, images)).join();
+
+        waitUntil(() -> !r.provider().receivedImages.isEmpty(), 2000);
+        assertEquals(images, r.provider().receivedImages.get(0));
+
+        waitUntil(() -> emitted.stream().anyMatch(e -> "user".equals(e.type())), 2000);
+        ChatEvent userEvent = emitted.stream().filter(e -> "user".equals(e.type())).findFirst().orElseThrow();
+        assertEquals(images, userEvent.images());
+        // A prompt that did not come from the screen is still echoed with its images, and says so
+        // (PromptOriginOnScreen_260915_oo01).
+        assertEquals("api", userEvent.origin());
+    }
+
+    @Test
+    void pausedItem_blocksAutoDispatch_untilAdvance() {
+        Rig r = setUp();
+        r.provider().holdNext = true;
+        r.queueRef().tellNow(q -> q.enqueue("first", null, "queue", e -> {}, r.chatRef(), "human")).join();
+        waitUntil(() -> r.provider().receivedPrompts.size() == 1, 2000); // "first" is now blocked inside sendPrompt
+
+        r.queueRef().tellNow(q -> q.enqueue("second", null, "queue", e -> {}, r.chatRef(), "human")).join();
+        waitUntil(() -> r.queueRef().askNow(PromptQueue::getQueueSize).join() == 1, 1000);
+
+        Boolean paused = r.queueRef().askNow(q -> q.setAuto(0, false)).join();
+        assertTrue(paused);
+
+        r.provider().holdLatch.countDown(); // let "first" finish -> onPromptComplete -> tryDispatch(force=false)
+        waitUntil(() -> !r.chatRef().askNow(ChatSession::isBusy).join(), 2000);
+        try { Thread.sleep(200); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        assertEquals(1, r.provider().receivedPrompts.size(), "paused item must not auto-dispatch");
+        assertEquals(1, r.queueRef().askNow(PromptQueue::getQueueSize).join());
+
+        r.queueRef().tellNow(q -> q.advance(r.chatRef())).join();
+        waitUntil(() -> r.provider().receivedPrompts.size() == 2, 2000);
+        // step 1 of a new turn prefixes the system prompt again — check the tail.
+        assertTrue(r.provider().receivedPrompts.get(1).endsWith("\n\nsecond"));
+        assertEquals(0, r.queueRef().askNow(PromptQueue::getQueueSize).join());
+    }
+
+    @Test
+    void removeAt_and_moveInQueue_operateOnPendingItems() {
+        Rig r = setUp();
+        r.provider().holdNext = true;
+        r.queueRef().tellNow(q -> q.enqueue("first", null, "queue", e -> {}, r.chatRef(), "human")).join();
+        waitUntil(() -> r.provider().receivedPrompts.size() == 1, 2000); // chat now busy, holding
+
+        r.queueRef().tellNow(q -> q.enqueue("second", null, "queue", e -> {}, r.chatRef(), "human")).join();
+        r.queueRef().tellNow(q -> q.enqueue("third", null, "queue", e -> {}, r.chatRef(), "human")).join();
+        waitUntil(() -> r.queueRef().askNow(PromptQueue::getQueueSize).join() == 2, 1000);
+
+        Boolean moved = r.queueRef().askNow(q -> q.moveInQueue(1, -1)).join(); // "third" up past "second"
+        assertTrue(moved);
+        List<PromptQueue.QueueEntry> snap = r.queueRef().askNow(PromptQueue::snapshot).join();
+        assertEquals("third", snap.get(0).prompt());
+        assertEquals("second", snap.get(1).prompt());
+
+        Boolean removed = r.queueRef().askNow(q -> q.removeAt(0)).join();
+        assertTrue(removed);
+        snap = r.queueRef().askNow(PromptQueue::snapshot).join();
+        assertEquals(1, snap.size());
+        assertEquals("second", snap.get(0).prompt());
+
+        r.provider().holdLatch.countDown(); // release the held first turn so no thread leaks past the test
+    }
+
+    @Test
+    void moveToFront_makesTheItemTheNextOneSent_andKeepsTheOthersInOrder() {
+        Rig r = setUp();
+        r.provider().holdNext = true;
+        r.queueRef().tellNow(q -> q.enqueue("running", null, "queue", e -> {}, r.chatRef(), "human")).join();
+        waitUntil(() -> r.provider().receivedPrompts.size() == 1, 2000); // chat now busy, holding
+
+        for (String p : List.of("a", "b", "c")) {
+            r.queueRef().tellNow(q -> q.enqueue(p, null, "queue", e -> {}, r.chatRef(), "human")).join();
+        }
+        waitUntil(() -> r.queueRef().askNow(PromptQueue::getQueueSize).join() == 3, 1000);
+
+        assertTrue(r.queueRef().askNow(q -> q.moveToFront(2)).join()); // "c" jumps ahead of "a" and "b"
+        List<PromptQueue.QueueEntry> snap = r.queueRef().askNow(PromptQueue::snapshot).join();
+        assertEquals(List.of("c", "a", "b"), snap.stream().map(PromptQueue.QueueEntry::prompt).toList());
+
+        assertEquals(false, r.queueRef().askNow(q -> q.moveToFront(0)).join(), "already at the front");
+        assertEquals(false, r.queueRef().askNow(q -> q.moveToFront(3)).join(), "no such item");
+
+        r.provider().holdLatch.countDown();
+        waitUntil(() -> r.provider().receivedPrompts.size() == 4, 3000);
+        assertTrue(r.provider().receivedPrompts.get(1).endsWith("\n\nc"), "c is sent next");
+    }
+
+    /** QueueChecklistView_260913_oo01: a dispatched item moves to the sent list, in order. */
+    @Test
+    void dispatch_movesTheItemToTheSentList() {
+        Rig r = setUp();
+        r.queueRef().tellNow(q -> q.enqueue("hello", null, "queue", e -> {}, r.chatRef(), "human")).join();
+        waitUntil(() -> !r.provider().receivedPrompts.isEmpty(), 2000);
+        waitUntil(() -> !r.queueRef().askNow(PromptQueue::sentSnapshot).join().isEmpty(), 2000);
+        List<PromptQueue.QueueEntry> sent = r.queueRef().askNow(PromptQueue::sentSnapshot).join();
+        assertEquals(1, sent.size());
+        assertEquals("hello", sent.get(0).prompt());
+        assertEquals("human", sent.get(0).source());
+        assertEquals(0, r.queueRef().askNow(PromptQueue::getQueueSize).join(), "the pending list no longer holds it");
+    }
+
+    /** QueueChecklistView_260913_oo01: the sent list can be seeded, struck off, and is bounded. */
+    @Test
+    void sentList_seedRemoveAndBound() {
+        PromptQueue q = new PromptQueue();
+        q.seedSent(List.of("q1", "", "q2"));
+        assertEquals(List.of("q1", "q2"), q.sentSnapshot().stream().map(PromptQueue.QueueEntry::prompt).toList());
+        assertTrue(q.removeSentAt(0));
+        assertEquals(List.of("q2"), q.sentSnapshot().stream().map(PromptQueue.QueueEntry::prompt).toList());
+        assertTrue(!q.removeSentAt(5));
+        List<String> many = new java.util.ArrayList<>();
+        for (int i = 0; i < PromptQueue.MAX_SENT + 10; i++) many.add("p" + i);
+        q.seedSent(many);
+        assertEquals(PromptQueue.MAX_SENT, q.sentSnapshot().size());
+        assertEquals("p10", q.sentSnapshot().get(0).prompt(), "the oldest fall off first");
+    }
+}

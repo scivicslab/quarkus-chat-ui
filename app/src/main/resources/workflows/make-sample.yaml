@@ -1,0 +1,181 @@
+name: make-sample
+description: |
+  Reads one sub-section of a book and keeps it only when its structure is new
+  (FramesAndSamplesFromBooks_261021_oo01). The sub-section's sentences, with OCR misreadings
+  corrected, become an rst-on-lisp rule file in which every sentence is the nucleus of its paragraph
+  or related to it by a named relation. For each paragraph the writer is asked two questions: its
+  OCR misreadings, then how its sentences relate. Then it is asked what the sub-section does for its
+  reader, and whether that structure is one of the samples already in `samples` (shown the nearest
+  in shape). A new reusable structure is written as <samples>/<name>.lisp; the same structure adds
+  one also-seen line to that sample; a one-off leaves nothing. The writer is put on
+  plain-text-no-context-loop.yaml, so each question is sent alone.
+params:
+  book:
+    label: "The book's markdown file"
+    description: "Absolute path of one file of the book, e.g. under doc_Base011/docs/Books-Programming/"
+    type: text
+    required: true
+  heading:
+    label: "The sub-section's heading"
+    description: "As the file writes it, without # or **, e.g. 3.1. A Simple Java Program"
+    type: text
+    required: true
+  name:
+    label: "The sample's name"
+    description: "What the sub-section does, lower-case words joined by '-', e.g. explain-program-by-whole-example; empty lets the writer name a new structure"
+    default: ""
+  samples:
+    description: "The directory the samples are kept in"
+    default: "/home/devteam/works/rst-on-lisp/samples"
+  writer:
+    description: "The conversation that answers the questions"
+    default: "project1/chat-02"
+  writerModel:
+    description: "The model the writer runs on; empty leaves the conversation as it is"
+    default: ""
+  writerNoThink:
+    description: "true asks the writer's model to skip its thinking phase"
+    default: "true"
+  maxQuestions:
+    description: "How many questions one run asks at most; the run fails past it"
+    type: int
+    default: 200
+steps:
+  - states: ["0", "1"]
+    label: add-writer
+    note: The writer is a conversation with no history of its own from before, on the loop that sends each question alone.
+    actions:
+      - actor: loader
+        method: createChild
+        arguments: ['jexl:self', "./sample", "com.scivicslab.turingworkflow.plugins.rstframe.SampleJobIIAR"]
+      - actor: this
+        method: putJson
+        arguments: {path: 'chat-writer', value: 'jexl:state.getString("writer")'}
+        execution: direct
+      - actor: chats
+        method: setAgentLoop
+        arguments: {chat: 'jexl:state.getString("writer")', loop: 'plain-text-no-context-loop.yaml'}
+        execution: direct
+      - actor: chats
+        method: setModel
+        arguments: {chat: 'jexl:state.getString("writer")', model: 'jexl:state.getString("writerModel")'}
+        execution: direct
+      - actor: chats
+        method: setNoThink
+        arguments: {chat: 'jexl:state.getString("writer")', value: 'jexl:state.getString("writerNoThink")'}
+        execution: direct
+      - actor: chats
+        method: clear
+        arguments: {chat: 'jexl:state.getString("chat-writer")'}
+        execution: direct
+
+  - states: ["1", "next"]
+    label: open-the-sub-section
+    actions:
+      - actor: this
+        method: putJson
+        arguments: {path: asked, value: "0"}
+        execution: direct
+      - actor: ./sample
+        method: open
+        arguments: {book: 'jexl:state.getString("book")', heading: 'jexl:state.getString("heading")', name: 'jexl:state.getString("name")', samples: 'jexl:state.getString("samples")'}
+        execution: direct
+
+  - states: ["1", "failed"]
+    label: no-such-sub-section
+    actions: [{actor: this, method: doNothing, arguments: ["the book's file could not be read, or has no such heading"], execution: direct}]
+
+  - states: ["next", "decide"]
+    label: take-the-next-question
+    actions:
+      - actor: ./sample
+        method: question
+        execution: direct
+      - actor: this
+        method: putJson
+        arguments: {path: q, value: "jexl:result"}
+        execution: direct
+
+  - states: ["decide", "write"]
+    label: no-question-left
+    actions:
+      - actor: this
+        method: onlyIf
+        arguments: 'jexl:state.getString("q.done") == "true"'
+        execution: direct
+
+  - states: ["decide", "ask"]
+    label: a-question-is-left
+    note: countUp bounds the run.
+    actions:
+      - actor: this
+        method: onlyIf
+        arguments: 'jexl:state.getString("q.done") == "false"'
+        execution: direct
+      - actor: this
+        method: countUp
+        arguments: ["asked", 'jexl:state.getString("maxQuestions")']
+        execution: direct
+
+  - states: ["decide", "failed"]
+    label: too-many-questions
+    actions: [{actor: this, method: doNothing, arguments: ["maxQuestions was passed"], execution: direct}]
+
+  - states: ["ask", "next"]
+    label: ask-the-writer
+    actions:
+      - actor: chats
+        method: ask
+        arguments: {chat: 'jexl:state.getString("chat-writer")', prompt: 'jexl:state.getString("q.question")', waiter: 'jexl:self'}
+        execution: direct
+      - actor: this
+        method: putJson
+        arguments: {path: 'reply-writer', value: 'jexl:result'}
+        execution: direct
+      - actor: this
+        method: copyState
+        arguments: ['reply-writer', 'reply']
+        execution: direct
+      - actor: ./sample
+        method: answer
+        arguments: {reply: 'jexl:state.getString("reply")'}
+        execution: direct
+
+  - states: ["ask", "failed"]
+    label: writer-gave-no-answer
+    actions: [{actor: this, method: doNothing, arguments: ["the writer gave no answer"], execution: direct}]
+
+  - states: ["write", "end"]
+    label: act-on-the-judgement
+    note: A new structure is written (never over a file already there), the same one gets an also-seen line, a one-off leaves nothing.
+    actions:
+      - actor: ./sample
+        method: write
+        arguments: {samples: 'jexl:state.getString("samples")'}
+        execution: direct
+      - actor: this
+        method: putJson
+        arguments: {path: outcome, value: "jexl:result"}
+        execution: direct
+      - actor: loader
+        method: removeChild
+        arguments: ['jexl:self', "./sample"]
+      - actor: this
+        method: finish
+        arguments: ["outcome"]
+        execution: direct
+
+  - states: ["write", "failed"]
+    label: could-not-write
+    actions: [{actor: this, method: doNothing, arguments: ["the sample could not be written, or one of that name is already there"], execution: direct}]
+
+  - states: ["failed", "end"]
+    label: report-failure
+    actions:
+      - actor: loader
+        method: removeChild
+        arguments: ['jexl:self', "./sample"]
+      - actor: this
+        method: reportFailure
+        arguments: []
+        execution: direct

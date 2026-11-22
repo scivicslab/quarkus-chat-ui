@@ -1,0 +1,103 @@
+name: babysitter-loop
+description: |
+  One-phase babysitter workflow: ask the "worker" collaborator (resolved via
+  CollaborationGraph_260828_oo01, not a hardcoded id) to do the turn's task, judge the reply, and
+  if it needs work, send back what to fix — repeating judge/redo until the reply is judged
+  acceptable or the redo budget runs out.
+
+  The methods are phase-agnostic (GenericBabysitterPhases_260829_oo01): what to ask and what to
+  judge against are this file's `arguments`, not baked into method names. Here they are left empty,
+  so requestFromWorker forwards the turn's own prompt unchanged and judgeResult falls back to
+  generic writing criteria. research-babysitter-loop.yaml is the same machinery with two phases and
+  explicit instructions.
+
+  Entry state must be named "think" — ChatSession.start() calls transitionTo("think")
+  unconditionally regardless of which workflow is installed (WorkflowReloadReset_260828_oo01
+  実機確認).
+
+  Every action sets execution: direct, for the same reason as chat-session-agent-loop.yaml's own
+  note: these methods mutate ChatSession's own fields and must stay on its actor thread, not
+  IIActorSystem's ManagedThreadPool.
+
+steps:
+  - states: ["think", "judge"]
+    label: request-work
+    note: Ask the worker to do the turn's task, forwarding the prompt this turn started with.
+    actions:
+      - actor: this
+        method: requestFromWorker
+        arguments:
+          request: ""
+        execution: direct
+
+  - states: ["think", "end"]
+    label: report-request-failed
+    note: Reached only when request-work just failed — no worker collaborator set, or it didn't
+      reply. Always succeeds; ends the turn with an explanatory answer instead of leaving it
+      stuck busy forever.
+    actions:
+      - actor: this
+        method: reportCollaborationFailure
+        execution: direct
+
+  - states: ["judge", "accepted"]
+    label: accept
+    note: LLM reasoning step — judge the worker's reply against the criteria below.
+    actions:
+      - actor: this
+        method: judgeResult
+        arguments:
+          criteria: >-
+            The text must be written in full sentences, must not wander off the subject, must not
+            hedge its conclusions, must not repeat itself, and must not make excuses.
+        execution: direct
+
+  - states: ["judge", "give-up"]
+    label: redo-limit-reached
+    note: Reached only when accept just failed AND the redo budget is already spent — return the
+      best reply so far.
+    actions:
+      - actor: this
+        method: retryLimitReached
+        arguments:
+          maxRetries: 3
+        execution: direct
+
+  - states: ["judge", "redo"]
+    label: reject
+    note: Reached only when accept and redo-limit-reached both just failed. Always succeeds
+      (judge's catch-all); keeps the judgment's specifics for the redo request.
+    actions:
+      - actor: this
+        method: judgeNeedsRedo
+        execution: direct
+
+  - states: ["redo", "judge"]
+    label: request-redo
+    note: Send the judgment's specifics back to the worker and judge the new reply.
+    actions:
+      - actor: this
+        method: requestRedo
+        execution: direct
+
+  - states: ["redo", "end"]
+    label: report-redo-failed
+    note: Same fallback role as report-request-failed, for the redo state.
+    actions:
+      - actor: this
+        method: reportCollaborationFailure
+        execution: direct
+
+  - states: ["accepted", "end"]
+    label: finish-accepted
+    actions:
+      - actor: this
+        method: finish
+        execution: direct
+
+  - states: ["give-up", "end"]
+    label: finish-with-best-effort
+    actions:
+      - actor: this
+        method: finish
+        execution: direct

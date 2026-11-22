@@ -1,0 +1,798 @@
+package com.scivicslab.chatui.core.iolog;
+
+import com.scivicslab.turingworkflow.plugins.logdb.DistributedLogStore;
+import com.scivicslab.turingworkflow.plugins.logdb.LogEntry;
+import com.scivicslab.turingworkflow.plugins.logdb.LogLevel;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
+import java.time.LocalDateTime;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+/**
+ * Read/shaping side of the complete I/O log (Sessions tab). Pulls a session's {@link LogEntry} rows
+ * from the {@link DistributedLogStore} and shapes them with the Java Stream API: group by agent,
+ * filter, sort, preview, cap, and reconstruct the per-turn trace. Ported from quarkus-chat-ui3; the
+ * stored-message marker format ({@code turnN/stepM/llm|tool} labels + REQUEST/RESPONSE/REASONING/
+ * USAGE / TOOL/INPUT/OBSERVATION sections) is identical, so the same shaping applies to Claude turns.
+ */
+@ApplicationScoped
+public class IoLogView {
+
+    /** Default and maximum number of entries returned by one logs() call. */
+    static final int DEFAULT_LIMIT = 200;
+    static final int MAX_LIMIT = 1000;
+    /** Preview length (chars) returned in the list; the full message is fetched on expand. */
+    static final int PREVIEW_CHARS = 500;
+
+    @Inject
+    IoLogStore ioLog;
+
+    /**
+     * A view over {@code store}, for an actor system started without Quarkus (a test that restarts one on
+     * the same log), where nothing injects the store.
+     */
+    public static IoLogView over(IoLogStore store) {
+        IoLogView view = new IoLogView();
+        view.ioLog = store;
+        return view;
+    }
+
+    /** One agent (actor / AI agent) in a session, with its log-line count. The agent-axis index. */
+    public record AgentInfo(String agent, long lines) {}
+
+    /** One shaped log entry for the list. {@code message} is a preview; full text via fullMessage(). */
+    public record Entry(long id, String time, String agent, String label, String level,
+                        int levelValue, String message, int chars, boolean truncated,
+                        int promptTokens, int completionTokens) {}
+
+    /** A bounded page of entries. {@code limited} is true when more matched than were returned. */
+    public record Page(List<Entry> entries, int returned, boolean limited) {}
+
+    /** Filter for logs(): any field may be null/blank to mean "no constraint". */
+    public record Filter(String agent, String label, String level, String q,
+                         String since, String until, int limit) {}
+
+    /** One step of the reconstructed trace (an {@code llm} or {@code tool} step). */
+    public record TraceStep(long id, String label, String kind, String thought, String toolCalls,
+                            String reason, String toolName, String toolInput, String observation,
+                            int obsChars, int promptTokens, int completionTokens, boolean finalAnswer) {}
+
+    /** One conversation turn: the user's prompt and the ordered trace steps for that turn. */
+    /**
+     * @param turnId    the turn's id from its {@code turnN/ids} entry, or {@code null} for a turn
+     *                  recorded before that entry existed
+     * @param requestId the request the turn is or answers, or {@code null} when it is neither
+     */
+    public record TraceTurn(int turn, String userPrompt, List<TraceStep> steps, String turnId, String requestId) {
+        public TraceTurn(int turn, String userPrompt, List<TraceStep> steps) {
+            this(turn, userPrompt, steps, null, null);
+        }
+    }
+
+    /**
+     * One turn as a list of them shows it: its number and what the person asked.
+     *
+     * <p>Without the steps, on purpose. A session in this archive runs to 1,417 turns, and asking
+     * for all of their steps at once answered with 3.3 MB — every step of every turn, to draw a
+     * list of questions.</p>
+     */
+    public record TurnHead(int turn, String question) {}
+
+    /** What one turn was asked and what it answered, as recorded in its {@code /conversation} entry. */
+    /**
+     * One restorable turn. A failed turn (TurnErrorInConversation_260913_oo01) has {@code answer}
+     * null and {@code error} set; an answered turn the reverse.
+     *
+     * <p>{@code at} is when the entry was written, which is when the turn ended, in milliseconds
+     * since the epoch; {@code model} and {@code durationMs} come from the turn's
+     * {@code answer-meta} entry and are {@code null} for a turn recorded before that entry
+     * existed.</p>
+     */
+    public record Turn(String question, String answer, String error, Long at, String model, Long durationMs) {
+        public Turn(String question, String answer, String error) { this(question, answer, error, null, null, null); }
+        public Turn(String question, String answer) { this(question, answer, null); }
+    }
+
+    // ── Public API (DB-backed) ──────────────────────────────────────────────
+
+    /** Lists the agents in a session with their line counts (agent-axis index). */
+    public List<AgentInfo> agents(long sessionId) {
+        return agentsOf(allLogs(sessionId));
+    }
+
+    /** Returns a shaped, filtered, bounded page of one session's I/O. */
+    public Page logs(long sessionId, Filter f) {
+        List<LogEntry> raw = (f.agent() != null && !f.agent().isBlank())
+                ? store().getLogsByNode(sessionId, f.agent())
+                : allLogs(sessionId);
+        return shape(raw, f);
+    }
+
+    /** Returns the full (untruncated) message of one entry, or "" if not found. */
+    public String fullMessage(long sessionId, long logId) {
+        return allLogs(sessionId).stream()
+                .filter(e -> e.getId() == logId)
+                .map(e -> e.getMessage() == null ? "" : e.getMessage())
+                .findFirst()
+                .orElse("");
+    }
+
+    /** Reconstructs the per-turn trace for a session. */
+    public List<TraceTurn> trace(long sessionId) {
+        return traceOf(allLogs(sessionId));
+    }
+
+    /**
+     * A window of a session's turns, newest first, for a list to show.
+     *
+     * @param sessionId  the session to read
+     * @param beforeTurn return only turns numbered below this; {@code 0} starts at the newest
+     * @param limit      how many to return at most
+     * @return the turns, newest first
+     */
+    public List<TurnHead> turnHeads(long sessionId, int beforeTurn, int limit) {
+        return turnHeadsOf(allLogs(sessionId), beforeTurn, limit);
+    }
+
+    /**
+     * One turn's steps.
+     *
+     * @param sessionId the session to read
+     * @param turn      the turn number
+     * @return that turn, or {@code null} when the session holds no such turn
+     */
+    public TraceTurn traceTurn(long sessionId, int turn) {
+        List<LogEntry> ofTurn = allLogs(sessionId).stream()
+                .filter(e -> anyTurnOf(nz(e.getLabel())) == turn)
+                .toList();
+        List<TraceTurn> turns = traceOf(ofTurn);
+        return turns.isEmpty() ? null : turns.get(0);
+    }
+
+    /**
+     * Reconstructs a session's conversation — what was asked and what was answered, per turn, in
+     * the order the turns happened ({@code ConversationRestoreOnRestart_260904_oo01}).
+     *
+     * @param sessionId the session to read
+     * @param maxTurns  how many of the most recent turns to return; at or below zero returns none
+     * @return the turns, oldest first
+     */
+    public List<Turn> conversation(long sessionId, int maxTurns) {
+        return conversationOf(allLogs(sessionId), maxTurns);
+    }
+
+    /**
+     * The highest turn number already recorded in a session, or {@code 0} when it holds no turn at
+     * all.
+     *
+     * <p>A conversation that resumes an existing session must go on numbering its turns where that
+     * session stopped. Its own counter starts at zero on every restart, so without this the next
+     * turn would be written as {@code turn1} again, on top of labels the session already holds
+     * ({@code ConversationRestoreOnRestart_260904_oo01}).</p>
+     *
+     * @param sessionId the session to read
+     * @return the highest {@code turnN} seen in any of its labels, or 0
+     */
+    public int lastTurnNumber(long sessionId) {
+        return lastTurnNumberOf(allLogs(sessionId));
+    }
+
+    /** Label of the record that holds a conversation's provider and model (ConversationSettingsRecord_260913_oo01). */
+    public static final String SETTINGS_LABEL = "settings";
+
+    /** A conversation's provider kind, tool set and model, as one settings record holds them. */
+    public record Settings(String provider, String tools, String model, Double temperature,
+                           Long urgentWaitMinutes, Long childReplyWarnMinutes, Boolean noThink, String effort,
+                           java.util.Map<String, String> mcpServers) {
+        /**
+         * A record written before the external MCP servers were kept: none is set
+         * ({@code ExternalMcpServersOfAConversation_261120_oo01}).
+         */
+        public Settings(String provider, String tools, String model, Double temperature,
+                        Long urgentWaitMinutes, Long childReplyWarnMinutes, Boolean noThink, String effort) {
+            this(provider, tools, model, temperature, urgentWaitMinutes, childReplyWarnMinutes, noThink, effort, null);
+        }
+
+        /** A record written before the timekeeper's limits were kept: neither is set. */
+        public Settings(String provider, String tools, String model, Double temperature) {
+            this(provider, tools, model, temperature, null, null);
+        }
+
+        /**
+         * A record written before noThink and the effort were kept: neither is set, and a restore leaves both at
+         * their defaults (thinking on, no effort).
+         */
+        public Settings(String provider, String tools, String model, Double temperature,
+                        Long urgentWaitMinutes, Long childReplyWarnMinutes) {
+            this(provider, tools, model, temperature, urgentWaitMinutes, childReplyWarnMinutes, null, null);
+        }
+    }
+
+    /**
+     * The last settings record of a session, or {@code null} when it has none
+     * ({@code ConversationSettingsRecord_260913_oo01}). Every record carries all three values,
+     * so the last one is the whole state.
+     */
+    public Settings latestSettings(long sessionId) {
+        return latestSettingsOf(allLogs(sessionId));
+    }
+
+    /**
+     * The raw JSON of a session's last settings entry, or {@code null} when it has none.
+     *
+     * <p>A project's entry carries its own fields ({@code name}, {@code workingDir}), not a
+     * conversation's, so the caller parses it rather than taking a {@link Settings}
+     * ({@code ProjectProperty_260929_oo01}).</p>
+     */
+    public String latestSettingsJson(long sessionId) {
+        return allLogs(sessionId).stream()
+                .filter(e -> SETTINGS_LABEL.equals(e.getLabel()))
+                .max(Comparator.comparingLong(LogEntry::getId))
+                .map(LogEntry::getMessage)
+                .orElse(null);
+    }
+
+    /** @return the message of the session's last entry with {@code label}, as written, or {@code null} when it has none */
+    public String latestOf(long sessionId, String label) {
+        return latestOf(allLogs(sessionId), label);
+    }
+
+    static String latestOf(List<LogEntry> raw, String label) {
+        return raw.stream()
+                .filter(e -> label.equals(e.getLabel()))
+                .max(Comparator.comparingLong(LogEntry::getId))
+                .map(LogEntry::getMessage)
+                .orElse(null);
+    }
+
+    /** @return the messages of every entry of the session with {@code label}, oldest first */
+    public List<String> allOf(long sessionId, String label) {
+        return allLogs(sessionId).stream()
+                .filter(e -> label.equals(e.getLabel()))
+                .sorted(Comparator.comparingLong(LogEntry::getId))
+                .map(LogEntry::getMessage)
+                .toList();
+    }
+
+    /**
+     * The session's last entry with {@code label} whose message is a JSON object holding {@code key}, parsed; an
+     * entry that is not a JSON object is passed over. This reads a value out of an older entry shape that carried
+     * several owners' values at once, behind later entries that no longer carry it.
+     *
+     * @return the entry, or {@code null} when no entry with that label holds the key
+     */
+    public org.json.JSONObject latestWithKey(long sessionId, String label, String key) {
+        return latestWithKey(allLogs(sessionId), label, key);
+    }
+
+    static org.json.JSONObject latestWithKey(List<LogEntry> raw, String label, String key) {
+        return raw.stream()
+                .filter(e -> label.equals(e.getLabel()))
+                .sorted(Comparator.comparingLong(LogEntry::getId).reversed())
+                .map(e -> jsonObject(e.getMessage()))
+                .filter(o -> o != null && o.has(key))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static org.json.JSONObject jsonObject(String message) {
+        if (message == null || !message.stripLeading().startsWith("{")) return null;
+        try {
+            return new org.json.JSONObject(message);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Label of the entry that holds the name a person gave a conversation. Kept out of the
+     * {@link #SETTINGS_LABEL} record, whose every entry carries the whole provider state: a rename
+     * would otherwise have to restate the provider, and a provider change the name.
+     */
+    public static final String NAME_LABEL = "name";
+
+    /**
+     * Label of the entry that holds the agent loop put on a conversation: {@code file:<name>} for a bundled
+     * workflow, or {@code yaml:} and the YAML for one given by {@code set_agent_loop}. The last one is the loop.
+     */
+    public static final String AGENT_LOOP_LABEL = "agent-loop";
+
+    /** @return the session's last {@link #AGENT_LOOP_LABEL} entry, or {@code null} when it has none */
+    public String latestAgentLoop(long sessionId) {
+        return allLogs(sessionId).stream()
+                .filter(e -> AGENT_LOOP_LABEL.equals(e.getLabel()))
+                .max(Comparator.comparingLong(LogEntry::getId))
+                .map(LogEntry::getMessage)
+                .filter(m -> m != null && !m.isBlank())
+                .orElse(null);
+    }
+
+    /**
+     * The name a session's last {@link #NAME_LABEL} entry gives, or {@code null} when it has none or
+     * the last one cleared it (an empty message).
+     */
+    public String latestName(long sessionId) {
+        return latestNameOf(allLogs(sessionId));
+    }
+
+    static String latestNameOf(List<LogEntry> raw) {
+        return raw.stream()
+                .filter(e -> NAME_LABEL.equals(e.getLabel()))
+                .max(Comparator.comparingLong(LogEntry::getId))
+                .map(LogEntry::getMessage)
+                .filter(m -> m != null && !m.isBlank())
+                .orElse(null);
+    }
+
+    /** One settings record with the time it was written, for the Sessions tab's settings history. */
+    public record SettingsRecord(String time, String provider, String tools, String model,
+                                Double temperature) {}
+
+    /**
+     * Every settings record of a session, oldest first: when the conversation changed its provider
+     * or model, and to what ({@code ConversationSettingsRecord_260913_oo01}).
+     */
+    public List<SettingsRecord> settingsHistory(long sessionId) {
+        return allLogs(sessionId).stream()
+                .filter(e -> SETTINGS_LABEL.equals(e.getLabel()))
+                .sorted(Comparator.comparingLong(LogEntry::getId))
+                .map(e -> {
+                    Settings s = parseSettings(e.getMessage());
+                    return s == null ? null
+                            : new SettingsRecord(String.valueOf(e.getTimestamp()), s.provider(),
+                                    s.tools(), s.model(), s.temperature());
+                })
+                .filter(r -> r != null)
+                .toList();
+    }
+
+    static Settings latestSettingsOf(List<LogEntry> raw) {
+        return raw.stream()
+                .filter(e -> SETTINGS_LABEL.equals(e.getLabel()))
+                .max(Comparator.comparingLong(LogEntry::getId))
+                .map(e -> parseSettings(e.getMessage()))
+                .orElse(null);
+    }
+
+    /** @return the servers a settings record names, by name, or {@code null} when it names none */
+    private static java.util.Map<String, String> mcpServersOf(org.json.JSONObject o) {
+        if (o == null) return null;
+        java.util.Map<String, String> servers = new java.util.TreeMap<>();
+        for (String name : o.keySet()) servers.put(name, o.optString(name, ""));
+        return servers;
+    }
+
+    public static Settings parseSettings(String message) {
+        if (message == null || message.isBlank()) return null;
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(message);
+            return new Settings(o.optString("provider", null), o.optString("tools", null),
+                    o.optString("model", null),
+                    o.has("temperature") && !o.isNull("temperature") ? o.optDouble("temperature") : null,
+                    o.has("urgentWaitMinutes") && !o.isNull("urgentWaitMinutes") ? o.optLong("urgentWaitMinutes") : null,
+                    o.has("childReplyWarnMinutes") && !o.isNull("childReplyWarnMinutes")
+                            ? o.optLong("childReplyWarnMinutes") : null,
+                    o.has("noThink") && !o.isNull("noThink") ? o.optBoolean("noThink") : null,
+                    o.has("effort") && !o.isNull("effort") ? o.optString("effort") : null,
+                    mcpServersOf(o.optJSONObject("mcpServers")));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private List<LogEntry> allLogs(long sessionId) {
+        DistributedLogStore s = store();
+        // DEBUG is the lowest level, so "at least DEBUG" returns every row of the session.
+        return s == null ? List.of() : s.getLogsByLevel(sessionId, LogLevel.DEBUG);
+    }
+
+    private DistributedLogStore store() {
+        return ioLog.store();
+    }
+
+    // ── Pure shaping (unit-testable: no DB) ───────────────────────────────────
+
+    /** Length of the observation digest shown in the trace (the full size is reported separately). */
+    static final int OBS_DIGEST = 240;
+    private static final java.util.regex.Pattern TURN_LABEL =
+            java.util.regex.Pattern.compile("turn(\\d+)/step(\\d+)/(llm|tool)");
+    private static final java.util.regex.Pattern CONVERSATION_LABEL =
+            java.util.regex.Pattern.compile("turn(\\d+)/conversation");
+    /** Any label a turn writes, whatever comes after the turn number. */
+    private static final java.util.regex.Pattern IDS_LABEL =
+            java.util.regex.Pattern.compile("turn(\\d+)/ids");
+    private static final java.util.regex.Pattern ANY_TURN_LABEL =
+            java.util.regex.Pattern.compile("turn(\\d+)/.+");
+
+    /**
+     * Picks the {@code turnN/conversation} entries out of a session's rows and splits each into its
+     * question and its answer.
+     *
+     * <p>Entries are ordered by turn number rather than by row id, so a turn is placed where it
+     * belongs even if rows were written out of order. A malformed entry — one missing either marker
+     * — is skipped rather than restored as a half turn.</p>
+     *
+     * @param raw      every row of one session
+     * @param maxTurns how many of the most recent turns to keep; at or below zero keeps none
+     * @return the kept turns, oldest first
+     */
+    static List<Turn> conversationOf(List<LogEntry> raw, int maxTurns) {
+        if (maxTurns <= 0) return List.of();
+        Map<Integer, String> metaByTurn = new java.util.HashMap<>();
+        for (LogEntry e : raw) {
+            if (e.getLabel() == null) continue;
+            java.util.regex.Matcher m = ANSWER_META_LABEL.matcher(e.getLabel());
+            if (m.matches()) metaByTurn.put(Integer.parseInt(m.group(1)), e.getMessage());
+        }
+        List<Turn> turns = raw.stream()
+                .filter(e -> e.getLabel() != null && CONVERSATION_LABEL.matcher(e.getLabel()).matches())
+                .sorted(Comparator.comparingInt(e -> turnNumberOf(e.getLabel())))
+                .map(e -> withRecordedFacts(parseConversationEntry(e.getMessage()), e,
+                        metaByTurn.get(turnNumberOf(e.getLabel()))))
+                .filter(t -> t != null)
+                .collect(Collectors.toList());
+        return turns.size() <= maxTurns ? turns : turns.subList(turns.size() - maxTurns, turns.size());
+    }
+
+    /** The entry carrying the model and the duration of a turn's answer. */
+    private static final java.util.regex.Pattern ANSWER_META_LABEL =
+            java.util.regex.Pattern.compile("turn(\\d+)/answer-meta");
+
+    /**
+     * Adds to a parsed turn the time of its entry and the model and duration of its
+     * {@code answer-meta} entry, when there is one.
+     *
+     * @param meta the text of the turn's {@code answer-meta} entry ({@code MODEL: ...} and
+     *             {@code DURATION_MS: ...} lines), or {@code null}
+     */
+    private static Turn withRecordedFacts(Turn turn, LogEntry entry, String meta) {
+        if (turn == null) return null;
+        Long at = entry.getTimestamp() == null ? null
+                : entry.getTimestamp().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+        String model = null;
+        Long durationMs = null;
+        if (meta != null) {
+            for (String line : meta.split("\n")) {
+                if (line.startsWith("MODEL: ")) model = line.substring(7).strip();
+                else if (line.startsWith("DURATION_MS: ")) {
+                    try { durationMs = Long.parseLong(line.substring(13).strip()); }
+                    catch (NumberFormatException ignored) { }
+                }
+            }
+        }
+        return new Turn(turn.question(), turn.answer(), turn.error(), at, model, durationMs);
+    }
+
+    private static int turnNumberOf(String label) {
+        java.util.regex.Matcher m = CONVERSATION_LABEL.matcher(label);
+        return m.matches() ? Integer.parseInt(m.group(1)) : 0;
+    }
+
+    /**
+     * The highest turn number in a session's labels. Every kind of label is counted, not only
+     * {@code /conversation}: a turn that was interrupted before it finished wrote step labels and
+     * no conversation entry, and its number is taken just the same.
+     *
+     * @param raw every row of one session
+     * @return the highest {@code turnN} seen, or 0 when no label carries one
+     */
+    static int lastTurnNumberOf(List<LogEntry> raw) {
+        int highest = 0;
+        for (LogEntry e : raw) {
+            String label = e.getLabel();
+            if (label == null) continue;
+            java.util.regex.Matcher m = ANY_TURN_LABEL.matcher(label);
+            if (m.matches()) {
+                highest = Math.max(highest, Integer.parseInt(m.group(1)));
+            }
+        }
+        return highest;
+    }
+
+    /** @return the turn, or {@code null} when either marker is missing */
+    static Turn parseConversationEntry(String message) {
+        if (message == null) return null;
+        String qMarker = "QUESTION:";
+        String aMarker = "\n\nANSWER:\n";
+        String eMarker = "\n\nERROR:\n";
+        if (!message.startsWith(qMarker + "\n")) return null;
+        int answerAt = message.indexOf(aMarker);
+        if (answerAt >= 0) {
+            String question = message.substring(qMarker.length() + 1, answerAt);
+            String answer = message.substring(answerAt + aMarker.length());
+            return new Turn(question, answer);
+        }
+        int errorAt = message.indexOf(eMarker);
+        if (errorAt < 0) return null;
+        String question = message.substring(qMarker.length() + 1, errorAt);
+        String error = message.substring(errorAt + eMarker.length());
+        return new Turn(question, null, error);
+    }
+
+    /**
+     * The turns present in {@code raw}, newest first, with what the person asked in each.
+     *
+     * <p>Reads the request only far enough to find the prompt, and never builds a step: this is
+     * what a list of turns needs, and building the steps of all of them is what made listing a
+     * long session answer with megabytes.</p>
+     *
+     * @param beforeTurn return only turns numbered below this; {@code 0} starts at the newest
+     * @param limit      how many to return at most; at or below zero returns none
+     */
+    static List<TurnHead> turnHeadsOf(List<LogEntry> raw, int beforeTurn, int limit) {
+        if (limit <= 0) {
+            return List.of();
+        }
+        List<LogEntry> ordered = raw.stream()
+                .sorted(Comparator.comparing(IoLogView::ts).thenComparing(LogEntry::getId))
+                .toList();
+        Map<Integer, String> questions = new java.util.TreeMap<>();
+        for (LogEntry e : ordered) {
+            java.util.regex.Matcher m = TURN_LABEL.matcher(nz(e.getLabel()));
+            if (!m.find()) continue;
+            int turn = Integer.parseInt(m.group(1));
+            if (beforeTurn > 0 && turn >= beforeTurn) continue;
+            questions.putIfAbsent(turn, "");
+            if (!"tool".equals(m.group(3)) && questions.get(turn).isEmpty()) {
+                String msg = nz(e.getMessage());
+                questions.put(turn, questionTail(extractUserPrompt(between(msg,
+                        "REQUEST:", "RESPONSE:", "REASONING:", "TOOL_CALLS:", "USAGE:"))));
+            }
+        }
+        // The conversation row holds what the person actually asked, without the system prompt and
+        // the tool descriptions the request carries. Preferred over the request wherever it exists:
+        // a supervising turn's first LLM call is its judgement, whose prompt is the criteria rather
+        // than the question (SupervisorTurnInTheRecord_260913_oo01).
+        for (LogEntry e : ordered) {
+            java.util.regex.Matcher m = CONVERSATION_LABEL.matcher(nz(e.getLabel()));
+            if (!m.find()) continue;
+            int turn = Integer.parseInt(m.group(1));
+            if (beforeTurn > 0 && turn >= beforeTurn) continue;
+            if (!questions.containsKey(turn)) continue;
+            Turn parsed = parseConversationEntry(nz(e.getMessage()));
+            if (parsed != null && parsed.question() != null && !parsed.question().isBlank()) {
+                questions.put(turn, questionTail(parsed.question()));
+            }
+        }
+        List<TurnHead> newestFirst = new java.util.ArrayList<>();
+        List<Integer> numbers = new java.util.ArrayList<>(questions.keySet());
+        for (int i = numbers.size() - 1; i >= 0 && newestFirst.size() < limit; i--) {
+            int turn = numbers.get(i);
+            newestFirst.add(new TurnHead(turn, questions.get(turn)));
+        }
+        return List.copyOf(newestFirst);
+    }
+
+    /** How much of the question a turn's line carries. */
+    private static final int QUESTION_TAIL_CHARS = 200;
+
+    /**
+     * The end of what the person sent, on one line, rather than its beginning.
+     *
+     * <p>This program folds the system prompt, the tool descriptions and the question into one
+     * message with the user's role, and the question is its last hundred characters or so. Read
+     * from the start, every turn in the list said "You are a helpful assistant…" — the one part of
+     * the prompt that is the same in all of them.</p>
+     */
+    static String questionTail(String prompt) {
+        if (prompt == null) return "";
+        String flat = prompt.replaceAll("\\s+", " ").strip();
+        return flat.length() > QUESTION_TAIL_CHARS
+                ? "\u2026" + flat.substring(flat.length() - QUESTION_TAIL_CHARS) : flat;
+    }
+
+    /** @return the turn any label of a turn names ({@code turn7/step1/llm}, {@code turn7/ids},
+     *  {@code turn7/conversation}, …), or {@code -1} */
+    static int anyTurnOf(String label) {
+        java.util.regex.Matcher m = ANY_TURN_LABEL.matcher(label);
+        return m.matches() ? Integer.parseInt(m.group(1)) : -1;
+    }
+
+    /** @return the turn a step label names, e.g. 7 for {@code turn7/step1/llm}, or {@code -1}.
+     *  Distinct from {@link #turnNumberOf}, which reads the {@code /conversation} label instead. */
+    static int stepTurnOf(String label) {
+        java.util.regex.Matcher m = TURN_LABEL.matcher(label);
+        return m.find() ? Integer.parseInt(m.group(1)) : -1;
+    }
+
+    static List<TraceTurn> traceOf(List<LogEntry> raw) {
+        List<LogEntry> ordered = raw.stream()
+                .sorted(Comparator.comparing(IoLogView::ts).thenComparing(LogEntry::getId))
+                .toList();
+        Map<Integer, List<TraceStep>> byTurn = new java.util.LinkedHashMap<>();
+        Map<Integer, String> userPrompts = new java.util.HashMap<>();
+        Map<Integer, String[]> ids = new java.util.HashMap<>();
+        for (LogEntry e : ordered) {
+            java.util.regex.Matcher idm = IDS_LABEL.matcher(nz(e.getLabel()));
+            if (idm.matches()) {
+                ids.put(Integer.parseInt(idm.group(1)), parseIds(nz(e.getMessage())));
+                continue;
+            }
+            java.util.regex.Matcher m = TURN_LABEL.matcher(nz(e.getLabel()));
+            if (!m.find()) continue;
+            int turn = Integer.parseInt(m.group(1));
+            String kind = m.group(3);
+            String msg = nz(e.getMessage());
+            TraceStep step;
+            if ("tool".equals(kind)) {
+                String name = between(msg, "TOOL:", "INPUT:", "OBSERVATION:");
+                String input = between(msg, "INPUT:", "OBSERVATION:");
+                String obs = between(msg, "OBSERVATION:");
+                step = new TraceStep(e.getId(), nz(e.getLabel()), "tool", "", "", "", name, input,
+                        digest(obs), obs.length(), -1, -1, false);
+            } else {
+                String thought = between(msg, "RESPONSE:", "REASONING:", "TOOL_CALLS:", "USAGE:");
+                String toolCalls = between(msg, "TOOL_CALLS:", "USAGE:");
+                boolean finalAnswer = toolCalls.isBlank();
+                step = new TraceStep(e.getId(), nz(e.getLabel()), "llm", thought, toolCalls,
+                        extractReasons(toolCalls), "", "", "", 0,
+                        parseTokenCount(msg, "promptTokens="), parseTokenCount(msg, "completionTokens="),
+                        finalAnswer);
+                userPrompts.computeIfAbsent(turn,
+                        k -> extractUserPrompt(between(msg, "REQUEST:", "RESPONSE:", "REASONING:", "TOOL_CALLS:", "USAGE:")));
+            }
+            byTurn.computeIfAbsent(turn, k -> new java.util.ArrayList<>()).add(step);
+        }
+        return byTurn.entrySet().stream()
+                .map(en -> {
+                    String[] id = ids.getOrDefault(en.getKey(), new String[2]);
+                    return new TraceTurn(en.getKey(), userPrompts.getOrDefault(en.getKey(), ""), en.getValue(),
+                            id[0], id[1]);
+                })
+                .sorted(Comparator.comparingInt(TraceTurn::turn))
+                .toList();
+    }
+
+    /** @return the turn id and the request id of a {@code turnN/ids} entry; either may be {@code null} */
+    static String[] parseIds(String message) {
+        String turnId = null;
+        String requestId = null;
+        for (String line : message.split("\n")) {
+            if (line.startsWith("TURN_ID: ")) turnId = line.substring(9).strip();
+            else if (line.startsWith("REQUEST_ID: ")) requestId = line.substring(12).strip();
+        }
+        return new String[] {turnId, requestId};
+    }
+
+    static String extractReasons(String toolCallsText) {
+        if (toolCallsText == null || toolCallsText.isBlank()) return "";
+        java.util.List<String> reasons = new java.util.ArrayList<>();
+        for (String line : toolCallsText.split("\n")) {
+            int b = line.indexOf('{');
+            if (b < 0) continue;
+            try {
+                com.fasterxml.jackson.databind.JsonNode args = TRACE_MAPPER.readTree(line.substring(b));
+                String r = args.path("reason").asText("");
+                if (!r.isBlank()) reasons.add(r);
+            } catch (Exception ignore) {
+                // malformed line: skip, keep any reasons already parsed
+            }
+        }
+        return String.join("  /  ", reasons);
+    }
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper TRACE_MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
+    static String extractUserPrompt(String requestJson) {
+        if (requestJson == null || requestJson.isBlank()) return "";
+        try {
+            com.fasterxml.jackson.databind.JsonNode messages =
+                    TRACE_MAPPER.readTree(requestJson).path("messages");
+            String last = "";
+            if (messages.isArray()) {
+                for (com.fasterxml.jackson.databind.JsonNode msg : messages) {
+                    if ("user".equals(msg.path("role").asText())) {
+                        last = msg.path("content").asText("");
+                    }
+                }
+            }
+            return last;
+        } catch (Exception ex) {
+            return "";
+        }
+    }
+
+    /** Returns the text between {@code start} and the first following {@code stops} marker (or end). Pure. */
+    static String between(String msg, String start, String... stops) {
+        if (msg == null) return "";
+        int i = msg.indexOf(start);
+        if (i < 0) return "";
+        int from = i + start.length();
+        int end = msg.length();
+        for (String s : stops) {
+            int k = msg.indexOf(s, from);
+            if (k >= 0 && k < end) end = k;
+        }
+        return msg.substring(from, end).strip();
+    }
+
+    /** One-line, length-capped digest of an observation for the trace view. Pure. */
+    static String digest(String s) {
+        String t = (s == null ? "" : s).replace('\n', ' ').replace('\r', ' ').strip();
+        return t.length() > OBS_DIGEST ? t.substring(0, OBS_DIGEST) : t;
+    }
+
+    /** Distinct agents with line counts, sorted by name. Pure. */
+    static List<AgentInfo> agentsOf(List<LogEntry> raw) {
+        Map<String, Long> counts = raw.stream()
+                .collect(Collectors.groupingBy(e -> nz(e.getNodeId()), LinkedHashMap::new, Collectors.counting()));
+        return counts.entrySet().stream()
+                .map(en -> new AgentInfo(en.getKey(), en.getValue()))
+                .sorted(Comparator.comparing(AgentInfo::agent))
+                .toList();
+    }
+
+    /** Filters (label/level/text/time), sorts by time, caps, and maps to preview entries. Pure. */
+    static Page shape(List<LogEntry> raw, Filter f) {
+        int limit = f.limit() <= 0 ? DEFAULT_LIMIT : Math.min(f.limit(), MAX_LIMIT);
+        LogLevel min = parseLevel(f.level());
+        LocalDateTime since = parseTime(f.since());
+        LocalDateTime until = parseTime(f.until());
+        String q = (f.q() == null || f.q().isBlank()) ? null : f.q().toLowerCase();
+        String label = (f.label() == null || f.label().isBlank()) ? null : f.label().toLowerCase();
+
+        List<LogEntry> matched = raw.stream()
+                .filter(e -> label == null || nz(e.getLabel()).toLowerCase().contains(label))
+                .filter(e -> min == null || (e.getLevel() != null && e.getLevel().isAtLeast(min)))
+                .filter(e -> q == null || nz(e.getMessage()).toLowerCase().contains(q))
+                .filter(e -> since == null || (e.getTimestamp() != null && !e.getTimestamp().isBefore(since)))
+                .filter(e -> until == null || (e.getTimestamp() != null && !e.getTimestamp().isAfter(until)))
+                .sorted(Comparator.comparing(IoLogView::ts))
+                .toList();
+
+        List<Entry> page = matched.stream()
+                .limit(limit)
+                .map(IoLogView::toEntry)
+                .toList();
+        return new Page(page, page.size(), matched.size() > page.size());
+    }
+
+    private static Entry toEntry(LogEntry e) {
+        String msg = nz(e.getMessage());
+        boolean trunc = msg.length() > PREVIEW_CHARS;
+        String preview = trunc ? msg.substring(0, PREVIEW_CHARS) : msg;
+        String level = e.getLevel() == null ? "" : e.getLevel().name();
+        int levelValue = e.getLevel() == null ? 0 : e.getLevel().getPriority();
+        return new Entry(e.getId(), String.valueOf(e.getTimestamp()), nz(e.getNodeId()),
+                nz(e.getLabel()), level, levelValue, preview, msg.length(), trunc,
+                parseTokenCount(msg, "promptTokens="), parseTokenCount(msg, "completionTokens="));
+    }
+
+    static int parseTokenCount(String msg, String key) {
+        if (msg == null) return -1;
+        int i = msg.lastIndexOf(key);
+        if (i < 0) return -1;
+        int j = i + key.length();
+        int start = j;
+        while (j < msg.length() && Character.isDigit(msg.charAt(j))) j++;
+        if (j == start) return -1;
+        try { return Integer.parseInt(msg.substring(start, j)); }
+        catch (NumberFormatException ex) { return -1; }
+    }
+
+    private static LogLevel parseLevel(String s) {
+        if (s == null || s.isBlank()) return null;
+        try { return LogLevel.valueOf(s.trim().toUpperCase()); }
+        catch (IllegalArgumentException e) { return null; }
+    }
+
+    private static LocalDateTime parseTime(String s) {
+        if (s == null || s.isBlank()) return null;
+        try { return LocalDateTime.parse(s.trim()); }
+        catch (Exception e) { return null; }
+    }
+
+    private static LocalDateTime ts(LogEntry e) {
+        return e.getTimestamp() == null ? LocalDateTime.MIN : e.getTimestamp();
+    }
+
+    private static String nz(String s) {
+        return s == null ? "" : s;
+    }
+}

@@ -1,0 +1,725 @@
+package com.scivicslab.chatui.core.actor;
+
+import com.scivicslab.chatui.core.rest.ChatEvent;
+import com.scivicslab.pojoactor.core.ActorRef;
+import com.scivicslab.turingworkflow.workflow.IIActorRef;
+import com.scivicslab.turingworkflow.workflow.IIActorSystem;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * Actor that manages message queueing when the ChatSession is busy processing a prompt.
+ *
+ * <p>Supports two modes:</p>
+ * <ul>
+ *   <li><b>queue</b> - Accept the message, hold it, and send it when ChatSession becomes idle.
+ *       If ChatSession is already idle, dispatches immediately.</li>
+ *   <li><b>cancel_and_send</b> - Cancel the current prompt, add the new message to the front
+ *       of the queue, and send it once ChatSession becomes idle.</li>
+ * </ul>
+ *
+ * <p>Backed by an index-addressable {@link List} (not a {@link java.util.Deque}) so the browser
+ * can remove/reorder/pause specific queued items by position — see {@code removeAt}/
+ * {@code moveInQueue}/{@code setAuto} ({@code QueueContentsEditing_260826_oo01}).</p>
+ *
+ * <p>This is a plain POJO actor — no CDI annotations, no synchronized blocks.
+ * Thread safety is guaranteed by the actor's sequential message processing via ActorRef.</p>
+ */
+public class PromptQueue {
+
+    private static final Logger LOG = Logger.getLogger(PromptQueue.class.getName());
+
+    private final List<QueueItem> queue = new ArrayList<>();
+
+    /**
+     * This actor's own reference, set once by the generating side right after
+     * {@code createChild} (mirrors {@code ChatSession.setActorSystem}). Lets
+     * {@link #tryDispatch} — which must run on ChatSession's own thread, since it reads
+     * {@code chat.isBusy()} and calls {@code chat.start(...)} — hand the actual
+     * {@code queue.remove(0)} back to this actor's own thread via {@code self.ask(...)}, instead
+     * of mutating {@code queue} directly from a foreign thread.
+     */
+    private ActorRef<PromptQueue> self;
+
+    public void setSelf(ActorRef<PromptQueue> self) { this.self = self; }
+
+    // ── What the queue records of itself (EachActorRecordsItsOwnState_261118_oo01, decision 4) ──────────
+
+    /** Label of the conversation's entries that record what happened in its queue, one event each. */
+    public static final String QUEUE_LABEL = "queue";
+
+    /** The conversation's own session of the I/O log; {@code null} records nothing. */
+    private com.scivicslab.chatui.core.iolog.SessionEntries entries;
+    /** The conversation's qualified name, which a request put back after a restart answers as. */
+    private String conversation;
+
+    /** Records the queue's events, from now on, to the conversation's own session. */
+    public void recordsTo(com.scivicslab.chatui.core.iolog.SessionEntries entries, String conversation) {
+        this.entries = entries;
+        this.conversation = conversation;
+    }
+
+    /**
+     * Writes that a prompt entered the queue, with all of it, images as data URLs included. The text of a prompt is
+     * written this once; the queue as a whole is never written. Each entry stands alone, keyed by the prompt's id.
+     */
+    private void recordEnqueued(QueueItem item) {
+        if (entries == null) return;
+        JSONObject o = new JSONObject().put("event", "enqueued").put("id", item.id()).put("prompt", item.prompt())
+                .put("model", item.model() == null ? JSONObject.NULL : item.model())
+                .put("source", item.source() == null ? JSONObject.NULL : item.source())
+                .put("requestId", item.requestId() == null ? JSONObject.NULL : item.requestId())
+                .put("urgent", item.urgent()).put("auto", item.auto()).put("noThink", item.noThink())
+                .put("queuedAt", item.queuedAt())
+                .put("link", item.link() == null ? JSONObject.NULL
+                        : new JSONObject().put("node", item.link().node()).put("requestId", item.link().requestId()))
+                .put("images", new org.json.JSONArray(item.images() == null ? List.of() : item.images()));
+        entries.write(QUEUE_LABEL, o.toString());
+    }
+
+    /** Writes that a prompt left the queue: {@code started} when it was sent, {@code cancelled} when taken out. */
+    private void recordLeft(QueueItem item, String event) {
+        if (entries != null) entries.write(QUEUE_LABEL, new JSONObject().put("event", event).put("id", item.id()).toString());
+    }
+
+    /**
+     * Puts back, after a restart, the prompts that entered the queue and were neither started nor cancelled, in the
+     * order they entered it (an urgent one ahead, as it went then), and writes nothing. A prompt that ran is in the
+     * conversation's own record; a cancelled one is not put back. A request from another conversation answers that
+     * conversation by name when its work is done ({@code AskChatTool.deliverReplyTo}). The key an MCP caller waited
+     * under is not put back: that caller cannot wait across the restart. Then the queue runs as it would have.
+     *
+     * @param emitter where what the conversation says goes, as for any prompt queued now
+     */
+    public void restore(ActorRef<ChatSession> chatSessionRef, Consumer<ChatEvent> emitter) {
+        if (entries == null) return;
+        java.util.LinkedHashMap<String, JSONObject> waiting = new java.util.LinkedHashMap<>();
+        for (String entry : entries.all(QUEUE_LABEL)) {
+            JSONObject o;
+            try {
+                o = new JSONObject(entry);
+            } catch (Exception e) {
+                continue;
+            }
+            String id = o.optString("id", "");
+            if (id.isBlank()) continue;
+            if ("enqueued".equals(o.optString("event"))) waiting.put(id, o);
+            else waiting.remove(id);
+        }
+        for (JSONObject o : waiting.values()) {
+            String source = o.isNull("source") ? null : o.optString("source", null);
+            String requestId = o.isNull("requestId") ? null : o.optString("requestId", null);
+            boolean urgent = o.optBoolean("urgent", false);
+            JSONObject l = o.optJSONObject("link");
+            OpenRequests.RemoteLink link = l == null ? null : new OpenRequests.RemoteLink(l.getString("node"), l.getString("requestId"));
+            CompletableFuture<TurnReply> done = new CompletableFuture<>();
+            if (requestId != null && source != null && source.startsWith(ChatSession.ASK_CHAT_SOURCE_PREFIX) && conversation != null) {
+                String asker = source.substring(ChatSession.ASK_CHAT_SOURCE_PREFIX.length());
+                done.whenCompleteAsync((reply, failure) -> {
+                    if (reply == TurnReply.WITHDRAWN) return;
+                    if (link != null) {
+                        com.scivicslab.chatui.agent.AskChatTool.deliverRemoteReply(system, link, asker, conversation,
+                                urgent, reply, failure);
+                    } else {
+                        com.scivicslab.chatui.agent.AskChatTool.deliverReplyTo(system, asker, conversation, requestId,
+                                urgent, reply, failure);
+                    }
+                });
+            }
+            List<String> images = new ArrayList<>();
+            org.json.JSONArray saved = o.optJSONArray("images");
+            for (int i = 0; saved != null && i < saved.length(); i++) images.add(saved.getString(i));
+            QueueItem item = new QueueItem(o.optString("prompt", ""), o.isNull("model") ? null : o.optString("model", null),
+                    emitter, done, source, null, o.optBoolean("noThink", false), o.optBoolean("auto", true), images,
+                    requestId, urgent, o.optLong("queuedAt", System.currentTimeMillis()), o.getString("id"), link);
+            place(item);
+        }
+        // A request the conversation received whose turn the restart cut is answered with a notice, before anything
+        // queued runs; one a queued message carries is left for that message (TurnWithoutAnAnswerTellsTheAsker_261119_oo01).
+        java.util.Set<String> queuedRequestIds = new java.util.HashSet<>();
+        for (QueueItem item : queue) if (item.requestId() != null) queuedRequestIds.add(item.requestId());
+        chatSessionRef.tell(c -> c.closeRequestsCutByRestart(queuedRequestIds));
+        if (!waiting.isEmpty()) {
+            LOG.info("queue: put back " + waiting.size() + " prompt(s) of " + conversation);
+            emitter.accept(ChatEvent.queueChanged());
+            requestDispatch(chatSessionRef, false);
+        }
+    }
+
+    /** Puts an item in its place: an urgent one ahead of every waiting item that is not urgent, any other at the end. */
+    private int place(QueueItem item) {
+        if (!item.urgent()) {
+            queue.add(item);
+            return 0;
+        }
+        int rank = rankOf(item);
+        int at = 0;
+        while (at < queue.size() && rankOf(queue.get(at)) <= rank) at++;
+        queue.add(at, item);
+        return queue.size() - 1 - at;
+    }
+
+    /** Actor system + this queue's ConversationSquad log actor name, for {@link #logToConversationSquad}. Both null until wired. */
+    private IIActorSystem system;
+    private String conversationSquadLogActorName;
+
+    /**
+     * @param system          lets {@link #logToConversationSquad} resolve {@code conversationSquadLogActorName}
+     * @param conversationSquadLogActorName this queue's ConversationSquad's log multiplexer actor name (e.g. {@code "chat-01.log"})
+     */
+    public void setLogging(IIActorSystem system, String conversationSquadLogActorName) {
+        this.system = system;
+        this.conversationSquadLogActorName = conversationSquadLogActorName;
+    }
+
+    /**
+     * Forwards one entry to this queue's ConversationSquad log multiplexer, in addition to (not instead of) the
+     * existing {@code LOG.xxx(...)} calls near each call site (see
+     * {@code ChatSession.logToConversationSquad}/{@code 150_TabScopedLogging_260826_oo01}).
+     */
+    private void logToConversationSquad(String message) {
+        if (system == null || conversationSquadLogActorName == null) return;
+        try {
+            IIActorRef<?> conversationSquadLog = system.getIIActor(conversationSquadLogActorName);
+            if (conversationSquadLog == null) return;
+            JSONObject args = new JSONObject();
+            args.put("source", "PromptQueue");
+            args.put("type", "INFO");
+            args.put("data", message);
+            conversationSquadLog.callByActionName("add", args.toString());
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to forward log entry to ConversationSquad log", e);
+        }
+    }
+
+    /**
+     * Enqueues a prompt. Convenience overload without resultKey (resultKey defaults to null).
+     */
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatSession> chatSessionRef,
+                        String source) {
+        enqueue(prompt, model, mode, emitter, chatSessionRef, source, null);
+    }
+
+    /**
+     * Main entry point for enqueuing a prompt when ChatSession may be busy.
+     *
+     * <p>After adding to the queue, immediately asks ChatSession if it is idle.
+     * If idle, dispatches the next item without waiting for a tick.</p>
+     *
+     * @param prompt          the prompt text
+     * @param model           the model to use (may be null)
+     * @param mode            one of "queue", "cancel_and_send"
+     * @param emitter         callback to send ChatEvent responses to the client
+     * @param chatSessionRef  reference to the ChatSession
+     * @param source          "human" or "agent:xxx"
+     * @param resultKey       UUID for MCP result tracking, or null for human prompts
+     */
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatSession> chatSessionRef,
+                        String source, String resultKey) {
+
+        CompletableFuture<TurnReply> done = new CompletableFuture<>();
+        enqueue(prompt, model, mode, emitter, chatSessionRef, source, resultKey, done);
+    }
+
+    /**
+     * Enqueues a prompt with a caller-supplied {@code done} future.
+     *
+     * <p>Use this overload when the caller needs to block until the prompt completes
+     * (e.g. MCP {@code tools/call} handler waiting for the LLM result).</p>
+     *
+     * @param done externally created future that ChatSession completes with the turn's {@link TurnReply} when it finishes the prompt
+     */
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatSession> chatSessionRef,
+                        String source, String resultKey,
+                        CompletableFuture<TurnReply> done) {
+        enqueue(prompt, model, mode, emitter, chatSessionRef, source, resultKey, done, false);
+    }
+
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatSession> chatSessionRef,
+                        String source, String resultKey,
+                        CompletableFuture<TurnReply> done, boolean noThink) {
+        enqueue(prompt, model, mode, emitter, chatSessionRef, source, resultKey, done, noThink, true);
+    }
+
+    /**
+     * Enqueues a prompt, held or ready.
+     *
+     * @param auto {@code true} to dispatch as soon as ChatSession is idle; {@code false} to leave
+     *             the item sitting in the queue until a human turns its Auto on or advances the
+     *             queue. A held item is what the pane's Queue button makes: a prompt written now
+     *             and sent later, which is the whole of what that button does in quarkus-chat-ui.
+     *             Every other caller passes {@code true}, so nothing else changes behaviour.
+     */
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatSession> chatSessionRef,
+                        String source, String resultKey,
+                        CompletableFuture<TurnReply> done, boolean noThink, boolean auto) {
+        enqueue(prompt, model, mode, emitter, chatSessionRef, source, resultKey, done, noThink, auto, List.of());
+    }
+
+    /**
+     * Enqueues a prompt with images attached, held or ready.
+     *
+     * @param images data URLs of images pasted/dropped/attached alongside {@code prompt}
+     *               ({@code AttachedImages_260908_oo01}), or empty if none. Rendered by the
+     *               provider only on the turn's first step ({@code ChatSession.stepExpectingAction});
+     *               see {@link #popFront} for where they are also echoed to the pane.
+     */
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatSession> chatSessionRef,
+                        String source, String resultKey,
+                        CompletableFuture<TurnReply> done, boolean noThink, boolean auto,
+                        List<String> images) {
+        enqueue(prompt, model, mode, emitter, chatSessionRef, source, resultKey, done, noThink, auto, images, null);
+    }
+
+    /**
+     * Enqueues a prompt that is a request from, or a reply to, another conversation's {@code ask_chat}.
+     *
+     * @param requestId the request id ({@code TurnAndRequestIds_261107_oo01}): for a request, its own
+     *                  id; for a reply, the id of the request it answers; {@code null} for any other prompt
+     */
+    public void enqueue(String prompt, String model, String mode,
+                        Consumer<ChatEvent> emitter,
+                        ActorRef<ChatSession> chatSessionRef,
+                        String source, String resultKey,
+                        CompletableFuture<TurnReply> done, boolean noThink, boolean auto,
+                        List<String> images, String requestId) {
+        enqueue(prompt, model, mode, emitter, chatSessionRef, source, resultKey, done, noThink, auto, images,
+                requestId, false);
+    }
+
+    /**
+     * Enqueues a prompt, urgent or not ({@code UrgentRequestAndStatusReport_261107_oo01}).
+     *
+     * @param urgent {@code true} to put it ahead of every waiting item that is not urgent. Waiting items
+     *               are kept in three ranks, each in the order it arrived: urgent requests, then the messages
+     *               that resume a paused turn, then everything else. An urgent request thus does not wait
+     *               behind resumed work, which would only be paused again for it
+     *               ({@code TimekeeperPausesATurnForAnUrgentRequest_261107_oo01})
+     * @return how many waiting items it was put ahead of
+     */
+    public int enqueue(String prompt, String model, String mode,
+                       Consumer<ChatEvent> emitter,
+                       ActorRef<ChatSession> chatSessionRef,
+                       String source, String resultKey,
+                       CompletableFuture<TurnReply> done, boolean noThink, boolean auto,
+                       List<String> images, String requestId, boolean urgent) {
+        return enqueue(prompt, model, mode, emitter, chatSessionRef, source, resultKey, done, noThink, auto, images,
+                requestId, urgent, null);
+    }
+
+    /**
+     * @param link the way back to the sender of a request from another chat-ui instance, or {@code null}; it goes with
+     *             the item into the turn and into the record, so the request's reply survives a restart
+     */
+    public int enqueue(String prompt, String model, String mode,
+                       Consumer<ChatEvent> emitter,
+                       ActorRef<ChatSession> chatSessionRef,
+                       String source, String resultKey,
+                       CompletableFuture<TurnReply> done, boolean noThink, boolean auto,
+                       List<String> images, String requestId, boolean urgent, OpenRequests.RemoteLink link) {
+        int passed = 0;
+        switch (mode) {
+            case "cancel_and_send" -> {
+                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey, noThink, auto, images,
+                        requestId, urgent, System.currentTimeMillis(), java.util.UUID.randomUUID().toString(), link);
+                queue.add(0, item);
+                recordEnqueued(item);
+                // tellNow, not tell: the running turn blocks the ChatSession's own thread, so a
+                // queued cancel would be delivered only after that turn ended (ChatSession.cancel).
+                chatSessionRef.tellNow(ChatSession::cancel);
+                emitter.accept(ChatEvent.info("Current prompt cancelled. Your message is queued."));
+                LOG.info("cancel_and_send: cancelled current prompt, queued at front (queue size=" + queue.size() + ")");
+                logToConversationSquad("cancel_and_send: queued at front (queue size=" + queue.size() + ")");
+            }
+            default -> {
+                // "queue" mode (default)
+                QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey, noThink, auto, images,
+                        requestId, urgent, System.currentTimeMillis(), java.util.UUID.randomUUID().toString(), link);
+                passed = place(item);
+                recordEnqueued(item);
+                emitter.accept(ChatEvent.info(auto
+                        ? "Queued. Your message will be sent when the current prompt finishes."
+                        : "Held in the queue. Turn its Auto on, or advance the queue, to send it."));
+                LOG.info("queue: queued prompt (queue size=" + queue.size() + ")");
+                logToConversationSquad("queue: queued prompt (queue size=" + queue.size() + ")");
+            }
+        }
+        // Whoever sent it (the pane, the REST endpoint, another conversation's ask_chat), the
+        // pane is told now, so its Queue panel shows the prompt without waiting for its next poll.
+        emitter.accept(ChatEvent.queueChanged());
+
+        requestDispatch(chatSessionRef, false);
+        return passed;
+    }
+
+    /**
+     * Removes all agent-sourced messages from the queue, leaving human-typed messages intact.
+     * Called on cancel to stop ongoing agent conversations without discarding
+     * messages the human has already queued up.
+     *
+     * <p>Agent messages have source values of the form {@code "agent:xxx"}
+     * (e.g. {@code "agent:localhost:28900"}).</p>
+     */
+    public void clearAgentMessages() {
+        int before = queue.size();
+        queue.removeIf(e -> {
+            if (e.source() == null || !e.source().startsWith("agent:")) return false;
+            abandon(e, "cleared from the queue when the conversation's turn was cancelled");
+            recordLeft(e, "cancelled");
+            return true;
+        });
+        int removed = before - queue.size();
+        if (removed > 0) {
+            LOG.info("queue: cleared " + removed + " agent messages on cancel");
+            logToConversationSquad("queue: cleared " + removed + " agent messages on cancel");
+        }
+    }
+
+    /**
+     * Called when ChatSession finishes a prompt. Triggers immediate dequeue attempt
+     * if the queue is not empty.
+     *
+     * @param chatSessionRef reference to the ChatSession
+     */
+    public void onPromptComplete(ActorRef<ChatSession> chatSessionRef) {
+        requestDispatch(chatSessionRef, false);
+    }
+
+    /**
+     * Dispatches the front item immediately, ignoring its {@code auto} flag — the manual
+     * "advance" action (browser-triggered, e.g. an empty-input Send, mirroring
+     * {@code quarkus-chat-ui3}'s {@code sendFromQueue()}). Still requires {@code ChatSession} to
+     * be idle, checked on ChatSession's own thread inside {@link #tryDispatch}.
+     */
+    public void advance(ActorRef<ChatSession> chatSessionRef) {
+        requestDispatch(chatSessionRef, true);
+    }
+
+    /** @return 0 for an urgent request, 1 for a message resuming a paused turn, 2 for anything else */
+    private static int rankOf(QueueItem item) {
+        if (!item.urgent()) return 2;
+        return ChatSession.isResume(item.source()) ? 1 : 0;
+    }
+
+    /**
+     * Returns when the first urgent request among the urgent items at the front entered the queue, for
+     * the timekeeper to decide whether to pause the running turn
+     * ({@code TimekeeperPausesATurnForAnUrgentRequest_261107_oo01}).
+     *
+     * <p>A message that resumes a paused turn is queued as urgent so that it comes before other waiting
+     * work, but it is not a request anyone waits on, and it is skipped. Counted, it paused every resumed
+     * turn that took longer than the limit, which queued another resume message, without end.</p>
+     *
+     * @return that request's queueing time, or {@code null} when no urgent request is at the front
+     */
+    public Long frontUrgentQueuedAt() {
+        for (QueueItem item : queue) {
+            if (!item.urgent()) return null;
+            if (!ChatSession.isResume(item.source())) return item.queuedAt();
+        }
+        return null;
+    }
+
+    /**
+     * Returns the current number of items in the queue.
+     */
+    public int getQueueSize() {
+        return queue.size();
+    }
+
+    /**
+     * Returns true if the queue has pending items.
+     */
+    public boolean hasPending() {
+        return !queue.isEmpty();
+    }
+
+    /**
+     * Returns the prompt text, source, and auto flag of every currently-queued item, oldest
+     * first — for display in the browser's Queue panel. {@code emitter}/{@code done} are
+     * deliberately left out (not JSON-serializable, and irrelevant to the browser view).
+     */
+    public List<QueueEntry> snapshot() {
+        return queue.stream().map(i -> new QueueEntry(i.prompt(), i.source(), i.auto(), i.urgent())).toList();
+    }
+
+    /**
+     * Removes the item at {@code index}, regardless of who queued it (
+     * {@code QueueContentsEditing_260826_oo01} — deletion applies to every source, not just
+     * human-typed items).
+     *
+     * @return {@code true} if an item was removed
+     */
+    public boolean removeAt(int index) {
+        if (index < 0 || index >= queue.size()) return false;
+        QueueItem removed = queue.remove(index);
+        abandon(removed, "removed from the queue before it ran");
+        recordLeft(removed, "cancelled");
+        return true;
+    }
+
+    /**
+     * Takes the request with this id out of the queue because its sender asked to ({@code cancel_request}),
+     * if it still waits there ({@code CancelARequestInTheQueue_261113_oo01}). Only an item queued by that
+     * sender's {@code ask_chat} counts: a reply carries the same request id, and so does a request someone
+     * else sent. The item's {@code done} is completed with {@link TurnReply#WITHDRAWN}, so the sender is not
+     * sent a message about it.
+     *
+     * @param requestId the request's id
+     * @param source    the source the sender's {@code ask_chat} queued it under
+     * @return {@code true} if the request was waiting and is now removed; {@code false} when it is not in the
+     *         queue, which means it has started, has been answered, or was never queued here
+     */
+    public boolean withdraw(String requestId, String source) {
+        for (int i = 0; i < queue.size(); i++) {
+            QueueItem item = queue.get(i);
+            if (requestId.equals(item.requestId()) && source.equals(item.source())) {
+                queue.remove(i);
+                recordLeft(item, "cancelled");
+                if (item.done() != null) item.done().complete(TurnReply.WITHDRAWN);
+                item.emitter().accept(ChatEvent.queueChanged());
+                logToConversationSquad("queue: request " + requestId + " withdrawn by its sender");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Completes the {@code done} of an item taken out of the queue without running, with no answer.
+     * Another conversation's {@code ask_chat} waits on it; left incomplete, that conversation would
+     * never hear that its request will not be answered ({@code ReportReachesTheAskerAfterDelegation_261107_oo01}).
+     *
+     * @param why what the sender is told, in the line that says its request ended without a reply
+     */
+    private static void abandon(QueueItem item, String why) {
+        if (item.done() != null) item.done().complete(new TurnReply(null, why, null));
+    }
+
+    /**
+     * Swaps the item at {@code index} with its neighbor in {@code direction} ({@code -1} = up,
+     * i.e. earlier / sooner to send; {@code +1} = down).
+     *
+     * @return {@code true} if the swap happened
+     */
+    public boolean moveInQueue(int index, int direction) {
+        int target = index + direction;
+        if (index < 0 || index >= queue.size() || target < 0 || target >= queue.size()) return false;
+        QueueItem tmp = queue.get(index);
+        queue.set(index, queue.get(target));
+        queue.set(target, tmp);
+        return true;
+    }
+
+    /**
+     * Moves the item at {@code index} to the front, so that it is the next one sent. The items it
+     * passes keep their order.
+     *
+     * @return {@code true} if the item existed and was not already at the front
+     */
+    public boolean moveToFront(int index) {
+        if (index <= 0 || index >= queue.size()) return false;
+        queue.add(0, queue.remove(index));
+        return true;
+    }
+
+    /**
+     * Sets whether the item at {@code index} auto-dispatches once it is at the front and
+     * {@code ChatSession} is idle ({@code true}, the default), or waits for an explicit
+     * {@link #advance} instead ({@code false}) — a manual checkpoint the browser can insert
+     * into the queue.
+     *
+     * @return {@code true} if the item exists and was updated
+     */
+    public boolean setAuto(int index, boolean auto) {
+        if (index < 0 || index >= queue.size()) return false;
+        queue.set(index, queue.get(index).withAuto(auto));
+        return true;
+    }
+
+    /**
+     * One queued item's browser-facing summary.
+     *
+     * @param prompt the prompt text
+     * @param source who queued it — {@code "human"} or {@code "agent:xxx"}
+     * @param auto   whether this item auto-dispatches once it's at the front and idle
+     */
+    public record QueueEntry(String prompt, String source, boolean auto, boolean urgent) {
+        public QueueEntry(String prompt, String source, boolean auto) {
+            this(prompt, source, auto, false);
+        }
+    }
+
+    // ---- What this conversation has already sent (QueueChecklistView_260913_oo01) ----
+
+    /** How many sent items are kept; the oldest go first, as in quarkus-chat-ui's own queue. */
+    static final int MAX_SENT = 100;
+
+    /** The items popFront handed to the conversation, oldest first. */
+    private final List<QueueEntry> sent = new ArrayList<>();
+
+    /** @return the items this conversation has sent, oldest first */
+    public List<QueueEntry> sentSnapshot() {
+        return List.copyOf(sent);
+    }
+
+    /** Forgets one sent item; the list is the browser's checklist, and a line may be struck out. */
+    public boolean removeSentAt(int index) {
+        if (index < 0 || index >= sent.size()) return false;
+        sent.remove(index);
+        return true;
+    }
+
+    /**
+     * Puts the questions of restored turns on the sent list, so a reload shows what was sent
+     * before the restart. Called once, before anything new is sent.
+     *
+     * @param prompts the restored questions, oldest first
+     */
+    public void seedSent(List<String> prompts) {
+        for (String p : prompts) {
+            if (p != null && !p.isBlank()) sent.add(new QueueEntry(p, "human", true));
+        }
+        trimSent();
+    }
+
+    private void trimSent() {
+        while (sent.size() > MAX_SENT) sent.remove(0);
+    }
+
+    // ---- Internal ----
+
+    /**
+     * Asks {@code chatSessionRef} to try dispatching, if idle — the only place outside this
+     * class's own actor thread that ever touches the queue, and even here only indirectly via
+     * {@link #tryDispatch}'s {@code self.ask(...)} round-trip.
+     */
+    private void requestDispatch(ActorRef<ChatSession> chatSessionRef, boolean force) {
+        chatSessionRef.tell(chat -> tryDispatch(chat, chatSessionRef, force));
+    }
+
+    /**
+     * Runs on {@code ChatSession}'s own actor thread (via {@code chatSessionRef.tell(...)} in
+     * {@link #requestDispatch}) — safe to read {@code chat.isBusy()} and call
+     * {@code chat.start(...)} directly. Does <strong>not</strong> touch {@code queue} directly:
+     * that would mutate this actor's state from a foreign thread, exactly the race this method
+     * exists to avoid. Instead it asks this actor's own thread (via {@link #self}) to pop the
+     * front item atomically, and only proceeds if one was returned.
+     *
+     * <p>{@code chat.start(...)} and {@code chat.runUntilEnd()} (inherited from {@code
+     * Interpreter}) are then called as plain Java methods, inside {@code ChatSession}'s own
+     * {@code tell()} closure — not via {@code ChatSessionIIAR}'s generic {@code
+     * callByActionName("runUntilEnd", ...)}, which would dispatch onto {@code IIActorSystem}'s
+     * {@code ManagedThreadPool} and mutate ChatSession's fields off its own actor thread (see
+     * {@code chat-session-agent-loop.yaml}'s own note, and {@code ChatSessionAgentLoop_260823_oo01}).
+     * {@code runUntilEnd()} itself blocks this call until the turn reaches "end" — cheap, since
+     * this is a virtual thread — so the whole turn, including every LLM call and tool execution
+     * inside it, stays serialized on ChatSession's own thread.</p>
+     *
+     * @param force ignore the front item's {@code auto} flag ({@link #advance}'s manual
+     *              dispatch) instead of respecting it (the default idle-triggered path — a
+     *              paused, {@code auto=false} front item blocks dispatch entirely, exactly like
+     *              {@code quarkus-chat-ui3}'s own queue never lets a later item skip ahead of a
+     *              paused earlier one)
+     */
+    private void tryDispatch(ChatSession chat, ActorRef<ChatSession> chatSessionRef, boolean force) {
+        if (chat.isBusy()) return;
+
+        QueueItem item;
+        try {
+            item = self.ask(q -> q.popFront(!force)).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to pop queue front", e);
+            return;
+        }
+        if (item == null) return;
+
+        chat.start(item.prompt(), item.model(), item.emitter(), chatSessionRef, item.done(), item.resultKey(),
+                item.noThink(), item.images(), item.source(), item.requestId(), item.link());
+        com.scivicslab.pojoactor.action.ActionResult result = chat.runUntilEnd();
+        if (!result.isSuccess()) {
+            LOG.warning("Agent loop did not reach 'end': " + result.getResult());
+        }
+    }
+
+    /**
+     * Pops and returns the front item, or {@code null} if the queue is empty or (when
+     * {@code respectAuto}) the front item is paused ({@code auto=false}). The only method that
+     * removes from {@code queue} for dispatch — always invoked via {@link #self}'s own actor
+     * thread ({@link #tryDispatch}'s {@code self.ask(...)}), never called directly.
+     */
+    public QueueItem popFront(boolean respectAuto) {
+        if (queue.isEmpty()) return null;
+        if (respectAuto && !queue.get(0).auto()) return null;
+        QueueItem item = queue.remove(0);
+        recordLeft(item, "started");
+        sent.add(new QueueEntry(item.prompt(), item.source(), item.auto(), item.urgent()));
+        trimSent();
+        // Show the prompt in the pane now that it is actually being sent. The browser used to draw
+        // only what it had typed itself, so a prompt from the REST API, from an MCP agent or from
+        // another conversation's ask_chat reached the model and was answered while the pane showed
+        // the answer to a question nobody could see. Emitted at dispatch, not at enqueue, so a held
+        // item appears when it is sent rather than while it is still waiting in the queue.
+        try {
+            // A person's own prompt at the screen is drawn as it always was; anything else says
+            // where it came from, so a conversation being driven on someone's behalf reads as such
+            // while it runs, not only once it is in the history (PromptOriginOnScreen_260915_oo01).
+            item.emitter().accept(ChatEvent.user(item.prompt(), item.images(),
+                    ChatSession.originOf(item.source())));
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not echo the dispatched prompt to the pane", e);
+        }
+        LOG.info("Dequeuing prompt (remaining=" + queue.size() + "): " + truncate(item.prompt(), 80));
+        logToConversationSquad("Dequeuing prompt (remaining=" + queue.size() + "): " + truncate(item.prompt(), 80));
+        return item;
+    }
+
+    private static String truncate(String s, int maxLen) {
+        if (s == null) return "<null>";
+        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
+    }
+
+    /**
+     * Represents a queued prompt with its metadata.
+     */
+    public record QueueItem(
+            String prompt,
+            String model,
+            Consumer<ChatEvent> emitter,
+            CompletableFuture<TurnReply> done,
+            String source,     // "human" | "agent:xxx" (e.g. "agent:localhost:28900")
+            String resultKey,  // UUID for MCP result tracking, null for human prompts
+            boolean noThink,
+            boolean auto,      // false = paused: waits for advanceNow instead of auto-dispatch
+            List<String> images, // data URLs attached to this prompt, or empty
+            String requestId,    // the ask_chat request this item is, or answers; null otherwise
+            boolean urgent,      // goes ahead of every waiting item that is not urgent
+            long queuedAt,       // when it entered the queue, in milliseconds since the epoch
+            String id,           // this item's own id, which the queue's recorded events are keyed by
+            OpenRequests.RemoteLink link // the way back to a sender on another chat-ui instance, or null
+    ) {
+        QueueItem withAuto(boolean newAuto) {
+            return new QueueItem(prompt, model, emitter, done, source, resultKey, noThink, newAuto, images, requestId,
+                    urgent, queuedAt, id, link);
+        }
+    }
+}

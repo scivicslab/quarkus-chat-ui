@@ -1,0 +1,418 @@
+package com.scivicslab.chatui.core.rest;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+
+import java.util.List;
+
+/**
+ * SSE event DTO for chat communication.
+ *
+ * <p>Server to Client event types:</p>
+ * <ul>
+ *   <li>{@code delta} - Partial text content from the LLM</li>
+ *   <li>{@code result} - Final result with session ID and cost info</li>
+ *   <li>{@code error} - Error message</li>
+ *   <li>{@code info} - Informational message (e.g., model changed)</li>
+ *   <li>{@code mcp_user} - User message received via MCP (displayed like a user message with MCP attribution)</li>
+ *   <li>{@code status} - Status update (model, session, busy state)</li>
+ *   <li>{@code thinking} - Thinking/activity indicator</li>
+ *   <li>{@code queue} - The conversation's queue changed; the pane reads it again</li>
+ *   <li>{@code answer_delta} / {@code answer_snapshot} / {@code answer_retract} - A step's text
+ *       shown as a provisional answer while it streams: appended, replaced, or taken back when
+ *       the step turns out to call a tool</li>
+ *   <li>{@code prompt} - Interactive prompt from the LLM (tool permission, yes/no, etc.)</li>
+ *   <li>{@code heartbeat} - Keep-alive for SSE connection</li>
+ *   <li>{@code log} - Server log entry (level, logger, message, timestamp)</li>
+ *   <li>{@code tool_use} - A tool call the provider's own harness made inside one sendPrompt
+ *       (CliHarnessProvider_260912_oo01): {@code toolName}, {@code toolUseId}, input JSON in
+ *       {@code content}</li>
+ *   <li>{@code tool_result} - The harness's result for a {@code tool_use}, paired by
+ *       {@code toolUseId}; the result text in {@code content}, {@code isError} when it failed</li>
+ * </ul>
+ */
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record ChatEvent(
+    String type,
+    String content,
+    String sessionId,
+    Double costUsd,
+    Long durationMs,
+    String model,
+    Boolean busy,
+    String promptId,
+    String promptType,
+    List<String> options,
+    String logLevel,
+    String loggerName,
+    Long timestamp,
+    List<String> images,
+    /** Tool name, on {@code tool_use} events. */
+    String toolName,
+    /** Identifier pairing a {@code tool_use} with its {@code tool_result}. */
+    String toolUseId,
+    /** Whether a {@code tool_result} reports a failure. */
+    Boolean isError,
+    /**
+     * On a prompt shown to watchers, which of the four ways it arrived — {@code screen},
+     * {@code api}, {@code chat <name>} or {@code workflow <name>}
+     * ({@code PromptOriginOnScreen_260915_oo01}). {@code null} on every other kind of event.
+     */
+    String origin,
+    /** The turn the event belongs to ({@code TurnAndRequestIds_261107_oo01}); on {@code turn} and {@code result}. */
+    String turnId,
+    /** The {@code ask_chat} request the turn's prompt is, or answers; on {@code turn} and {@code result}. */
+    String requestId
+) {
+
+    /** Every event made before turn and request ids existed: neither is set. */
+    public ChatEvent(String type, String content, String sessionId, Double costUsd, Long durationMs, String model,
+                     Boolean busy, String promptId, String promptType, List<String> options, String logLevel,
+                     String loggerName, Long timestamp, List<String> images, String toolName, String toolUseId,
+                     Boolean isError, String origin) {
+        this(type, content, sessionId, costUsd, durationMs, model, busy, promptId, promptType, options, logLevel,
+                loggerName, timestamp, images, toolName, toolUseId, isError, origin, null, null);
+    }
+
+    /**
+     * Says which turn has just started and which {@code ask_chat} request its prompt is, or answers, so the
+     * screen can put both under the prompt it has just drawn ({@code TurnAndRequestIds_261107_oo01}).
+     *
+     * @param turnId    the turn's id
+     * @param requestId the request, or {@code null}
+     */
+    public static ChatEvent turn(String turnId, String requestId) {
+        return new ChatEvent("turn", null, null, null, null, null, null, null, null, null, null, null, null, null,
+                null, null, null, null, turnId, requestId);
+    }
+
+    /** @return this event with the turn and request ids it belongs to */
+    public ChatEvent withTurn(String turnId, String requestId) {
+        return new ChatEvent(type, content, sessionId, costUsd, durationMs, model, busy, promptId, promptType, options,
+                logLevel, loggerName, timestamp, images, toolName, toolUseId, isError, origin, turnId, requestId);
+    }
+
+    /**
+     * Creates a delta event carrying a partial text chunk from the LLM.
+     *
+     * @param content the partial text content
+     * @return a new delta event
+     */
+    public static ChatEvent delta(String content) {
+        return new ChatEvent("delta", content, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a result event indicating that the LLM response is complete.
+     *
+     * @param sessionId the session identifier
+     * @param costUsd   the estimated cost in USD
+     * @param durationMs the response duration in milliseconds
+     * @return a new result event
+     */
+    public static ChatEvent result(String sessionId, double costUsd, long durationMs) {
+        return new ChatEvent("result", null, sessionId, costUsd, durationMs, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a result event with additional model and busy-state information.
+     *
+     * @param sessionId  the session identifier
+     * @param costUsd    the estimated cost in USD
+     * @param durationMs the response duration in milliseconds
+     * @param model      the model that produced the response
+     * @param busy       whether the actor is still busy after this result
+     * @return a new result event
+     */
+    public static ChatEvent result(String sessionId, double costUsd, long durationMs, String model, boolean busy) {
+        return new ChatEvent("result", null, sessionId, costUsd, durationMs, model, busy, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates an error event with the given message.
+     *
+     * @param content the error message
+     * @return a new error event
+     */
+    public static ChatEvent error(String content) {
+        return new ChatEvent("error", content, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates the event a provider sends when the server stopped a reply at a token limit
+     * ({@code finish_reason=length}) and the caller asked to handle that itself
+     * ({@code ProviderContext#handlesCutOff}). The text written so far has already been streamed as
+     * {@code delta} events; this event says the text is unfinished.
+     *
+     * @param charsWritten how many characters of reply text were written before the cut, as a decimal string
+     * @return a new cut_off event
+     */
+    public static ChatEvent cutOff(String charsWritten) {
+        return new ChatEvent("cut_off", charsWritten, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates an informational event (e.g., model changed, processing started).
+     *
+     * @param content the informational message
+     * @return a new info event
+     */
+    public static ChatEvent info(String content) {
+        return new ChatEvent("info", content, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a user message event, displayed in the chat area as a user prompt.
+     *
+     * @param content the user's prompt text
+     * @return a new user event
+     */
+    public static ChatEvent user(String content) {
+        return user(content, null);
+    }
+
+    /**
+     * Creates a user message event carrying attached images alongside the prompt text.
+     *
+     * @param content the user's prompt text
+     * @param images  data URLs of images attached to this prompt, or {@code null}/empty if none
+     * @return a new user event
+     */
+    public static ChatEvent user(String content, List<String> images) {
+        return user(content, images, null);
+    }
+
+    /**
+     * A prompt being shown to whoever is watching this conversation, saying where it came from.
+     *
+     * <p>One kind of event for all four senders ({@code PromptOriginOnScreen_260915_oo01}): the
+     * pane draws them the same way and labels the ones that are not the watcher's own. A separate
+     * kind for prompts from elsewhere dropped the images along the way.</p>
+     *
+     * @param content the prompt text
+     * @param images  data URLs attached to it, or empty
+     * @param origin  {@code screen}, {@code api}, {@code chat <name>} or {@code workflow <name>};
+     *                {@code null} when nothing is known about the sender
+     */
+    public static ChatEvent user(String content, List<String> images, String origin) {
+        return new ChatEvent("user", content, null, null, null, null, null, null, null, null, null, null, null,
+                (images == null || images.isEmpty()) ? null : images, null, null, null, origin);
+    }
+
+    /**
+     * Creates an MCP user message event, displayed in the chat area like a user message
+     * but with MCP sender attribution.
+     *
+     * @param content the message content (includes caller label and prompt text)
+     * @return a new mcp_user event
+     */
+    public static ChatEvent mcpUser(String content) {
+        return new ChatEvent("mcp_user", content, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a status event reporting the current model, session, and busy state.
+     *
+     * @param model     the active model name
+     * @param sessionId the current session identifier
+     * @param busy      whether the actor is currently processing a request
+     * @return a new status event
+     */
+    public static ChatEvent status(String model, String sessionId, boolean busy) {
+        return new ChatEvent("status", null, sessionId, null, null, model, busy, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a thinking event indicating LLM activity or reasoning progress.
+     *
+     * @param content the thinking/activity text
+     * @return a new thinking event
+     */
+    public static ChatEvent thinking(String content) {
+        return new ChatEvent("thinking", content, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates an event carrying the whole of the current turn's activity text so far, sent when a
+     * browser opens the stream mid-turn. Unlike {@link #thinking}, which the pane appends, the pane
+     * replaces what it shows with this, so receiving it twice leaves the same text.
+     *
+     * @param content the activity text accumulated since the turn began
+     * @return a new thinking_snapshot event
+     */
+    public static ChatEvent thinkingSnapshot(String content) {
+        return new ChatEvent("thinking_snapshot", content, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates an event carrying the next piece of a step's text that may turn out to be the
+     * answer. The pane appends it to a provisional answer bubble; the turn's {@code delta} later
+     * replaces the bubble's text with the confirmed answer, and {@link #answerRetract()} removes
+     * the bubble if the step turns out to be a tool call.
+     *
+     * @param content the next piece of the candidate answer
+     * @return a new answer_delta event
+     */
+    public static ChatEvent answerDelta(String content) {
+        return new ChatEvent("answer_delta", content, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates an event carrying the whole candidate answer so far, sent when a browser opens the
+     * stream mid-step. Unlike {@link #answerDelta}, the pane replaces the bubble's text with it.
+     *
+     * @param content the candidate answer accumulated since the step began
+     * @return a new answer_snapshot event
+     */
+    public static ChatEvent answerSnapshot(String content) {
+        return new ChatEvent("answer_snapshot", content, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates an event telling the pane that the text it was showing as a candidate answer belongs
+     * to a step that calls a tool: the pane removes the bubble and moves its text to the thinking
+     * trace.
+     *
+     * @return a new answer_retract event
+     */
+    public static ChatEvent answerRetract() {
+        return new ChatEvent("answer_retract", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates an event saying the provider's harness withdrew the response it was streaming and asked the
+     * model to answer again: the text streamed since the last tool result is not part of the answer. The
+     * conversation drops that text; the pane is not sent this event.
+     *
+     * @param retractedUuids the withdrawn messages' ids, comma-separated, or {@code null} when the harness
+     *                       named none
+     * @return a new retraction event
+     */
+    public static ChatEvent retraction(String retractedUuids) {
+        return new ChatEvent("retraction", retractedUuids, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates an event telling the pane that the conversation's queue changed, so it should read
+     * it again. It carries no content: the queue itself is read from the REST endpoint, which is
+     * the one place that knows its order.
+     *
+     * @return a new queue event
+     */
+    public static ChatEvent queueChanged() {
+        return new ChatEvent("queue", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a heartbeat event used to keep the SSE connection alive.
+     *
+     * @return a new heartbeat event
+     */
+    public static ChatEvent heartbeat() {
+        return new ChatEvent("heartbeat", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a prompt event requesting interactive input from the client.
+     *
+     * @param promptId   unique identifier for this prompt so the client can reply
+     * @param content    the prompt message displayed to the user
+     * @param promptType the kind of prompt (e.g., "tool_permission", "yes_no")
+     * @param options    available response options, or {@code null} for free-text
+     * @return a new prompt event
+     */
+    public static ChatEvent prompt(String promptId, String content, String promptType, List<String> options) {
+        return new ChatEvent("prompt", content, null, null, null, null, null,
+                             promptId, promptType, options, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a log event forwarding a server-side log entry to the client.
+     *
+     * @param level   the log level (e.g., "INFO", "WARNING")
+     * @param logger  the logger name that produced the entry
+     * @param message the log message text
+     * @param ts      the timestamp in epoch milliseconds
+     * @return a new log event
+     */
+    public static ChatEvent log(String level, String logger, String message, long ts) {
+        return new ChatEvent("log", message, null, null, null, null, null,
+                             null, null, null, level, logger, ts, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a translation event displaying an English translation of the user's prompt.
+     * Rendered in the UI with a green "EN: " prefix badge.
+     *
+     * @param content the English translation text
+     * @return a new translation event
+     */
+    public static ChatEvent translation(String content) {
+        return new ChatEvent("translation", content, null, null, null, null, null,
+                             null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a btw_delta event carrying a partial text chunk from a /btw side question response.
+     *
+     * @param content the partial text content
+     * @return a new btw_delta event
+     */
+    public static ChatEvent btwDelta(String content) {
+        return new ChatEvent("btw_delta", content, null, null, null, null, null,
+                             null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a btw_result event indicating that a /btw side question response is complete.
+     *
+     * @return a new btw_result event
+     */
+    public static ChatEvent btwResult() {
+        return new ChatEvent("btw_result", null, null, null, null, null, null,
+                             null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Creates a tool_use event: a tool call the provider's own harness (Claude Code, Codex) made
+     * inside one {@code sendPrompt}, reported so the conversation can record it to the I/O log
+     * ({@code CliHarnessProvider_260912_oo01}). The conversation did not make this call and does
+     * not execute it; the harness does both.
+     *
+     * @param toolUseId identifier the matching {@link #toolResult} will carry
+     * @param toolName  the harness's tool name (e.g. {@code Read})
+     * @param inputJson the tool's input as a JSON object text
+     * @return a new tool_use event
+     */
+    public static ChatEvent toolUse(String toolUseId, String toolName, String inputJson) {
+        return new ChatEvent("tool_use", inputJson, null, null, null, null, null,
+                             null, null, null, null, null, null, null, toolName, toolUseId, null, null);
+    }
+
+    /**
+     * Creates a tool_result event: what the harness's tool returned for an earlier
+     * {@link #toolUse} with the same {@code toolUseId}.
+     *
+     * @param toolUseId identifier of the tool_use this answers
+     * @param content   the result text, whole
+     * @param isError   whether the tool reported a failure
+     * @return a new tool_result event
+     */
+    /**
+     * A tool call the model made for the conversation to run, as the server's {@code tool_calls} gave it
+     * ({@code OpenAiCompatStandardToolCalling_261120_oo01}). Unlike {@link #toolUse}, which reports a tool a
+     * provider's own harness ran, nothing has run yet: the conversation's agent loop runs it.
+     *
+     * @param callId        the id the server gave the call; the result goes back under it
+     * @param toolName      the tool's name
+     * @param argumentsJson the arguments as the model wrote them, a JSON object text that may be malformed
+     */
+    public static ChatEvent toolCall(String callId, String toolName, String argumentsJson) {
+        return new ChatEvent("tool_call", argumentsJson, null, null, null, null, null,
+                             null, null, null, null, null, null, null, toolName, callId, null, null);
+    }
+
+    public static ChatEvent toolResult(String toolUseId, String content, boolean isError) {
+        return new ChatEvent("tool_result", content, null, null, null, null, null,
+                             null, null, null, null, null, null, null, null, toolUseId, isError, null);
+    }
+}

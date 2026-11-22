@@ -4,67 +4,281 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>com.scivicslab.chatui</groupId>
-    <artifactId>quarkus-chat-ui-parent</artifactId>
-    <version>2.6.0-SNAPSHOT</version>
+    <groupId>com.scivicslab</groupId>
+    <artifactId>chat-ui-with-audit-trail-parent</artifactId>
+    <version>3.0.0-SNAPSHOT</version>
   </parent>
-  <artifactId>chat-ui-app</artifactId>
+  <!-- The body. Keeps the artifactId the product has always had, so the uber-jar is still
+       chat-ui-with-audit-trail-<version>.jar (ProviderAndToolPlugins_260912_oo01). -->
+  <artifactId>chat-ui-with-audit-trail</artifactId>
+  <version>3.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <!-- uber-jar without the -runner suffix, per the project naming rule -->
+    <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
+    <quarkus.package.jar.add-runner-suffix>false</quarkus.package.jar.add-runner-suffix>
+  </properties>
 
   <dependencies>
+    <!-- The provider/tool contract shared with the plugin jars -->
+    <dependency>
+      <groupId>com.scivicslab</groupId>
+      <artifactId>chat-ui-with-audit-trail-plugin-api</artifactId>
+    </dependency>
+    <!-- The headless side the body is built on: the plain tools, the docs sources and the plugin registry
+         (tasks/todo.md, stage 3). -->
+    <dependency>
+      <groupId>com.scivicslab</groupId>
+      <artifactId>agent-connector-kernel</artifactId>
+    </dependency>
+    <!-- REST + Qute templating for the server-rendered console shell -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-rest</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-rest-qute</artifactId>
+    </dependency>
+    <!-- JSON serialization for GET /api/actors -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-rest-jackson</artifactId>
+    </dependency>
+    <!-- chat-ui's MCP server at /mcp (ToolCatalogAndChatUiMcpServer_261120_oo01); 2.0.x needs Quarkus 3.33 -->
+    <dependency>
+      <groupId>io.quarkiverse.mcp</groupId>
+      <artifactId>quarkus-mcp-server-http</artifactId>
+    </dependency>
+    <!-- POJO-actor: the actor model that backs the actor tree -->
+    <dependency>
+      <groupId>com.scivicslab</groupId>
+      <artifactId>pojo-actor</artifactId>
+      <version>${pojo-actor.version}</version>
+    </dependency>
+    <!-- Turing Workflow: provides IIActorSystem and its auto-created RootIIAR root actor -->
+    <dependency>
+      <groupId>com.scivicslab</groupId>
+      <artifactId>turing-workflow</artifactId>
+      <version>${turing-workflow.version}</version>
+    </dependency>
 
-    <!-- All providers included in the single JAR -->
+    <!-- Requests between conversations of two chat-ui instances (ConversationSquadsAcrossInstances_261115_oo01):
+         a small actor system of its own that receives over HTTP, on 127.0.0.1, only the actions on the allow-list.
+         Its pojo-actor and turing-workflow resolve to the versions declared above (nearest wins); Kafka is not used. -->
     <dependency>
-      <groupId>com.scivicslab.chatui</groupId>
-      <artifactId>chat-ui-provider-claude</artifactId>
+      <groupId>com.scivicslab</groupId>
+      <artifactId>pojo-actor-distributed</artifactId>
+      <version>1.1.0</version>
+    </dependency>
+    <!-- turing-workflow:3.7.0's own published pom omits this, even though Interpreter (which
+         ChatSession extends) uses org.apache.commons.jexl3 directly — declared explicitly here
+         so it resolves at runtime, not just compile time. -->
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-jexl3</artifactId>
+      <version>3.3</version>
+    </dependency>
+    <!-- H2-backed complete I/O log (Sessions tab / audit trail). Only the storage primitives are
+         used (H2LogStore / DistributedLogStore / SessionStatus), which depend on H2 + org.json only.
+         pojo-actor and turing-workflow are excluded so this does NOT pull a second pojo-actor
+         version — this project stays on its own; the H2 classes never reference them. -->
+    <dependency>
+      <groupId>com.scivicslab.turingworkflow.plugins</groupId>
+      <artifactId>plugin-log-db</artifactId>
+      <version>4.8.0</version>
+      <exclusions>
+        <exclusion>
+          <groupId>com.scivicslab</groupId>
+          <artifactId>pojo-actor</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.scivicslab</groupId>
+          <artifactId>turing-workflow</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- System Log (tab-scoped + system-wide): MultiplexerAccumulator/MultiplexerAccumulatorActor,
+         used as-is (150_TabScopedLogging_260826_oo01). Not excluded like plugin-log-db above — this
+         plugin's classes DO need to interoperate with this project's own pojo-actor/turing-workflow
+         instances (IIActorSystem, Accumulator), and Maven's nearest-wins mediation already resolves
+         its transitive pojo-actor/turing-workflow to the versions declared above. -->
+    <dependency>
+      <groupId>com.scivicslab.turingworkflow.plugins</groupId>
+      <artifactId>plugin-log-output</artifactId>
+      <version>4.8.0</version>
+    </dependency>
+    <!-- Prompt construction (TurnResourceLimits/DocRetrievalAgentLoop): PromptBuilderActor keeps
+         the constraints sent with every step in the workflow YAML rather than in Java, which is
+         what lets one conversation run under a different set of constraints from another. -->
+    <dependency>
+      <groupId>com.scivicslab.turingworkflow.plugins</groupId>
+      <artifactId>plugin-prompt-builder</artifactId>
+      <version>4.8.0</version>
+    </dependency>
+    <!-- rst-on-lisp rule files and frames (FramesAndSamplesFromBooks_261021_oo01): the plan runner's
+         frame actions read and rewrite rule files through this plugin's classes. -->
+    <dependency>
+      <groupId>com.scivicslab.turingworkflow.plugins</groupId>
+      <artifactId>plugin-rst-frame</artifactId>
+      <version>4.9.0-SNAPSHOT</version>
     </dependency>
     <dependency>
-      <groupId>com.scivicslab.chatui</groupId>
-      <artifactId>chat-ui-provider-codex</artifactId>
+      <groupId>com.scivicslab.turingworkflow.plugins</groupId>
+      <artifactId>plugin-text</artifactId>
+      <version>4.8.0</version>
     </dependency>
+    <!-- Agent-loop tools (read/write/web_search/fetch/search_docs): jsoup for HTML parsing
+         (DuckDuckGo results, fetched pages). Same version as quarkus-chat-ui3, which these
+         tools are ported from. -->
     <dependency>
-      <groupId>com.scivicslab.chatui</groupId>
-      <artifactId>chat-ui-provider-claude-tmux</artifactId>
+      <groupId>org.jsoup</groupId>
+      <artifactId>jsoup</artifactId>
     </dependency>
+    <!-- Carried for the web-tools plugin, whose fetch extracts PDFs to text; plugin jars must not
+         bundle their dependencies (ProviderAndToolPlugins_260912_oo01), so the body provides it. -->
     <dependency>
-      <groupId>com.scivicslab.chatui</groupId>
-      <artifactId>chat-ui-provider-openai-compat</artifactId>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>pdfbox</artifactId>
+      <version>${pdfbox.version}</version>
     </dependency>
+    <!-- Health probe for Kubernetes, per the project standard -->
     <dependency>
-      <groupId>com.scivicslab.chatui</groupId>
-      <artifactId>chat-ui-plugin-openai-compat-multiuser</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.scivicslab.chatui</groupId>
-      <artifactId>chat-ui-plugin-openai-compat-agent</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.scivicslab.chatui</groupId>
-      <artifactId>chat-ui-plugin-fs-tools</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.scivicslab.chatui</groupId>
-      <artifactId>chat-ui-plugin-translate</artifactId>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-smallrye-health</artifactId>
     </dependency>
     <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-junit5</artifactId>
       <scope>test</scope>
     </dependency>
-    <dependency>
-      <groupId>io.rest-assured</groupId>
-      <artifactId>rest-assured</artifactId>
-      <scope>test</scope>
-    </dependency>
+    <!-- E2E: a main() driven browser against an already-running instance, per the project's
+         testing standard (TestingStandard_260404_oo01). Not on the Maven lifecycle. -->
     <dependency>
       <groupId>com.microsoft.playwright</groupId>
       <artifactId>playwright</artifactId>
-      <version>${playwright.version}</version>
+      <version>1.52.0</version>
       <scope>test</scope>
     </dependency>
   </dependencies>
 
   <build>
+    <!-- Every resource as it is, and one directory of its own filtered: chat-ui-build.properties, which says which
+         build this is. Only that directory is filtered, so a ${...} in a script or template is left alone. -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>false</filtering>
+      </resource>
+      <resource>
+        <directory>src/main/resources-filtered</directory>
+        <filtering>true</filtering>
+      </resource>
+    </resources>
     <plugins>
+      <!-- The short git commit the build is made from, as the property git.commit.id.abbrev, for the filtered
+           chat-ui-build.properties. A build without git (a source tarball) goes on, and shows the version alone. -->
+      <plugin>
+        <groupId>io.github.git-commit-id</groupId>
+        <artifactId>git-commit-id-maven-plugin</artifactId>
+        <version>9.0.1</version>
+        <executions>
+          <execution>
+            <id>build-commit</id>
+            <phase>initialize</phase>
+            <goals><goal>revision</goal></goals>
+          </execution>
+        </executions>
+        <configuration>
+          <failOnNoGitDirectory>false</failOnNoGitDirectory>
+          <failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
+          <abbrevLength>7</abbrevLength>
+          <generateGitPropertiesFile>false</generateGitPropertiesFile>
+          <includeOnlyProperties>
+            <includeOnlyProperty>^git.commit.id.abbrev$</includeOnlyProperty>
+          </includeOnlyProperties>
+        </configuration>
+      </plugin>
+      <!-- Turns every @Action(argsType = ...) into a JSON Schema under
+           target/classes/action-schemas, so ActionSchemaRegistry can load it at runtime and
+           ActionCatalog can hand it to a caller in another process
+           (ActionArgumentSchema_260807_oo01). Runs at process-classes so the files are in the
+           jar. pojo-actor and the generator are declared as the plugin's own dependencies
+           because exec:java does not put this project's dependencies on the plugin's classpath. -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.1.0</version>
+        <dependencies>
+          <dependency>
+            <groupId>com.scivicslab</groupId>
+            <artifactId>turing-workflow</artifactId>
+            <version>${turing-workflow.version}</version>
+          </dependency>
+          <dependency>
+            <groupId>com.github.victools</groupId>
+            <artifactId>jsonschema-generator</artifactId>
+            <version>4.38.0</version>
+          </dependency>
+        </dependencies>
+        <executions>
+          <execution>
+            <id>generate-action-schemas</id>
+            <phase>process-classes</phase>
+            <goals><goal>java</goal></goals>
+            <configuration>
+              <includePluginDependencies>true</includePluginDependencies>
+              <mainClass>com.scivicslab.pojoactor.action.schema.ActionSchemaGenerator</mainClass>
+              <!-- Absolute paths: in a multi-module build the working directory is the reactor root,
+                   and without them the generator scanned an empty target/classes there and wrote
+                   no schema at all. -->
+              <arguments>
+                <argument>${project.build.outputDirectory}</argument>
+                <argument>${project.build.outputDirectory}/action-schemas</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- This module's action manifest: each @Action method's Javadoc (first sentence, body, <pre> example,
+           @param prose), read back by ActionManifest and shown in the Actions tab
+           (ActionCatalogWithJavadoc_260930_oo01). The resource is named after the module and indexed in a
+           services file, because the uber-jar keeps only one entry per name. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.6.3</version>
+        <executions>
+          <execution>
+            <id>generate-plugin-manifest</id>
+            <goals><goal>javadoc</goal></goals>
+            <!-- Before the test phase, so tests see the manifest on the classpath as the app does. -->
+            <phase>process-classes</phase>
+            <configuration>
+              <outputDirectory>${project.build.directory}/plugin-manifest-javadoc</outputDirectory>
+              <reportOutputDirectory>${project.build.directory}/plugin-manifest-javadoc</reportOutputDirectory>
+              <doclet>com.scivicslab.pojoactor.doclet.TuringPluginDoclet</doclet>
+              <docletArtifact>
+                <groupId>com.scivicslab</groupId>
+                <artifactId>turing-workflow</artifactId>
+                <version>${turing-workflow.version}</version>
+              </docletArtifact>
+              <useStandardDocletOptions>false</useStandardDocletOptions>
+              <additionalOptions>
+                <additionalOption>-turingClassesDir</additionalOption>
+                <additionalOption>${project.build.outputDirectory}</additionalOption>
+                <additionalOption>-turingManifestResource</additionalOption>
+                <additionalOption>META-INF/turing-plugin/${project.groupId}.${project.artifactId}.json</additionalOption>
+              </additionalOptions>
+              <doclint>none</doclint>
+              <failOnError>false</failOnError>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
       <plugin>
         <groupId>${quarkus.platform.group-id}</groupId>
         <artifactId>quarkus-maven-plugin</artifactId>
@@ -79,433 +293,21 @@
             </goals>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
-          <jvmArgs>--add-opens java.base/java.lang=ALL-UNNAMED</jvmArgs>
+          <systemPropertyVariables>
+            <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+            <!-- The end-of-turn reminder step adds a model call to every turn; the tests that count a conversation's
+                 model calls would all change. ReminderStepTest turns it on for the conversations it tests. -->
+            <chat-ui.reminder-decision>false</chat-ui.reminder-decision>
+          </systemPropertyVariables>
         </configuration>
       </plugin>
     </plugins>
   </build>
-
-  <properties>
-    <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
-    <quarkus.package.jar.add-runner-suffix>false</quarkus.package.jar.add-runner-suffix>
-    <quarkus.package.output-name>quarkus-chat-ui-${project.version}</quarkus.package.output-name>
-  </properties>
-
-  <profiles>
-    <profile>
-      <!--
-        Smoke test for the documented uber-jar startup workflow.
-        Builds the uber-jar, starts it with the documented command
-        (java -Dchat-ui.provider=claude -jar ...-runner.jar), and verifies
-        the chat UI is reachable without a login screen.
-        Run with: mvn verify -Pe2e-uber-jar-smoke
-      -->
-      <id>e2e-uber-jar-smoke</id>
-      <properties>
-        <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
-      </properties>
-      <build>
-        <plugins>
-          <plugin>
-            <artifactId>maven-failsafe-plugin</artifactId>
-            <configuration>
-              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
-              <includes>
-                <include>**/UberJarSmokeIT.java</include>
-              </includes>
-              <systemPropertyVariables>
-                <chat-ui.e2e.base-url>http://localhost:28015</chat-ui.e2e.base-url>
-              </systemPropertyVariables>
-            </configuration>
-          </plugin>
-          <plugin>
-            <groupId>org.codehaus.mojo</groupId>
-            <artifactId>exec-maven-plugin</artifactId>
-            <version>3.3.0</version>
-            <executions>
-              <execution>
-                <id>start-uber-jar-smoke</id>
-                <phase>pre-integration-test</phase>
-                <goals><goal>exec</goal></goals>
-                <configuration>
-                  <executable>java</executable>
-                  <arguments>
-                    <argument>-Dchat-ui.provider=claude</argument>
-                    <argument>-Dquarkus.http.port=28015</argument>
-                    <argument>-jar</argument>
-                    <argument>${project.build.directory}/quarkus-chat-ui-${project.version}.jar</argument>
-                  </arguments>
-                  <async>true</async>
-                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-          <plugin>
-            <artifactId>maven-antrun-plugin</artifactId>
-            <version>3.1.0</version>
-            <executions>
-              <execution>
-                <id>wait-for-uber-jar-smoke</id>
-                <phase>pre-integration-test</phase>
-                <goals><goal>run</goal></goals>
-                <configuration>
-                  <target><sleep seconds="15"/></target>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-
-    <profile>
-      <id>native</id>
-      <activation>
-        <property><name>native</name></property>
-      </activation>
-      <properties>
-        <quarkus.native.enabled>true</quarkus.native.enabled>
-      </properties>
-    </profile>
-    <profile>
-      <!--
-        Regression guard: CLI provider + multi-user flag must NOT show the login screen.
-        Starts the server with claude provider AND chat-ui.multi-user=true to reproduce
-        the original bug, then verifies the browser goes straight to the chat UI.
-      -->
-      <id>e2e-cli-multiuser-flag</id>
-      <build>
-        <plugins>
-          <plugin>
-            <artifactId>maven-failsafe-plugin</artifactId>
-            <configuration>
-              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
-              <includes>
-                <include>**/CliProviderMultiUserFlagIgnoredE2E.java</include>
-              </includes>
-              <systemPropertyVariables>
-                <chat-ui.e2e.base-url>http://localhost:28012</chat-ui.e2e.base-url>
-              </systemPropertyVariables>
-            </configuration>
-          </plugin>
-          <plugin>
-            <groupId>org.codehaus.mojo</groupId>
-            <artifactId>exec-maven-plugin</artifactId>
-            <version>3.3.0</version>
-            <executions>
-              <execution>
-                <id>start-quarkus-cli-multiuser-flag-it</id>
-                <phase>pre-integration-test</phase>
-                <goals>
-                  <goal>exec</goal>
-                </goals>
-                <configuration>
-                  <executable>java</executable>
-                  <arguments>
-                    <argument>--add-opens</argument>
-                    <argument>java.base/java.lang=ALL-UNNAMED</argument>
-                    <argument>-Dquarkus.http.port=28012</argument>
-                    <argument>-Dchat-ui.provider=claude</argument>
-                    <argument>-Dchat-ui.multi-user=true</argument>
-                    <argument>-jar</argument>
-                    <argument>${project.build.directory}/quarkus-app/quarkus-run.jar</argument>
-                  </arguments>
-                  <async>true</async>
-                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-          <plugin>
-            <artifactId>maven-antrun-plugin</artifactId>
-            <version>3.1.0</version>
-            <executions>
-              <execution>
-                <id>wait-for-quarkus-cli-multiuser-flag-it</id>
-                <phase>pre-integration-test</phase>
-                <goals>
-                  <goal>run</goal>
-                </goals>
-                <configuration>
-                  <target>
-                    <sleep seconds="10"/>
-                  </target>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-
-    <profile>
-      <!-- Multi-user mode E2E: starts server with chat-ui.multi-user=true, runs LoginE2E -->
-      <id>e2e-multi-user</id>
-      <build>
-        <plugins>
-          <plugin>
-            <artifactId>maven-failsafe-plugin</artifactId>
-            <configuration>
-              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
-              <includes>
-                <include>**/LoginE2E.java</include>
-              </includes>
-              <systemPropertyVariables>
-                <chat-ui.e2e.base-url>http://localhost:28011</chat-ui.e2e.base-url>
-              </systemPropertyVariables>
-            </configuration>
-          </plugin>
-          <plugin>
-            <groupId>org.codehaus.mojo</groupId>
-            <artifactId>exec-maven-plugin</artifactId>
-            <version>3.3.0</version>
-            <executions>
-              <execution>
-                <id>start-quarkus-multiuser-it</id>
-                <phase>pre-integration-test</phase>
-                <goals>
-                  <goal>exec</goal>
-                </goals>
-                <configuration>
-                  <executable>java</executable>
-                  <arguments>
-                    <argument>--add-opens</argument>
-                    <argument>java.base/java.lang=ALL-UNNAMED</argument>
-                    <argument>-Dquarkus.http.port=28011</argument>
-                    <argument>-Dchat-ui.provider=openai-compat</argument>
-                    <argument>-Dchat-ui.servers=http://localhost:9999</argument>
-                    <argument>-Dchat-ui.multi-user=true</argument>
-                    <argument>-jar</argument>
-                    <argument>${project.build.directory}/quarkus-app/quarkus-run.jar</argument>
-                  </arguments>
-                  <async>true</async>
-                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-          <plugin>
-            <artifactId>maven-antrun-plugin</artifactId>
-            <version>3.1.0</version>
-            <executions>
-              <execution>
-                <id>wait-for-quarkus-multiuser-it</id>
-                <phase>pre-integration-test</phase>
-                <goals>
-                  <goal>run</goal>
-                </goals>
-                <configuration>
-                  <target>
-                    <sleep seconds="10"/>
-                  </target>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-
-    <profile>
-      <id>e2e</id>
-      <build>
-        <plugins>
-          <plugin>
-            <artifactId>maven-failsafe-plugin</artifactId>
-            <configuration>
-              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
-              <includes>
-                <include>**/*E2E.java</include>
-              </includes>
-            </configuration>
-          </plugin>
-          <plugin>
-            <groupId>org.codehaus.mojo</groupId>
-            <artifactId>exec-maven-plugin</artifactId>
-            <version>3.3.0</version>
-            <executions>
-              <execution>
-                <id>start-quarkus-it</id>
-                <phase>pre-integration-test</phase>
-                <goals>
-                  <goal>exec</goal>
-                </goals>
-                <configuration>
-                  <executable>java</executable>
-                  <arguments>
-                    <argument>--add-opens</argument>
-                    <argument>java.base/java.lang=ALL-UNNAMED</argument>
-                    <argument>-Dquarkus.http.port=28900</argument>
-                    <argument>-Dchat-ui.provider=openai-compat</argument>
-                    <argument>-jar</argument>
-                    <argument>${project.build.directory}/quarkus-chat-ui-${project.version}.jar</argument>
-                  </arguments>
-                  <async>true</async>
-                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-          <plugin>
-            <artifactId>maven-antrun-plugin</artifactId>
-            <version>3.1.0</version>
-            <executions>
-              <execution>
-                <id>wait-for-quarkus-it</id>
-                <phase>pre-integration-test</phase>
-                <goals>
-                  <goal>run</goal>
-                </goals>
-                <configuration>
-                  <target>
-                    <sleep seconds="10"/>
-                  </target>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-
-    <profile>
-      <!--
-        Smoke test: openai-compat uber-jar, single-user mode.
-        Starts a mock vLLM server (mock-vllm.py) on port 19080, then starts the
-        uber-jar with provider=openai-compat pointing at the mock server.
-        Verifies: HTTP 200, providerId=openai-compat, multiUser=false, chat UI visible.
-        Run with: mvn verify -Pe2e-openai-compat-smoke
-      -->
-      <id>e2e-openai-compat-smoke</id>
-      <properties>
-        <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
-      </properties>
-      <build>
-        <plugins>
-          <plugin>
-            <artifactId>maven-failsafe-plugin</artifactId>
-            <configuration>
-              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
-              <includes>
-                <include>**/OpenAiCompatSmokeIT.java</include>
-              </includes>
-              <systemPropertyVariables>
-                <chat-ui.e2e.base-url>http://localhost:28016</chat-ui.e2e.base-url>
-              </systemPropertyVariables>
-            </configuration>
-          </plugin>
-          <plugin>
-            <groupId>org.codehaus.mojo</groupId>
-            <artifactId>exec-maven-plugin</artifactId>
-            <version>3.3.0</version>
-            <executions>
-              <execution>
-                <id>start-openai-compat-smoke</id>
-                <phase>pre-integration-test</phase>
-                <goals><goal>exec</goal></goals>
-                <configuration>
-                  <executable>java</executable>
-                  <arguments>
-                    <argument>-Dchat-ui.provider=openai-compat</argument>
-                    <argument>-Dchat-ui.servers=http://localhost:19080</argument>
-                    <argument>-Dquarkus.http.port=28016</argument>
-                    <argument>-jar</argument>
-                    <argument>${project.build.directory}/quarkus-chat-ui-${project.version}.jar</argument>
-                  </arguments>
-                  <async>true</async>
-                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-          <plugin>
-            <artifactId>maven-antrun-plugin</artifactId>
-            <version>3.1.0</version>
-            <executions>
-              <execution>
-                <id>wait-for-openai-compat-smoke</id>
-                <phase>pre-integration-test</phase>
-                <goals><goal>run</goal></goals>
-                <configuration>
-                  <target><sleep seconds="15"/></target>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-
-    <profile>
-      <!--
-        Smoke test: openai-compat uber-jar, multi-user mode.
-        Starts a mock vLLM server (mock-vllm.py) on port 19081, then starts the
-        uber-jar with provider=openai-compat and multi-user=true.
-        Verifies: HTTP 200, providerId=openai-compat, multiUser=true, login screen visible.
-        Run with: mvn verify -Pe2e-openai-compat-multiuser-smoke
-      -->
-      <id>e2e-openai-compat-multiuser-smoke</id>
-      <properties>
-        <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
-      </properties>
-      <build>
-        <plugins>
-          <plugin>
-            <artifactId>maven-failsafe-plugin</artifactId>
-            <configuration>
-              <forkedProcessTimeoutInSeconds>60</forkedProcessTimeoutInSeconds>
-              <includes>
-                <include>**/OpenAiCompatMultiUserSmokeIT.java</include>
-              </includes>
-              <systemPropertyVariables>
-                <chat-ui.e2e.base-url>http://localhost:28017</chat-ui.e2e.base-url>
-              </systemPropertyVariables>
-            </configuration>
-          </plugin>
-          <plugin>
-            <groupId>org.codehaus.mojo</groupId>
-            <artifactId>exec-maven-plugin</artifactId>
-            <version>3.3.0</version>
-            <executions>
-              <execution>
-                <id>start-openai-compat-multiuser-smoke</id>
-                <phase>pre-integration-test</phase>
-                <goals><goal>exec</goal></goals>
-                <configuration>
-                  <executable>java</executable>
-                  <arguments>
-                    <argument>-Dchat-ui.provider=openai-compat</argument>
-                    <argument>-Dchat-ui.servers=http://localhost:19081</argument>
-                    <argument>-Dchat-ui.multi-user=true</argument>
-                    <argument>-Dquarkus.http.port=28017</argument>
-                    <argument>-jar</argument>
-                    <argument>${project.build.directory}/quarkus-chat-ui-${project.version}.jar</argument>
-                  </arguments>
-                  <async>true</async>
-                  <asyncDestroyOnShutdown>true</asyncDestroyOnShutdown>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-          <plugin>
-            <artifactId>maven-antrun-plugin</artifactId>
-            <version>3.1.0</version>
-            <executions>
-              <execution>
-                <id>wait-for-openai-compat-multiuser-smoke</id>
-                <phase>pre-integration-test</phase>
-                <goals><goal>run</goal></goals>
-                <configuration>
-                  <target><sleep seconds="15"/></target>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-
-  </profiles>
 </project>

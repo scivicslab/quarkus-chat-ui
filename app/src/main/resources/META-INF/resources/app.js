@@ -1,379 +1,119 @@
-// quarkus-chat-ui REST + EventSource SSE client
-
+// Chat pane wiring for chat-ui-with-audit-trail (adapted from quarkus-chat-ui3's app.js).
+//   - one persistent EventSource per conversation tab
+//   - POST /api/projects/{projectId}/chats/{chatId}/chat only acknowledges; content streams over SSE
+//   - renders delta/thinking/result/error/status ChatEvents into #chat-area
+//   - a tab bar (#conv-tab-bar) lets the user switch which ConversationSquad this pane talks to
 (function () {
-    'use strict';
+    "use strict";
 
-    // --- Login (multi-user mode) ---
-    var currentUser = localStorage.getItem('chat-ui-user') || '';
-
-    function showLogin() {
-        document.getElementById('login-screen').style.display = 'flex';
-        document.getElementById('app').style.display = 'none';
-        var input = document.getElementById('login-user');
-        if (input) { input.value = currentUser; input.focus(); }
-    }
-
-    function startApp(username) {
-        currentUser = username;
-        if (username) localStorage.setItem('chat-ui-user', username);
-        document.getElementById('login-screen').style.display = 'none';
-        document.getElementById('app').style.display = '';
-        var userLabel = document.getElementById('user-label');
-        if (userLabel) { userLabel.textContent = username; userLabel.style.display = username ? '' : 'none'; }
-        var logoutBtn = document.getElementById('logout-btn');
-        if (logoutBtn) logoutBtn.style.display = username ? '' : 'none';
-        initApp();
-    }
-
-    document.getElementById('login-form').addEventListener('submit', function (e) {
-        e.preventDefault();
-        var username = document.getElementById('login-user').value.trim();
-        if (username) startApp(username);
-    });
-
-    document.getElementById('logout-btn').addEventListener('click', function () {
-        if (typeof eventSource !== 'undefined' && eventSource) { eventSource.close(); eventSource = null; }
-        localStorage.removeItem('chat-ui-user');
-        currentUser = '';
-        window.location.reload();
-    });
-
-    // Check multi-user mode from server config
-    fetch('api/config').then(function (r) { return r.json(); }).then(function (cfg) {
-        if (cfg.multiUser) {
-            if (currentUser) {
-                startApp(currentUser);
-            } else {
-                showLogin();
-            }
+    // A conversation is identified by two coordinates, not one string (Terminology_260829_oo01):
+    // the owning project's id and the conversation's id within it.
+    var PROJECT_ID_KEY = "chat-ui-last-project";
+    var CHAT_ID_KEY = "chat-ui-last-chat";
+    var LEGACY_TAB_ID_KEY = "chat-ui-last-tab";
+    // Migrates what earlier versions stored under the single legacy key: first "alpha"/"beta"
+    // (before ChatActorRename_260827_oo01), then bare "01"/"02" and the short-lived combined
+    // "project2-01" form. Without this a returning browser would resend a stale id and the
+    // server would answer that no such conversation exists.
+    var LEGACY_TAB_ID_MAP = { alpha: "01", beta: "02" };
+    var PROJECT_ID = localStorage.getItem(PROJECT_ID_KEY);
+    var CHAT_ID = localStorage.getItem(CHAT_ID_KEY);
+    if (!PROJECT_ID || !CHAT_ID) {
+        var legacy = localStorage.getItem(LEGACY_TAB_ID_KEY);
+        legacy = LEGACY_TAB_ID_MAP[legacy] || legacy || "01";
+        var dash = legacy.lastIndexOf("-");
+        if (legacy.indexOf("project") === 0 && dash > 0) {
+            PROJECT_ID = legacy.substring(0, dash);
+            CHAT_ID = legacy.substring(dash + 1);
         } else {
-            startApp('');
+            PROJECT_ID = "project1";
+            CHAT_ID = legacy;
         }
-    }).catch(function () {
-        startApp('');
+    }
+
+    function apiUrl(path) { return path; }
+
+    // Base path of the active conversation's endpoints.
+    function chatUrl(suffix) {
+        return "api/projects/" + encodeURIComponent(PROJECT_ID)
+                + "/chats/" + encodeURIComponent(CHAT_ID) + suffix;
+    }
+
+    // The id kept from an earlier visit may name a conversation deleted since. The server answers
+    // 404 for it and does not make a new one, so go back to project1/chat-01, which always exists.
+    fetch(apiUrl(chatUrl("/status"))).then(function (r) {
+        if (r.status === 404 && !(PROJECT_ID === "project1" && CHAT_ID === "01")) {
+            localStorage.removeItem(PROJECT_ID_KEY);
+            localStorage.removeItem(CHAT_ID_KEY);
+            localStorage.removeItem(LEGACY_TAB_ID_KEY);
+            location.reload();
+        }
     });
 
-    var appInitialized = false;
-
-    function initApp() {
-        if (appInitialized) return;
-        appInitialized = true;
-        doInitApp();
-    }
-
-    function apiUrl(path) {
-        if (!currentUser) return path;
-        return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'user=' + encodeURIComponent(currentUser);
-    }
-
-    function doInitApp() {
-
-    const chatArea = document.getElementById('chat-area');
-    const promptInput = document.getElementById('prompt-input');
-    const sendBtn = document.getElementById('send-btn');
-    const queueBtn = document.getElementById('queue-btn');
-    const attachBtn = document.getElementById('attach-btn');
-    const imageFileInput = document.getElementById('image-file-input');
-    const imageAttachments = document.getElementById('image-attachments');
+    var chatArea, promptInput, sendBtn, connStatus, activityLabel, modelSelect, notificationBar;
+    var themeSelect, queueBtn, queueArea, queueResizeHandle, cancelBtn;
+    var attachBtn, imageFileInput, imageAttachments;
     var pendingImages = []; // [{name, dataUrl}] attached via paste, drop, or the file picker
-    const cancelBtn = document.getElementById('cancel-btn');
-    const modelSelect = document.getElementById('model-select');
-    const effortSelect = document.getElementById('effort-select');
-    const themeSelect = document.getElementById('theme-select');
-    var activeKeybind = 'default'; // set from /api/config
-    const sessionLabel = document.getElementById('session-label');
-    const connectionStatus = document.getElementById('connection-status');
-    const queueArea = document.getElementById('queue-area');
-    const queueResizeHandle = document.getElementById('queue-resize-handle');
-    const inputResizeHandle = document.getElementById('input-resize-handle');
-    const activityLabel = document.getElementById('activity-label');
-    const inputArea = document.getElementById('input-area');
+    var inputResizeHandle;
+    var manualInputHeight = null; // set once the human drags the handle; autoResize() then floors to it
+    var eventSource = null;
+    var streamingEl = null;   // the live assistant bubble currently receiving deltas
+    var lastUserDiv = null;   // the prompt just drawn, until its "turn" event puts the turn and request ids under it
+    var streamingMarkdown = "";  // its markdown source, kept for the footer's copy button
+    var thinkingEl = null;    // the live "thinking" trace bubble, if any
+    var answerEl = null;      // the provisional answer bubble of the running step, if any
+    var answerText = "";      // its markdown source so far
+    var answerTimer = null;   // pending redraw of answerEl
+    var busy = false;
+    // Whether the turn being drawn was started by the person at this pane (ChatDisplayToggle_261110_oo01). Every
+    // bubble is marked turn-person or turn-other when it is placed, so one class on the chat area hides the
+    // other turns' inputs and steps. A line with no origin is taken for the person's, as appendMessage takes it
+    // for no badge. A turn's final answer is also marked turn-answer (markAnswer): it is addressed to the person
+    // whoever started the turn, so the filter never hides it.
+    var turnFromPerson = true;
 
-    let thinkingStartTime = null;   // Date.now() when thinking started
-    let thinkingTimer = null;       // setInterval ID
-
-    // --- Per-session localStorage isolation ---
-    // When served under /session/{id}/ (k8s-pups), suffix localStorage keys with the
-    // session ID so multiple instances don't share chat history, prompt queue, theme,
-    // and model selection.  When served at / (standalone), suffix is empty — backward compatible.
-    var SESSION_SUFFIX = (function () {
-        var m = window.location.pathname.match(/^\/session\/([^/]+)\//);
-        return m ? '-' + m[1] : '';
-    })();
-
-    // --- Theme (per-session in k8s-pups, global in standalone) ---
-    var THEME_KEY = 'chat-ui-theme' + SESSION_SUFFIX;
-    var savedTheme = localStorage.getItem(THEME_KEY) || 'dark-catppuccin';
-    console.log('[chat-ui] theme restore: key=' + THEME_KEY + ' saved=' + localStorage.getItem(THEME_KEY) + ' using=' + savedTheme);
-    document.documentElement.setAttribute('data-theme', savedTheme);
-    themeSelect.value = savedTheme;
-
-    themeSelect.addEventListener('change', function () {
-        var theme = themeSelect.value;
-        document.documentElement.setAttribute('data-theme', theme);
-        localStorage.setItem(THEME_KEY, theme);
-        console.log('[chat-ui] theme saved: key=' + THEME_KEY + ' value=' + theme);
-    });
-
-    // --- Keybind (from server config: -Dchat-ui.keybind=emacs|vi|default) ---
-    promptInput.addEventListener('keydown', function (e) {
-        if (activeKeybind !== 'emacs') return;
-        if (!e.ctrlKey) return;
-
-        var ta = e.target;
-        var start = ta.selectionStart;
-        var end = ta.selectionEnd;
-        var val = ta.value;
-
-        switch (e.key) {
-            case 'a': // beginning of line
-                e.preventDefault();
-                var lineStart = val.lastIndexOf('\n', start - 1) + 1;
-                ta.setSelectionRange(lineStart, lineStart);
-                break;
-            case 'e': // end of line
-                e.preventDefault();
-                var lineEnd = val.indexOf('\n', start);
-                if (lineEnd === -1) lineEnd = val.length;
-                ta.setSelectionRange(lineEnd, lineEnd);
-                break;
-            case 'f': // forward char
-                e.preventDefault();
-                if (start < val.length) ta.setSelectionRange(start + 1, start + 1);
-                break;
-            case 'b': // backward char
-                e.preventDefault();
-                if (start > 0) ta.setSelectionRange(start - 1, start - 1);
-                break;
-            case 'n': // next line
-                e.preventDefault();
-                var curLineEndN = val.indexOf('\n', start);
-                if (curLineEndN !== -1) {
-                    var colN = start - (val.lastIndexOf('\n', start - 1) + 1);
-                    var nextLineEnd = val.indexOf('\n', curLineEndN + 1);
-                    if (nextLineEnd === -1) nextLineEnd = val.length;
-                    var pos = Math.min(curLineEndN + 1 + colN, nextLineEnd);
-                    ta.setSelectionRange(pos, pos);
-                }
-                break;
-            case 'p': // previous line
-                e.preventDefault();
-                var curLineStartP = val.lastIndexOf('\n', start - 1) + 1;
-                if (curLineStartP > 0) {
-                    var colP = start - curLineStartP;
-                    var prevLineStart = val.lastIndexOf('\n', curLineStartP - 2) + 1;
-                    var pos2 = Math.min(prevLineStart + colP, curLineStartP - 1);
-                    ta.setSelectionRange(pos2, pos2);
-                }
-                break;
-            case 'd': // delete forward
-                e.preventDefault();
-                if (start < val.length) {
-                    ta.value = val.substring(0, start) + val.substring(start + 1);
-                    ta.setSelectionRange(start, start);
-                }
-                break;
-            case 'h': // delete backward (backspace)
-                e.preventDefault();
-                if (start > 0) {
-                    ta.value = val.substring(0, start - 1) + val.substring(start);
-                    ta.setSelectionRange(start - 1, start - 1);
-                }
-                break;
-            case 'k': // kill to end of line
-                e.preventDefault();
-                var killEnd = val.indexOf('\n', start);
-                if (killEnd === -1) killEnd = val.length;
-                if (killEnd === start && start < val.length) killEnd++; // kill newline if at end of line
-                ta.value = val.substring(0, start) + val.substring(killEnd);
-                ta.setSelectionRange(start, start);
-                break;
+    // Enable KaTeX math rendering inside markdown so LaTeX ($...$, $$...$$) in assistant answers
+    // is typeset. Optional: if the CDN scripts did not load, fall back to plain markdown.
+    try {
+        if (typeof marked !== "undefined" && typeof markedKatex === "function") {
+            marked.use(markedKatex({ throwOnError: false, nonStandard: true }));
         }
-    });
-
-    // --- Vi keybind ---
-    var viMode = 'insert'; // 'normal' or 'insert'
-
-    function updateViCursor(ta) {
-        if (activeKeybind === 'vi' && viMode === 'normal') {
-            ta.style.caretColor = 'transparent';
-            // block cursor via box-shadow on a zero-width span is not possible in textarea,
-            // use a visual indicator in placeholder instead
-            ta.classList.add('vi-normal');
-        } else {
-            ta.style.caretColor = '';
-            ta.classList.remove('vi-normal');
-        }
+    } catch (e) {
+        // math rendering is optional; ignore and render markdown without it
     }
 
-    promptInput.addEventListener('keydown', function (e) {
-        if (activeKeybind !== 'vi') return;
+    if (typeof marked !== "undefined") {
+        marked.setOptions({ breaks: true, gfm: true });
+    }
 
-        var ta = e.target;
-        var start = ta.selectionStart;
-        var end = ta.selectionEnd;
-        var val = ta.value;
+    // Renders assistant text as markdown (headings/tables/bold/lists) — the agent loop's ChatSession
+    // sends the confirmed-final answer as ONE whole-text "delta" event (from finish()), never
+    // incremental tokens on that channel, so there is no unclosed-fence mid-stream case to patch.
+    function renderMarkdown(text) {
+        if (typeof marked === "undefined") return escapeHtml(text);
+        try { return withLocalImages(marked.parse(text)); } catch (e) { return escapeHtml(text); }
+    }
 
-        if (viMode === 'normal') {
-            e.preventDefault();
-            switch (e.key) {
-                case 'i': // insert mode
-                    viMode = 'insert';
-                    updateViCursor(ta);
-                    break;
-                case 'a': // append
-                    viMode = 'insert';
-                    if (start < val.length) ta.setSelectionRange(start + 1, start + 1);
-                    updateViCursor(ta);
-                    break;
-                case 'A': // append at end of line
-                    viMode = 'insert';
-                    var eolA = val.indexOf('\n', start);
-                    if (eolA === -1) eolA = val.length;
-                    ta.setSelectionRange(eolA, eolA);
-                    updateViCursor(ta);
-                    break;
-                case 'I': // insert at beginning of line
-                    viMode = 'insert';
-                    var bolI = val.lastIndexOf('\n', start - 1) + 1;
-                    ta.setSelectionRange(bolI, bolI);
-                    updateViCursor(ta);
-                    break;
-                case 'o': // open line below
-                    viMode = 'insert';
-                    var eolO = val.indexOf('\n', start);
-                    if (eolO === -1) eolO = val.length;
-                    ta.value = val.substring(0, eolO) + '\n' + val.substring(eolO);
-                    ta.setSelectionRange(eolO + 1, eolO + 1);
-                    updateViCursor(ta);
-                    break;
-                case 'h': // left
-                    if (start > 0) ta.setSelectionRange(start - 1, start - 1);
-                    break;
-                case 'l': // right
-                    if (start < val.length) ta.setSelectionRange(start + 1, start + 1);
-                    break;
-                case 'j': // down
-                    var curEndJ = val.indexOf('\n', start);
-                    if (curEndJ !== -1) {
-                        var colJ = start - (val.lastIndexOf('\n', start - 1) + 1);
-                        var nextEndJ = val.indexOf('\n', curEndJ + 1);
-                        if (nextEndJ === -1) nextEndJ = val.length;
-                        var posJ = Math.min(curEndJ + 1 + colJ, nextEndJ);
-                        ta.setSelectionRange(posJ, posJ);
-                    }
-                    break;
-                case 'k': // up
-                    var curStartK = val.lastIndexOf('\n', start - 1) + 1;
-                    if (curStartK > 0) {
-                        var colK = start - curStartK;
-                        var prevStartK = val.lastIndexOf('\n', curStartK - 2) + 1;
-                        var posK = Math.min(prevStartK + colK, curStartK - 1);
-                        ta.setSelectionRange(posK, posK);
-                    }
-                    break;
-                case 'w': // next word
-                    var mW = val.substring(start).match(/\S+\s*/);
-                    if (mW) ta.setSelectionRange(start + mW[0].length, start + mW[0].length);
-                    break;
-                case 'b': // previous word
-                    var before = val.substring(0, start);
-                    var mB = before.match(/\S+\s*$/);
-                    if (mB) ta.setSelectionRange(start - mB[0].length, start - mB[0].length);
-                    break;
-                case '0': // beginning of line
-                    var bol0 = val.lastIndexOf('\n', start - 1) + 1;
-                    ta.setSelectionRange(bol0, bol0);
-                    break;
-                case '$': // end of line
-                    var eol$ = val.indexOf('\n', start);
-                    if (eol$ === -1) eol$ = val.length;
-                    ta.setSelectionRange(eol$, eol$);
-                    break;
-                case 'x': // delete char
-                    if (start < val.length) {
-                        ta.value = val.substring(0, start) + val.substring(start + 1);
-                        ta.setSelectionRange(start, start);
-                    }
-                    break;
-                case 'd': // dd = delete line (wait for second d)
-                    // simplified: just delete current line
-                    var bolD = val.lastIndexOf('\n', start - 1) + 1;
-                    var eolD = val.indexOf('\n', start);
-                    if (eolD === -1) eolD = val.length;
-                    else eolD++; // include newline
-                    ta.value = val.substring(0, bolD) + val.substring(eolD);
-                    ta.setSelectionRange(bolD, bolD);
-                    break;
-                case 'g': // gg = top (simplified: single g goes to top)
-                    ta.setSelectionRange(0, 0);
-                    break;
-                case 'G': // bottom
-                    ta.setSelectionRange(val.length, val.length);
-                    break;
-            }
-            return;
-        }
-
-        // insert mode: Escape to return to normal
-        if (e.key === 'Escape') {
-            e.preventDefault();
-            viMode = 'normal';
-            updateViCursor(ta);
-        }
-    });
-
-    document.title = 'Chat UI';
-
-    // --- Model key (per-session in k8s-pups, global in standalone) ---
-    var MODEL_KEY = 'chat-ui-model' + SESSION_SUFFIX;
-    // Effort applies to the Claude CLI only; local models ignore it. Kept per session for the
-    // same reason the model is: two instances open side by side are usually doing different work.
-    var EFFORT_KEY = 'chat-ui-effort' + SESSION_SUFFIX;
-
-    let currentAssistantMsg = null;
-    let currentAssistantText = '';
-    let needsParagraphBreak = false; // insert \n\n before next delta (after tool use etc.)
-    let busy = false;
-    let pendingPrompt = false;  // true when an ask_user prompt is awaiting user response
-
-    // --- Chat history (persisted to localStorage) ---
-    var HISTORY_KEY = 'chat-ui-history' + SESSION_SUFFIX;
-    var MAX_HISTORY = 500;
-    var chatHistory = []; // [{role: 'user'|'assistant'|'info'|'error', text: string}]
-
-    // --- Prompt Queue (position-based, persisted to localStorage) ---
-    var QUEUE_KEY = 'chat-ui-queue' + SESSION_SUFFIX;
-    var queue = [];   // [{text: string, auto: boolean}]
-    var queuePos = 0; // index of next item to send
-    var MAX_QUEUE_SIZE = 100;
-
-    // Configure marked for safe rendering
-    marked.setOptions({
-        breaks: true,
-        gfm: true
-    });
-
-    // Renders markdown and points every <img> whose source is a path on this machine at
-    // /api/local-image, which reads the file server-side (LocalImageInAnswer_260904_oo01).
-    // Markdown turns ![](/home/devteam/works/shot.png) into <img src="/home/devteam/works/shot.png">,
-    // and the browser asks THIS server for that path — a request no static resource answers, so the
-    // picture comes out broken. The browser has no way to open a local file itself; only the server
-    // does. Sources under /api/ are left alone: those are this application's own endpoints, not files.
-    function renderMd(text) {
-        var holder = document.createElement('div');
-        holder.innerHTML = marked.parse(text);
-        var imgs = holder.getElementsByTagName('img');
+    // Points every <img> whose source is a path on this machine at /api/local-image, which reads
+    // the file server-side (LocalImageInAnswer_260904_oo01). Markdown turns
+    // ![](/home/devteam/works/shot.png) into <img src="/home/devteam/works/shot.png">, and the
+    // browser asks THIS server for that path — a request no static resource answers, so the picture
+    // comes out broken. The browser has no way to open a local file itself; only the server does.
+    // Sources under /api/ are left alone: those are this application's own endpoints, not files.
+    function withLocalImages(html) {
+        var holder = document.createElement("div");
+        holder.innerHTML = html;
+        var imgs = holder.getElementsByTagName("img");
         for (var i = 0; i < imgs.length; i++) {
-            var raw = imgs[i].getAttribute('src') || '';
+            var raw = imgs[i].getAttribute("src") || "";
             var filePath = null;
-            if (raw.indexOf('file://') === 0) {
-                filePath = decodeURIComponent(raw.substring('file://'.length));
-            } else if (raw.charAt(0) === '/' && raw.indexOf('/api/') !== 0) {
+            if (raw.indexOf("file://") === 0) {
+                filePath = decodeURIComponent(raw.substring("file://".length));
+            } else if (raw.charAt(0) === "/" && raw.indexOf("/api/") !== 0) {
                 filePath = raw;
             }
             if (filePath) {
-                imgs[i].setAttribute('src', '/api/local-image?path=' + encodeURIComponent(filePath));
+                imgs[i].setAttribute("src", "api/local-image?path=" + encodeURIComponent(filePath));
             }
         }
         renderInlineSvg(holder);
@@ -393,13 +133,13 @@
      *  passes inline HTML through unescaped, so an unfenced <svg> reaches here exactly as unsafe
      *  as a fenced one. */
     function sanitizeSvgElement(svg) {
-        Array.prototype.forEach.call(svg.querySelectorAll('script'), function (el) { el.remove(); });
+        Array.prototype.forEach.call(svg.querySelectorAll("script"), function (el) { el.remove(); });
         var walker = document.createTreeWalker(svg, NodeFilter.SHOW_ELEMENT);
         var el = svg;
         do {
             Array.prototype.slice.call(el.attributes || []).forEach(function (attr) {
                 var name = attr.name.toLowerCase();
-                if (name.indexOf('on') === 0 || /javascript:/i.test(attr.value)) {
+                if (name.indexOf("on") === 0 || /javascript:/i.test(attr.value)) {
                     el.removeAttribute(attr.name);
                 }
             });
@@ -409,1710 +149,1539 @@
     /** Converts every ```svg fenced code block into a live, sanitized <svg> element, and sanitizes
      *  any <svg> already present as raw inline HTML. */
     function renderInlineSvg(holder) {
-        Array.prototype.forEach.call(holder.querySelectorAll('code.language-svg'), function (code) {
-            var pre = code.closest('pre') || code;
-            var parsed = new DOMParser().parseFromString(code.textContent, 'image/svg+xml');
-            var svg = parsed.querySelector('svg');
-            if (!svg || parsed.querySelector('parsererror')) return;
+        Array.prototype.forEach.call(holder.querySelectorAll("code.language-svg"), function (code) {
+            var pre = code.closest("pre") || code;
+            var parsed = new DOMParser().parseFromString(code.textContent, "image/svg+xml");
+            var svg = parsed.querySelector("svg");
+            if (!svg || parsed.querySelector("parsererror")) return;
             sanitizeSvgElement(svg);
             pre.replaceWith(document.importNode(svg, true));
         });
-        Array.prototype.forEach.call(holder.querySelectorAll('svg'), sanitizeSvgElement);
+        Array.prototype.forEach.call(holder.querySelectorAll("svg"), sanitizeSvgElement);
     }
 
-    // Fix unclosed markdown fences/inline-code so marked.parse() doesn't break mid-stream
-    function closeOpenMarkdown(text) {
-        // Count triple-backtick fences
-        var fenceCount = (text.match(/```/g) || []).length;
-        if (fenceCount % 2 !== 0) {
-            text += '\n```';
-            return text; // inside an unclosed fence — single backtick count is irrelevant
-        }
-        // Count single backticks with complete fenced blocks removed first.
-        // (Simple replace(/```/g,'') was wrong: it kept content inside fences,
-        //  including any backticks inside them, which inflated the count.)
-        var withoutFences = text.replace(/```[\s\S]*?```/g, '');
-        var tickCount = (withoutFences.match(/`/g) || []).length;
-        if (tickCount % 2 !== 0) {
-            text += '`';
-        }
-        return text;
+    function escapeHtml(s) {
+        var d = document.createElement("div");
+        d.textContent = s;
+        return d.innerHTML;
     }
 
-    // Render the final (complete) text of an assistant message.
-    // Does NOT call closeOpenMarkdown — the stream is done, the text is complete.
-    function renderFinalMarkdown(text) {
-        var displayText = text
-            .replace(/<think>[\s\S]*?<\/think>/g, '')
-            .replace(/<think>[\s\S]*$/, '');
-        return renderMd(displayText);
-    }
+    function el(id) { return document.getElementById(id); }
 
-    // --- Timestamp helper ---
-
-    function formatTime(date) {
-        var y = date.getFullYear();
-        var m = String(date.getMonth() + 1).padStart(2, '0');
-        var d = String(date.getDate()).padStart(2, '0');
-        var hh = String(date.getHours()).padStart(2, '0');
-        var mm = String(date.getMinutes()).padStart(2, '0');
-        var ss = String(date.getSeconds()).padStart(2, '0');
-        var tz = -date.getTimezoneOffset();
-        var tzSign = tz >= 0 ? '+' : '-';
-        var tzH = String(Math.floor(Math.abs(tz) / 60)).padStart(2, '0');
-        var tzM = String(Math.abs(tz) % 60).padStart(2, '0');
-        return y + '-' + m + '-' + d + 'T' + hh + ':' + mm + ':' + ss + tzSign + tzH + ':' + tzM;
-    }
-
-    // --- Model loading ---
-
-    function loadModels() {
-        fetch('api/models')
-            .then(function (resp) { return resp.json(); })
-            .then(function (models) {
-                modelSelect.innerHTML = '';
-                // Count distinct servers among local models
-                var servers = {};
-                models.forEach(function (m) {
-                    if (m.type === 'local' && m.server) {
-                        servers[m.server] = true;
-                    }
-                });
-                var serverCount = Object.keys(servers).length;
-
-                // Local models first, then Claude models
-                var localModels = models.filter(function (m) { return m.type === 'local'; });
-                var cloudModels = models.filter(function (m) { return m.type !== 'local'; });
-                var sorted = localModels.concat(cloudModels);
-
-                sorted.forEach(function (m) {
-                    var opt = document.createElement('option');
-                    opt.value = m.name;
-                    opt.setAttribute('data-type', m.type);
-                    if (m.type === 'local') {
-                        opt.textContent = serverCount > 1 && m.server
-                            ? m.name + ' (' + m.server + ')'
-                            : m.name + ' (local)';
-                    } else {
-                        opt.textContent = m.name;
-                    }
-                    modelSelect.appendChild(opt);
-                });
-
-                // Restore previously selected model from localStorage
-                var savedModel = localStorage.getItem(MODEL_KEY);
-                console.log('[chat-ui] model restore: saved=' + savedModel + ' options=' + modelSelect.options.length);
-                if (savedModel) {
-                    var found = false;
-                    for (var i = 0; i < modelSelect.options.length; i++) {
-                        if (modelSelect.options[i].value === savedModel) {
-                            modelSelect.value = savedModel;
-                            found = true;
-                            break;
-                        }
-                    }
-                    console.log('[chat-ui] model restore: found=' + found + ' current=' + modelSelect.value);
-                }
-            })
-            .catch(function () {
-                modelSelect.innerHTML = '';
-                var opt = document.createElement('option');
-                opt.value = '';
-                opt.textContent = '(no models available)';
-                opt.disabled = true;
-                modelSelect.appendChild(opt);
-            });
-    }
-
-    // --- EventSource SSE connection ---
-
-    var eventSource = null;
-
-    function connectSSE() {
-        if (eventSource) {
-            eventSource.close();
+    // Writes text to the clipboard. navigator.clipboard exists only in a secure context
+    // (https, or http on localhost); when this console is opened over http on a LAN address
+    // the property is undefined, so fall back to a hidden textarea plus execCommand("copy").
+    function copyTextToClipboard(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            return navigator.clipboard.writeText(text);
         }
-        eventSource = new EventSource(apiUrl('api/chat/stream'));
-
-        eventSource.onopen = function () {
-            connectionStatus.textContent = 'ready';
-            connectionStatus.className = 'connected';
-        };
-
-        eventSource.onmessage = function (event) {
-            try {
-                handleEvent(JSON.parse(event.data));
-            } catch (e) {
-                // skip non-JSON
-            }
-        };
-
-        eventSource.onerror = function () {
-            connectionStatus.textContent = 'reconnecting';
-            connectionStatus.className = 'disconnected';
-        };
-    }
-
-    // --- Event handling ---
-
-    function handleEvent(event) {
-        switch (event.type) {
-            case 'delta':
-                handleDelta(event.content);
-                break;
-            case 'thinking':
-                handleThinking(event.content);
-                break;
-            case 'result':
-                handleResult(event);
-                break;
-            case 'error':
-                appendMessage('error', event.content);
-                break;
-            case 'info':
-                appendMessage('info', event.content);
-                break;
-            case 'translation':
-                insertTranslation(event.content);
-                break;
-            case 'mcp_user':
-                appendMcpUserMessage(event.content);
-                break;
-            case 'btw_delta':
-                handleBtwDelta(event.content);
-                break;
-            case 'btw_result':
-                handleBtwResult();
-                break;
-            case 'status':
-                updateStatus(event);
-                break;
-            case 'prompt':
-                handlePrompt(event);
-                break;
-        }
-    }
-
-    function startThinkingTimer() {
-        if (thinkingTimer) return; // already running
-        thinkingStartTime = Date.now();
-        thinkingTimer = setInterval(updateElapsed, 1000);
-    }
-
-    function stopThinkingTimer() {
-        if (thinkingTimer) {
-            clearInterval(thinkingTimer);
-            thinkingTimer = null;
-        }
-        thinkingStartTime = null;
-        activityLabel.textContent = '';
-        activityLabel.removeAttribute('data-base');
-    }
-
-    function updateElapsed() {
-        if (!thinkingStartTime) return;
-        var elapsed = Math.floor((Date.now() - thinkingStartTime) / 1000);
-        var suffix = ' (' + elapsed + 's)';
-        // Update thinking indicator in chat area
-        if (currentAssistantMsg) {
-            var indicator = currentAssistantMsg.querySelector('.thinking-indicator');
-            if (indicator) {
-                var base = indicator.getAttribute('data-base') || indicator.textContent;
-                if (!indicator.getAttribute('data-base')) indicator.setAttribute('data-base', base);
-                indicator.textContent = base + suffix;
-            }
-        }
-        // Update activity label in status bar
-        var base = activityLabel.getAttribute('data-base');
-        if (base) {
-            activityLabel.textContent = base + suffix;
-        }
-    }
-
-    function handleThinking(content) {
-        // Re-enable cancel if server is still active (e.g., after POST timeout)
-        if (!busy) {
-            busy = true;
-            cancelBtn.disabled = false;
-        }
-        if (!currentAssistantMsg) {
-            currentAssistantMsg = document.createElement('div');
-            currentAssistantMsg.className = 'message assistant streaming';
-            chatArea.appendChild(currentAssistantMsg);
-        }
-
-        // All thinking content (tool use messages, reasoning) is shown temporarily.
-        // Nothing is added to currentAssistantText — it all disappears when delta text arrives.
-        if (content) {
-            var label = content === 'Tool completed.' ? '✓ Tool completed.' : content;
-            var indicator = currentAssistantMsg.querySelector('.thinking-indicator');
-            if (indicator) {
-                // Update existing indicator
-                indicator.setAttribute('data-base', label);
-                indicator.textContent = label;
-            } else {
-                // Create new indicator.
-                // After a delta arrives, innerHTML= wipes the previous indicator.
-                // We always recreate it so thinking events remain visible even mid-response.
-                var ind = document.createElement('div');
-                ind.className = 'thinking-indicator';
-                ind.setAttribute('data-base', label);
-                ind.textContent = label;
-                currentAssistantMsg.appendChild(ind);
-            }
-            scrollToBottom();
-        } else if (!currentAssistantText) {
-            // No content yet: show generic "Thinking..." before first delta
-            var indicator = document.createElement('div');
-            indicator.className = 'thinking-indicator';
-            indicator.textContent = 'Thinking...';
-            currentAssistantMsg.appendChild(indicator);
-            scrollToBottom();
-        }
-        // Update activity label in status bar
-        var label = content || 'Thinking...';
-        activityLabel.setAttribute('data-base', label);
-        activityLabel.textContent = label;
-        startThinkingTimer();
-    }
-
-    function handleDelta(content) {
-        if (!content) {
-            return;
-        }
-
-        // Re-enable cancel if server is still active (e.g., after POST timeout)
-        if (!busy) {
-            busy = true;
-            cancelBtn.disabled = false;
-        }
-
-        if (!currentAssistantMsg) {
-            currentAssistantMsg = document.createElement('div');
-            currentAssistantMsg.className = 'message assistant streaming';
-            chatArea.appendChild(currentAssistantMsg);
-        }
-
-        if (needsParagraphBreak) {
-            needsParagraphBreak = false;
-            if (currentAssistantText && !currentAssistantText.endsWith('\n\n')) {
-                currentAssistantText += '\n\n';
-            }
-        }
-
-        currentAssistantText += content;
-        // Strip <think>...</think> blocks (Qwen3 thinking mode) from display
-        var displayText = currentAssistantText
-            .replace(/<think>[\s\S]*?<\/think>/g, '')
-            .replace(/<think>[\s\S]*$/, '');  // partial unclosed <think> block
-        currentAssistantMsg.innerHTML = renderMd(closeOpenMarkdown(displayText));
-        scrollToBottom();
-    }
-
-    function handleResult(msg) {
-        stopThinkingTimer();
-        if (currentAssistantMsg) {
-            currentAssistantMsg.classList.remove('streaming');
-            // Re-render with the complete text — no closeOpenMarkdown patching needed.
-            if (currentAssistantText) {
-                currentAssistantMsg.innerHTML = renderFinalMarkdown(currentAssistantText);
-            }
-
-            var footer = document.createElement('div');
-            footer.className = 'message-footer';
-
-
-            if (msg.costUsd != null && msg.costUsd > 0) {
-                var cost = document.createElement('span');
-                cost.textContent = 'Cost: $' + msg.costUsd.toFixed(4);
-                footer.appendChild(cost);
-            }
-            if (msg.durationMs != null && msg.durationMs >= 0) {
-                var duration = document.createElement('span');
-                var secs = (msg.durationMs / 1000).toFixed(1);
-                duration.textContent = 'Duration: ' + secs + 's';
-                footer.appendChild(duration);
-            }
-            if (msg.sessionId) {
-                var session = document.createElement('span');
-                session.textContent = 'Session: ' + msg.sessionId.substring(0, 12) + '...';
-                session.title = msg.sessionId;
-                footer.appendChild(session);
-            }
-
-            // Model name
-            var modelName = modelSelect.value || '';
-            if (modelName) {
-                var modelSpan = document.createElement('span');
-                modelSpan.title = modelName;
-                modelSpan.textContent = modelName.length > 30
-                    ? modelName.substring(0, 30) + '...' : modelName;
-                footer.appendChild(modelSpan);
-            }
-
-            // Copy as Markdown button
-            var copyBtn = document.createElement('button');
-            copyBtn.className = 'copy-md-btn';
-            copyBtn.textContent = 'Copy MD';
-            copyBtn.title = 'Copy as Markdown';
-            var mdText = currentAssistantText;
-            copyBtn.addEventListener('click', function () {
-                navigator.clipboard.writeText(mdText).then(function () {
-                    copyBtn.textContent = 'Copied!';
-                    setTimeout(function () { copyBtn.textContent = 'Copy MD'; }, 1500);
-                });
-            });
-            footer.appendChild(copyBtn);
-
-            var timeSpan = document.createElement('span');
-            timeSpan.textContent = formatTime(new Date());
-            footer.appendChild(timeSpan);
-
-            currentAssistantMsg.appendChild(footer);
-
-            currentAssistantMsg = null;
-            chatHistory.push({ role: 'assistant', text: currentAssistantText });
-            currentAssistantText = '';
-            needsParagraphBreak = false;
-            saveHistory();
-            scrollToBottom();
-            trimChatArea();
-        }
-
-        // result event is the authoritative signal that a turn is complete.
-        // Update status from result event (model, session, busy) and process queue.
-        if (msg.model) {
-            updateStatus(msg);
-        }
-        if (msg.busy === false) {
-            busy = false;
-            cancelBtn.disabled = true;
-            promptInput.focus();
-            processQueue();
-        }
-    }
-
-    function handlePrompt(event) {
-        var div = document.createElement('div');
-        div.className = 'message prompt';
-        var contentP = document.createElement('p');
-        contentP.textContent = event.content || 'Prompt from Claude';
-        div.appendChild(contentP);
-
-        // All prompts (ask_user, permission, etc.) are sent via /api/respond
-        // which writes to Claude CLI's stdin. The CLI process is still running
-        // and waiting for the response in its read loop.
-
-        if (event.options && event.options.length > 0) {
-            var btnGroup = document.createElement('div');
-            btnGroup.className = 'prompt-buttons';
-            event.options.forEach(function (opt) {
-                var btn = document.createElement('button');
-                btn.className = 'prompt-option-btn';
-                btn.textContent = opt;
-                btn.addEventListener('click', function () {
-                    pendingPrompt = false;
-                    sendResponse(event.promptId, opt);
-                    div.classList.add('answered');
-                    btnGroup.querySelectorAll('button').forEach(
-                        function (b) { b.disabled = true; });
-                });
-                btnGroup.appendChild(btn);
-            });
-            div.appendChild(btnGroup);
-        } else {
-            // Free-text input for the response
-            var inputRow = document.createElement('div');
-            inputRow.className = 'prompt-input-row';
-            var input = document.createElement('input');
-            input.type = 'text';
-            input.className = 'prompt-text-input';
-            input.placeholder = 'Type your response...';
-            var submitBtn = document.createElement('button');
-            submitBtn.className = 'prompt-option-btn';
-            submitBtn.textContent = 'Send';
-            submitBtn.addEventListener('click', function () {
-                if (input.value.trim()) {
-                    pendingPrompt = false;
-                    sendResponse(event.promptId, input.value.trim());
-                    div.classList.add('answered');
-                    input.disabled = true;
-                    submitBtn.disabled = true;
-                }
-            });
-            input.addEventListener('keydown', function (e) {
-                if (e.key === 'Enter' && !e.isComposing) {
-                    e.preventDefault();
-                    submitBtn.click();
-                }
-            });
-            inputRow.appendChild(input);
-            inputRow.appendChild(submitBtn);
-            div.appendChild(inputRow);
-        }
-
-        chatArea.appendChild(div);
-        chatHistory.push({ role: 'prompt', text: event.content || '' });
-        saveHistory();
-        scrollToBottom();
-    }
-
-    // Send text as a regular chat message (for ask_user prompt responses)
-    function sendPromptText(text) {
-        queue.splice(queuePos, 0, { text: text, auto: true });
-        trimQueue();
-        renderQueue();
-        saveQueue();
-        if (!busy) {
-            processQueue();
-        } else {
-            showQueue();
-        }
-    }
-
-    async function sendResponse(promptId, response) {
-        try {
-            await fetch(apiUrl('api/respond'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ promptId: promptId, response: response })
-            });
-            chatHistory.push({ role: 'user', text: '[Response] ' + response });
-            saveHistory();
-        } catch (e) {
-            appendMessage('error', 'Failed to send response: ' + e.message);
-        }
-    }
-
-    function updateStatus(msg) {
-        if (msg.model) {
-            // Restore from localStorage first; fall back to server-side model
-            var savedModel = localStorage.getItem(MODEL_KEY);
-            var targetModel = savedModel || msg.model;
-            var currentOption = modelSelect.options[modelSelect.selectedIndex];
-            var currentIsLocal = currentOption && currentOption.getAttribute('data-type') === 'local';
-            console.log('[chat-ui] updateStatus model: server=' + msg.model + ' saved=' + savedModel + ' target=' + targetModel + ' currentIsLocal=' + currentIsLocal);
-            if (!currentIsLocal) {
-                // Only set if the target model exists in the dropdown
-                for (var i = 0; i < modelSelect.options.length; i++) {
-                    if (modelSelect.options[i].value === targetModel) {
-                        modelSelect.value = targetModel;
-                        break;
-                    }
-                }
-            }
-        }
-        if (msg.sessionId) {
-            sessionLabel.textContent = 'Session: ' + msg.sessionId.substring(0, 12) + '...';
-            sessionLabel.title = msg.sessionId;
-        } else {
-            sessionLabel.textContent = '';
-        }
-        if (msg.busy != null) {
-            busy = msg.busy;
-            cancelBtn.disabled = !busy;
-            if (!busy) {
-                stopThinkingTimer();
-                promptInput.focus();
-                // Safety net: if result event doesn't arrive (e.g., error path),
-                // process queue after a longer delay to avoid being stuck.
-                // Normal path: handleResult() calls processQueue() immediately.
-                setTimeout(function () {
-                    if (!busy) processQueue();
-                }, 2000);
-            }
-        }
-    }
-
-    var notificationBar = document.getElementById('notification-bar');
-    function isTaskNotification(text) {
-        return text && text.indexOf('<task-notification>') !== -1;
-    }
-    function showNotification(text) {
-        var item = document.createElement('div');
-        item.className = 'notification-item';
-        var statusMatch = text.match(/<status>(.*?)<\/status>/);
-        var summaryMatch = text.match(/<summary>(.*?)<\/summary>/);
-        var status = statusMatch ? statusMatch[1] : 'unknown';
-        var summary = summaryMatch ? summaryMatch[1] : 'Background task notification';
-        item.textContent = '[' + status + '] ' + summary;
-        item.className += ' notification-' + status;
-        notificationBar.appendChild(item);
-        notificationBar.style.display = 'block';
-        setTimeout(function () {
-            item.classList.add('notification-fade');
-            setTimeout(function () {
-                if (item.parentNode) item.parentNode.removeChild(item);
-                if (notificationBar.children.length === 0) notificationBar.style.display = 'none';
-            }, 500);
-        }, 10000);
-    }
-
-    // Fill a translation bubble, bolding the "Natural:" / "Faithful:" line labels. Builds DOM
-    // nodes (not innerHTML) so the model-produced text is never interpreted as markup.
-    function fillTranslationDiv(div, text) {
-        var lines = String(text == null ? '' : text).split('\n');
-        lines.forEach(function (line, i) {
-            if (i > 0) div.appendChild(document.createTextNode('\n'));
-            var m = line.match(/^(Natural|Faithful):(.*)$/);
-            if (m) {
-                var strong = document.createElement('strong');
-                strong.textContent = m[1] + ':';
-                div.appendChild(strong);
-                div.appendChild(document.createTextNode(m[2]));
-            } else {
-                div.appendChild(document.createTextNode(line));
-            }
+        return new Promise(function (resolve, reject) {
+            var ta = document.createElement("textarea");
+            ta.value = text;
+            ta.setAttribute("readonly", "");
+            ta.style.position = "fixed";
+            ta.style.top = "-1000px";
+            document.body.appendChild(ta);
+            ta.select();
+            var ok = false;
+            try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+            document.body.removeChild(ta);
+            if (ok) resolve(); else reject(new Error("copy command was rejected"));
         });
     }
 
-    // Insert a translation bubble directly below the user message, before the
-    // assistant "Waiting for response..." placeholder that was already added to the DOM.
-    function insertTranslation(text) {
-        var div = document.createElement('div');
-        div.className = 'message translation';
-        fillTranslationDiv(div, text);
-        // currentAssistantMsg is the "Waiting for response..." div that sits right
-        // after the user message. Inserting before it places the translation between
-        // the user message and the assistant placeholder — exactly where it belongs.
-        if (currentAssistantMsg && currentAssistantMsg.parentNode === chatArea) {
-            chatArea.insertBefore(div, currentAssistantMsg);
-        } else {
-            chatArea.appendChild(div);
-        }
-        chatHistory.push({ role: 'translation', text: text });
-        saveHistory();
-        scrollToBottom();
-        trimChatArea();
+    // ISO 8601 with the browser's UTC offset — the format the coding standard requires wherever a
+    // time is displayed. Same function as quarkus-chat-ui's.
+    function formatTime(date) {
+        var y = date.getFullYear();
+        var m = String(date.getMonth() + 1).padStart(2, "0");
+        var d = String(date.getDate()).padStart(2, "0");
+        var hh = String(date.getHours()).padStart(2, "0");
+        var mm = String(date.getMinutes()).padStart(2, "0");
+        var ss = String(date.getSeconds()).padStart(2, "0");
+        var tz = -date.getTimezoneOffset();
+        var tzSign = tz >= 0 ? "+" : "-";
+        var tzH = String(Math.floor(Math.abs(tz) / 60)).padStart(2, "0");
+        var tzM = String(Math.abs(tz) % 60).padStart(2, "0");
+        return y + "-" + m + "-" + d + "T" + hh + ":" + mm + ":" + ss + tzSign + tzH + ":" + tzM;
     }
 
-    function appendMessage(className, text, images) {
-        if (className === 'user' && isTaskNotification(text)) {
-            showNotification(text);
-            return;
+    // A clipboard button yielding the message's own markdown source, not the rendered HTML:
+    // appendMarkdownMessage() replaces the source with marked.parse()'s output in the DOM, so the
+    // source is captured in this closure while it is still available.
+    function copyButton(markdownText, label) {
+        var btn = document.createElement("button");
+        btn.className = "copy-md-btn";
+        btn.textContent = label;
+        btn.title = "Copy as Markdown";
+        btn.addEventListener("click", function () {
+            copyTextToClipboard(markdownText).then(function () {
+                btn.textContent = "Copied!";
+                setTimeout(function () { btn.textContent = label; }, 1500);
+            }).catch(function (e) {
+                btn.textContent = "Copy failed";
+                notify("copy failed: " + e.message, true);
+                setTimeout(function () { btn.textContent = label; }, 1500);
+            });
+        });
+        return btn;
+    }
+
+    // ── Code blocks: wrap toggle and copy (CodeBlockWrapAndCopy_261011_oo01) ─────────────────
+    // Every <pre> drawn from markdown gets two buttons at its top right: one switches that block
+    // between scrolling sideways (the default) and wrapping at the pane's width, the other copies
+    // the block's code alone. The buttons sit in a wrapper outside the <pre>, so they stay put while
+    // the code scrolls sideways.
+    function decorateCodeBlocks(container) {
+        var blocks = container.querySelectorAll("pre");
+        for (var i = 0; i < blocks.length; i++) {
+            var pre = blocks[i];
+            if (pre.parentNode && pre.parentNode.classList && pre.parentNode.classList.contains("code-block")) continue;
+            var wrapper = document.createElement("div");
+            wrapper.className = "code-block";
+            pre.parentNode.insertBefore(wrapper, pre);
+            wrapper.appendChild(pre);
+            var tools = document.createElement("div");
+            tools.className = "code-tools";
+            tools.appendChild(wrapToggleButton(pre));
+            tools.appendChild(codeCopyButton(pre));
+            wrapper.appendChild(tools);
         }
-        var div = document.createElement('div');
-        div.className = 'message ' + className;
+    }
+
+    function wrapToggleButton(pre) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "code-tool-btn";
+        function label() {
+            var wrapped = pre.classList.contains("wrapped");
+            btn.textContent = wrapped ? "No wrap" : "Wrap";
+            btn.title = wrapped ? "Stop wrapping: long lines scroll sideways" : "Wrap long lines at the pane's width";
+        }
+        label();
+        btn.addEventListener("click", function () {
+            pre.classList.toggle("wrapped");
+            label();
+        });
+        return btn;
+    }
+
+    function codeCopyButton(pre) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "code-tool-btn";
+        btn.textContent = "Copy";
+        btn.title = "Copy this code";
+        btn.addEventListener("click", function () {
+            copyTextToClipboard(pre.textContent).then(function () {
+                btn.textContent = "Copied!";
+                setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+            }).catch(function (e) {
+                btn.textContent = "Copy failed";
+                notify("copy failed: " + e.message, true);
+                setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+            });
+        });
+        return btn;
+    }
+
+    function textSpan(text, title) {
+        var span = document.createElement("span");
+        span.textContent = text;
+        if (title) span.title = title;
+        return span;
+    }
+
+    // ── Keyboard mode of the prompt input box ─────────────────────────────────────────────────
+    // "default" leaves the browser's own key bindings. "emacs" binds Ctrl+a, e, f, b, n, p, d, h
+    // and k in the box to the Emacs cursor and deletion commands. The mode comes from the server
+    // setting chat-ui.keybind through GET /api/keybind.
+    var activeKeybind = "default";
+
+    function loadKeybind() {
+        fetch(apiUrl("api/keybind"))
+            .then(function (r) { return r.ok ? r.json() : {}; })
+            .then(function (cfg) { activeKeybind = cfg && cfg.keybind === "emacs" ? "emacs" : "default"; })
+            .catch(function () { activeKeybind = "default"; });
+    }
+
+    // Moves the cursor, or deletes, in the prompt input box. Returns true when the key was one of
+    // the bound ones and has been handled.
+    function emacsKey(e) {
+        if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return false;
+        var ta = e.target;
+        var start = ta.selectionStart;
+        var val = ta.value;
+        var pos;
+        switch (e.key) {
+            case "a":   // beginning of the line
+                pos = val.lastIndexOf("\n", start - 1) + 1;
+                ta.setSelectionRange(pos, pos);
+                return true;
+            case "e":   // end of the line
+                pos = val.indexOf("\n", start);
+                if (pos === -1) pos = val.length;
+                ta.setSelectionRange(pos, pos);
+                return true;
+            case "f":   // one character forward
+                if (start < val.length) ta.setSelectionRange(start + 1, start + 1);
+                return true;
+            case "b":   // one character back
+                if (start > 0) ta.setSelectionRange(start - 1, start - 1);
+                return true;
+            case "n": { // down one line, to the same column or the end of that line
+                var thisLineEnd = val.indexOf("\n", start);
+                if (thisLineEnd !== -1) {
+                    var column = start - (val.lastIndexOf("\n", start - 1) + 1);
+                    var nextLineEnd = val.indexOf("\n", thisLineEnd + 1);
+                    if (nextLineEnd === -1) nextLineEnd = val.length;
+                    pos = Math.min(thisLineEnd + 1 + column, nextLineEnd);
+                    ta.setSelectionRange(pos, pos);
+                }
+                return true;
+            }
+            case "p": { // up one line, to the same column or the end of that line
+                var thisLineStart = val.lastIndexOf("\n", start - 1) + 1;
+                if (thisLineStart > 0) {
+                    var col = start - thisLineStart;
+                    var prevLineStart = val.lastIndexOf("\n", thisLineStart - 2) + 1;
+                    pos = Math.min(prevLineStart + col, thisLineStart - 1);
+                    ta.setSelectionRange(pos, pos);
+                }
+                return true;
+            }
+            case "d":   // delete the character after the cursor
+                if (start < val.length) replaceRange(ta, start, start + 1);
+                return true;
+            case "h":   // delete the character before the cursor
+                if (start > 0) replaceRange(ta, start - 1, start);
+                return true;
+            case "k": { // delete to the end of the line, or the line break when already there
+                var killEnd = val.indexOf("\n", start);
+                if (killEnd === -1) killEnd = val.length;
+                if (killEnd === start && start < val.length) killEnd++;
+                if (killEnd > start) replaceRange(ta, start, killEnd);
+                return true;
+            }
+            default:
+                return false;
+        }
+    }
+
+    // Removes [from, to) from the box through the editing command, so the browser's undo still
+    // works and the box's own input handling (its height) runs.
+    function replaceRange(ta, from, to) {
+        ta.setSelectionRange(from, to);
+        if (!document.execCommand || !document.execCommand("delete")) {
+            ta.value = ta.value.substring(0, from) + ta.value.substring(to);
+            ta.setSelectionRange(from, from);
+            ta.dispatchEvent(new Event("input"));
+        }
+    }
+
+    // ── Translate one message (MessageTranslation_261011_oo01) ───────────────────────────────
+    // The languages come from the server once; every message's footer gets a list drawn from them.
+    // Choosing a language asks the server for that message in it and shows the result inside the
+    // message, above the footer. Nothing is added to the conversation.
+    var translationLanguages = [];
+
+    function loadTranslationLanguages() {
+        fetch(apiUrl("api/translation-languages"))
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (list) { translationLanguages = list || []; })
+            .catch(function () { translationLanguages = []; });
+    }
+
+    /**
+     * @param div          the message's box; the translation is placed in it, above the footer
+     * @param sourceText   the message as written, markdown included
+     * @param asMarkdown   whether the translation is drawn as markdown (an answer) or as text (a prompt)
+     */
+    function translateSelect(div, sourceText, asMarkdown) {
+        var select = document.createElement("select");
+        select.className = "translate-select";
+        select.title = "Translate this message";
+        var first = document.createElement("option");
+        first.value = "";
+        first.textContent = "Translate…";
+        select.appendChild(first);
+        // A message restored as the page loads may be drawn before the list has arrived, so the
+        // options are filled in whenever the list is opened and still holds only the first one.
+        function fillLanguages() {
+            if (select.options.length > 1) return;
+            translationLanguages.forEach(function (l) {
+                var o = document.createElement("option");
+                o.value = l.code;
+                o.textContent = l.name;
+                select.appendChild(o);
+            });
+        }
+        fillLanguages();
+        select.addEventListener("focus", fillLanguages);
+        select.addEventListener("mousedown", fillLanguages);
+        // The translation of this message in this conversation, kept outside the DOM: switching
+        // conversations empties the pane and draws it again from the history, and a translation
+        // held only by the box under the message went with it. A request still running when the
+        // pane is left finishes into the entry, and the message drawn on coming back shows it.
+        var entryKey = PROJECT_ID + "/" + CHAT_ID + "\n" + sourceText;
+
+        function drawTranslation(entry) {
+            var box = entry.box;
+            box.classList.remove("translated-error");
+            box.textContent = "";
+            if (entry.state === "pending") {
+                box.textContent = "Translating into " + entry.name + "…";
+            } else if (entry.state === "error") {
+                box.textContent = entry.name + ": " + entry.message;
+                box.classList.add("translated-error");
+            } else {
+                var label = document.createElement("div");
+                label.className = "translated-label";
+                label.textContent = entry.name + (entry.model ? " — " + entry.model : "")
+                    + (entry.state === "streaming" ? " …" : "");
+                box.appendChild(label);
+                var body = document.createElement("div");
+                // While the model is still writing, the text is shown as it is; the Markdown is
+                // drawn once, when the translation is whole, because a half-written code fence or
+                // list would be redrawn differently with every piece.
+                if (asMarkdown && entry.state === "done") {
+                    body.innerHTML = renderMarkdown(entry.text);
+                    decorateCodeBlocks(body);
+                }
+                else {
+                    body.textContent = entry.text;
+                    if (entry.state === "streaming") body.style.whiteSpace = "pre-wrap";
+                }
+                box.appendChild(body);
+            }
+            // The entry's list, not this call's: the one this closure was made for may be gone.
+            entry.select.disabled = entry.state === "pending" || entry.state === "streaming";
+        }
+
+        // Reads the stream of POST .../translate/stream into the entry, redrawing the message on
+        // screen after each piece. Each event is one "data:" line holding a JSON object.
+        function readTranslationStream(response, entry) {
+            var reader = response.body.getReader();
+            var decoder = new TextDecoder();
+            var buffer = "";
+            function handle(event) {
+                if (event.type === "delta") {
+                    entry.state = "streaming";
+                    entry.text = (entry.text || "") + event.content;
+                } else if (event.type === "done") {
+                    entry.state = "done";
+                    entry.text = event.translation;
+                    entry.model = event.model;
+                } else if (event.type === "error") {
+                    entry.state = "error";
+                    entry.message = event.message || "translation failed";
+                }
+                drawTranslation(entry);
+            }
+            function pump() {
+                return reader.read().then(function (chunk) {
+                    if (chunk.done) return;
+                    buffer += decoder.decode(chunk.value, { stream: true });
+                    var end;
+                    while ((end = buffer.search(/\r?\n\r?\n/)) >= 0) {
+                        var raw = buffer.slice(0, end);
+                        buffer = buffer.slice(end).replace(/^\r?\n\r?\n/, "");
+                        var data = raw.split(/\r?\n/)
+                            .filter(function (l) { return l.indexOf("data:") === 0; })
+                            .map(function (l) { return l.slice(5).replace(/^ /, ""); })
+                            .join("\n");
+                        if (data) handle(JSON.parse(data));
+                    }
+                    return pump();
+                });
+            }
+            return pump();
+        }
+
+        // Puts this message's box and list in the entry, which is how the answer to a request
+        // started from a message that has since been redrawn reaches the one on screen.
+        function showEntry(entry) {
+            var box = div.querySelector(":scope > .translated");
+            if (!box) {
+                box = document.createElement("div");
+                box.className = "translated";
+                var footer = div.querySelector(":scope > .message-footer");
+                div.insertBefore(box, footer);
+            }
+            entry.box = box;
+            entry.select = select;
+            drawTranslation(entry);
+        }
+
+        var known = translationEntries[entryKey];
+        if (known) showEntry(known);
+
+        select.addEventListener("change", function () {
+            var code = select.value;
+            if (!code) return;
+            var name = select.options[select.selectedIndex].textContent;
+            var entry = { name: name, state: "pending" };
+            translationEntries[entryKey] = entry;
+            showEntry(entry);
+            fetch(apiUrl(chatUrl("/translate/stream")), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: sourceText, language: code })
+            })
+                .then(function (r) {
+                    if (!r.ok) throw new Error("HTTP " + r.status);
+                    return readTranslationStream(r, entry);
+                })
+                .then(function () {
+                    // A stream that ended without a "done" or an "error" element was cut short.
+                    if (entry.state === "pending" || entry.state === "streaming") {
+                        entry.state = "error";
+                        entry.message = "the translation stopped before it was complete";
+                    }
+                })
+                .catch(function (e) { entry.state = "error"; entry.message = e.message; })
+                .then(function () {
+                    drawTranslation(entry);
+                    entry.select.value = "";
+                });
+        });
+        return select;
+    }
+
+    // Translations shown so far, by conversation and message text; see translateSelect.
+    var translationEntries = {};
+
+    function newFooter(div) {
+        var footer = document.createElement("div");
+        footer.className = "message-footer";
+        div.appendChild(footer);
+        return footer;
+    }
+
+    // Shortens an identifier for display; the whole value stays in the tooltip.
+    function shorten(value, max) {
+        return value.length > max ? value.substring(0, max) + "..." : value;
+    }
+
+    // The line under a finished answer, in the same order and format as quarkus-chat-ui's:
+    // cost, duration, session, model, the copy button, then the time. Cost appears only when the
+    // server reported one above zero — a local model bills nothing, and a zero is not shown.
+    // `at` is as for appendMessage: left out for an answer arriving live, the recorded time or null
+    // for one restored from history. A restored answer is not given the model chosen in the dropdown
+    // now, which may not be the one that wrote it.
+    function appendAnswerFooter(div, markdownText, event, at) {
+        var footer = newFooter(div);
+        if (event.costUsd != null && event.costUsd > 0) {
+            footer.appendChild(textSpan("Cost: $" + event.costUsd.toFixed(4)));
+        }
+        if (event.durationMs != null && event.durationMs >= 0) {
+            footer.appendChild(textSpan("Duration: " + (event.durationMs / 1000).toFixed(1) + "s"));
+        }
+        if (event.sessionId) {
+            var id = String(event.sessionId);
+            footer.appendChild(textSpan("Session: " + shorten(id, 12), id));
+        }
+        appendIds(footer, event.turnId, event.requestId);
+        // The model the server actually used. The dropdown is the fallback for a server that does
+        // not report it with the result.
+        var modelName = event.model || (at === undefined && modelSelect && modelSelect.value) || "";
+        if (modelName) footer.appendChild(textSpan(shorten(modelName, 30), modelName));
+        footer.appendChild(copyButton(markdownText, "Copy MD"));
+        footer.appendChild(translateSelect(div, markdownText, true));
+        if (at !== null) footer.appendChild(textSpan(formatTime(at === undefined ? new Date() : new Date(at))));
+    }
+
+    // Where a prompt came from, shown on the bubble itself: a person at this screen, a program
+    // calling the REST endpoint, another conversation, or a workflow. All four look alike once they
+    // are in the conversation, and one of them is a person's own work being done for them
+    // (PromptOriginOnScreen_260915_oo01).
+    function originBadge(origin) {
+        var badge = document.createElement("span");
+        var kind = String(origin || "").split(" ")[0];
+        badge.className = "origin-badge origin-" + (kind || "api");
+        badge.textContent = origin;
+        badge.title = "This prompt came from: " + origin;
+        return badge;
+    }
+
+    // `at` is when the line was written, in milliseconds since the epoch. Left out, it is now, which
+    // is right for a line arriving live. A line restored from history passes the time the server
+    // recorded, or null when the server has none: a footer filled with the time of the reload would
+    // state something false.
+    // Which turn wrote a line and which ask_chat request it is or answers, as the record keeps them
+    // (TurnAndRequestIds_261107_oo01). Shown whole, since they are copied into the Sessions tab, on a
+    // line of their own under the rest of the footer: they are long and would crowd it.
+    function appendIds(footer, turnId, requestId) {
+        if (!turnId && !requestId) return;
+        var row = document.createElement("div");
+        row.className = "footer-ids";
+        if (turnId) row.appendChild(textSpan("Turn: " + turnId, "The turn this line belongs to"));
+        if (requestId) row.appendChild(textSpan("Request: " + requestId,
+            "The ask_chat request this line is, or answers"));
+        footer.appendChild(row);
+    }
+
+    // Puts a bubble in the chat area, marked with the kind of turn it belongs to.
+    function placeBubble(div) {
+        div.classList.add(turnFromPerson ? "turn-person" : "turn-other");
+        chatArea.appendChild(div);
+    }
+
+    // Marks a bubble as its turn's final answer. Only two things say a bubble is one: the "delta" event, which
+    // ChatSession sends once per turn with the confirmed answer, and an assistant line of GET /conversation,
+    // which records nothing but those answers. Provisional answers and steps stay unmarked.
+    function markAnswer(div) {
+        if (div) div.classList.add("turn-answer");
+        return div;
+    }
+
+    function appendMessage(role, text, images, origin, at, ids) {
+        var div = document.createElement("div");
+        div.className = "message " + role;
+        // A user bubble opens a turn: the assistant, info and error bubbles after it belong to it.
+        if (role === "user") turnFromPerson = !origin || origin === "screen";
+        if (role === "user" && origin && origin !== "screen") {
+            div.classList.add("from-" + String(origin).split(" ")[0]);
+        }
         if (images && images.length) {
             images.forEach(function (src) {
-                var img = document.createElement('img');
+                var img = document.createElement("img");
                 img.src = src;
-                img.className = 'message-image';
+                img.className = "message-image";
                 div.appendChild(img);
             });
             div.appendChild(document.createTextNode(text));
         } else {
             div.textContent = text;
         }
-        if (className === 'user') {
-            var footer = document.createElement('div');
-            footer.className = 'message-footer';
-            var timeSpan = document.createElement('span');
-            timeSpan.textContent = formatTime(new Date());
-            footer.appendChild(timeSpan);
-            var copyBtn = document.createElement('button');
-            copyBtn.className = 'copy-md-btn';
-            copyBtn.textContent = 'Copy';
-            copyBtn.title = 'Copy prompt text';
-            var promptText = text;
-            copyBtn.addEventListener('click', function () {
-                navigator.clipboard.writeText(promptText).then(function () {
-                    copyBtn.textContent = 'Copied!';
-                    setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500);
-                });
-            });
-            footer.appendChild(copyBtn);
-            div.appendChild(footer);
+        // The prompt a human typed is worth copying back out; transient error/info bubbles are not.
+        if (role === "user") {
+            var footer = newFooter(div);
+            if (origin) footer.appendChild(originBadge(origin));
+            if (ids) appendIds(footer, ids.turnId, ids.requestId);
+            if (at !== null) footer.appendChild(textSpan(formatTime(at === undefined ? new Date() : new Date(at))));
+            footer.appendChild(copyButton(text, "Copy"));
+            footer.appendChild(translateSelect(div, text, false));
         }
-        chatArea.appendChild(div);
-        chatHistory.push({ role: className, text: text });
-        saveHistory();
+        placeBubble(div);
         scrollToBottom();
-        trimChatArea();
-    }
-
-    function appendMcpUserMessage(text) {
-        var div = document.createElement('div');
-        div.className = 'message user mcp-user';
-        div.textContent = text;
-        var footer = document.createElement('div');
-        footer.className = 'message-footer';
-        var timeSpan = document.createElement('span');
-        timeSpan.textContent = formatTime(new Date());
-        footer.appendChild(timeSpan);
-        div.appendChild(footer);
-        chatArea.appendChild(div);
-        chatHistory.push({ role: 'user', text: text });
-        saveHistory();
-        scrollToBottom();
-        trimChatArea();
-    }
-
-    // --- BTW side question ---
-
-    var btwResponseText = '';
-
-    function showBtwOverlay(question) {
-        btwResponseText = '';
-        document.getElementById('btw-question').textContent = question;
-        document.getElementById('btw-response').innerHTML =
-            '<span class="thinking-indicator">Thinking...</span>';
-        document.getElementById('btw-overlay').style.display = 'flex';
-    }
-
-    function handleBtwDelta(content) {
-        if (!content) return;
-        btwResponseText += content;
-        document.getElementById('btw-response').innerHTML =
-            renderMd(closeOpenMarkdown(btwResponseText));
-    }
-
-    function handleBtwResult() {
-        if (btwResponseText) {
-            document.getElementById('btw-response').innerHTML =
-                renderMd(btwResponseText);
-        }
-    }
-
-    async function executeBtw(question) {
-        showBtwOverlay(question);
-        try {
-            var resp = await fetch(apiUrl('api/btw'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question: question, model: modelSelect.value })
-            });
-            if (!resp.ok) {
-                document.getElementById('btw-response').textContent =
-                    'Error: HTTP ' + resp.status;
-            }
-        } catch (e) {
-            document.getElementById('btw-response').textContent = 'Error: ' + e.message;
-        }
-    }
-
-    // --- History persistence (localStorage) ---
-
-    function saveHistory() {
-        var toSave = chatHistory.slice(-MAX_HISTORY);
-        try {
-            localStorage.setItem(HISTORY_KEY, JSON.stringify(toSave));
-        } catch (e) {
-            // localStorage full — trim aggressively
-            try {
-                localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory.slice(-50)));
-            } catch (e2) { /* give up */ }
-        }
-    }
-
-    function restoreHistory() {
-        try {
-            var saved = localStorage.getItem(HISTORY_KEY);
-            if (!saved) return;
-            var entries = JSON.parse(saved);
-            if (!Array.isArray(entries) || entries.length === 0) return;
-
-            chatHistory = entries.filter(function (e) { return !(e.role === 'user' && isTaskNotification(e.text)); });
-            for (var i = 0; i < entries.length; i++) {
-                var entry = entries[i];
-                if (entry.role === 'assistant') {
-                    chatArea.appendChild(createAssistantDiv(entry.text));
-                } else if (entry.role === 'prompt') {
-                    var div = document.createElement('div');
-                    div.className = 'message prompt answered';
-                    var p = document.createElement('p');
-                    p.textContent = entry.text;
-                    div.appendChild(p);
-                    chatArea.appendChild(div);
-                } else {
-                    var div = document.createElement('div');
-                    div.className = 'message ' + entry.role;
-                    if (entry.role === 'translation') {
-                        fillTranslationDiv(div, entry.text);
-                    } else {
-                        div.textContent = entry.text;
-                    }
-                    if (entry.role === 'user') {
-                        var footer = document.createElement('div');
-                        footer.className = 'message-footer';
-                        var copyBtn = document.createElement('button');
-                        copyBtn.className = 'copy-md-btn';
-                        copyBtn.textContent = 'Copy';
-                        copyBtn.title = 'Copy prompt text';
-                        (function(t, btn) {
-                            btn.addEventListener('click', function () {
-                                navigator.clipboard.writeText(t).then(function () {
-                                    btn.textContent = 'Copied!';
-                                    setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
-                                });
-                            });
-                        })(entry.text, copyBtn);
-                        footer.appendChild(copyBtn);
-                        div.appendChild(footer);
-                    }
-                    chatArea.appendChild(div);
-                }
-            }
-            scrollToBottom();
-        } catch (e) {
-            // ignore restore errors
-        }
-    }
-
-    // --- Queue persistence (localStorage) ---
-
-    function saveQueue() {
-        try {
-            localStorage.setItem(QUEUE_KEY, JSON.stringify({ queue: queue, pos: queuePos }));
-        } catch (e) { /* ignore */ }
-    }
-
-    function restoreQueue() {
-        try {
-            var saved = localStorage.getItem(QUEUE_KEY);
-            if (!saved) return;
-            var data = JSON.parse(saved);
-            if (data && Array.isArray(data.queue)) {
-                queue = data.queue;
-                queuePos = typeof data.pos === 'number' ? data.pos : 0;
-                if (queuePos > queue.length) queuePos = queue.length;
-                if (queue.length > 0) {
-                    showQueue();
-                    renderQueue();
-                }
-            }
-        } catch (e) { /* ignore */ }
-    }
-
-    function createAssistantDiv(text) {
-        var div = document.createElement('div');
-        div.className = 'message assistant';
-        div.innerHTML = renderMd(text);
-
-        var footer = document.createElement('div');
-        footer.className = 'message-footer';
-
-        var copyBtn = document.createElement('button');
-        copyBtn.className = 'copy-md-btn';
-        copyBtn.textContent = 'Copy MD';
-        copyBtn.title = 'Copy as Markdown';
-        copyBtn.addEventListener('click', function () {
-            navigator.clipboard.writeText(text).then(function () {
-                copyBtn.textContent = 'Copied!';
-                setTimeout(function () { copyBtn.textContent = 'Copy MD'; }, 1500);
-            });
-        });
-        footer.appendChild(copyBtn);
-        div.appendChild(footer);
         return div;
     }
 
-    var userScrolledUp = false;
+    // Renders the bubble only. An answer's footer is added when the result event arrives, because
+    // that event carries the duration, the session and the model.
+    function appendMarkdownMessage(role, text) {
+        var div = document.createElement("div");
+        div.className = "message " + role;
+        div.innerHTML = renderMarkdown(text);
+        decorateCodeBlocks(div);
+        placeBubble(div);
+        scrollToBottom();
+        return div;
+    }
 
-    chatArea.addEventListener('scroll', function () {
-        var threshold = 80;
-        var atBottom = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < threshold;
-        userScrolledUp = !atBottom;
-    });
+    var queuePollTimer = null;
+    var queueCount = 0;
 
-    function scrollToBottom() {
-        if (!userScrolledUp) {
-            chatArea.scrollTop = chatArea.scrollHeight;
+    function setBusy(v) {
+        busy = v;
+        // Deliberately NOT disabling sendBtn while busy: chat-ui-with-audit-trail queues a prompt
+        // sent while ChatSession is busy (PromptQueue, server-side) rather than rejecting it, so a
+        // human should be able to type a follow-up and have it wait its turn. Disabling the button
+        // here would silently block that — sendPrompt()'s own guard only checks for empty text.
+        // Cancel is the one control that follows busy: there is nothing to cancel when idle, and
+        // the markup ships it disabled.
+        if (cancelBtn) cancelBtn.disabled = !v;
+        if (activityLabel) activityLabel.textContent = v ? "thinking…" : "";
+        // Poll while busy: a single check right after sending can land in the brief window before
+        // a second prompt has actually been queued server-side, showing "empty" even though the
+        // queue fills moments later — confirmed by direct testing (curl showed size:1 mid-turn while
+        // a single post-send browser check had already moved on).
+        if (v && !queuePollTimer) {
+            refreshQueue();   // setInterval's first tick is 2s away; check right now too
+            queuePollTimer = setInterval(refreshQueue, 2000);
+        } else if (!v && queuePollTimer) {
+            clearInterval(queuePollTimer);
+            queuePollTimer = null;
+            refreshQueue();
         }
     }
 
-    function forceScrollToBottom() {
-        userScrolledUp = false;
-        chatArea.scrollTop = chatArea.scrollHeight;
-    }
-
-    // --- Chat area memory limit ---
-    var MAX_CHAT_LINES = 5000;
-
-    function trimChatArea() {
-        if (chatArea.children.length < 3) return;
-        var totalLines = chatArea.innerText.split('\n').length;
-        while (totalLines > MAX_CHAT_LINES && chatArea.children.length > 1) {
-            var oldest = chatArea.children[0];
-            var oldestLines = (oldest.innerText || '').split('\n').length;
-            chatArea.removeChild(oldest);
-            totalLines -= oldestLines;
+    function notify(text, isError) {
+        if (!notificationBar) return;
+        notificationBar.textContent = text;
+        notificationBar.className = isError ? "error" : "";
+        if (text) {
+            setTimeout(function () {
+                if (notificationBar.textContent === text) notificationBar.textContent = "";
+            }, 5000);
         }
     }
 
-    // --- Queue management (position-based) ---
+    // ── Theme (chat-ui3-style: [data-theme] on <html>, persisted per-browser) ──
 
-    function addToQueue(text, images) {
-        queue.push({ text: text, images: images || [], auto: true });
-        trimQueue();
-        renderQueue();
-        saveQueue();
-    }
+    var THEME_KEY = "chat-ui-theme";
 
-    function trimQueue() {
-        while (queue.length > MAX_QUEUE_SIZE) {
-            queue.shift();
-            if (queuePos > 0) queuePos--;
-        }
-    }
-
-    function removeFromQueue(index) {
-        queue.splice(index, 1);
-        if (index < queuePos) {
-            queuePos--;
-        } else if (index === queuePos && queuePos >= queue.length) {
-            // pos was pointing at removed item which was last
-        }
-        renderQueue();
-        saveQueue();
-    }
-
-    function toggleAutoInQueue(index) {
-        if (index >= 0 && index < queue.length) {
-            queue[index].auto = !queue[index].auto;
-            renderQueue();
-            saveQueue();
-        }
-    }
-
-    function moveInQueue(index, direction) {
-        var target = index + direction;
-        if (index < queuePos || target < queuePos || target >= queue.length) return;
-        var tmp = queue[index];
-        queue[index] = queue[target];
-        queue[target] = tmp;
-        renderQueue();
-        saveQueue();
-    }
-
-    function hasPending() {
-        return queuePos < queue.length;
-    }
-
-    function renderQueue() {
-        if (queue.length === 0) {
-            queueArea.innerHTML = '<div class="queue-header"><span>Queue is empty</span></div>';
-            return;
-        }
-
-        var pending = queue.length - queuePos;
-        var headerText = 'Queue (' + queue.length + ')';
-        if (pending > 0) {
-            headerText += ' - ' + pending + ' pending';
-        }
-        headerText += ':';
-
-        var html = '<div class="queue-header">'
-            + '<span>' + escapeHtml(headerText) + '</span>'
-            + '<button class="queue-save-btn" id="queue-save-btn" title="Save as Markdown">Save</button>'
-            + '</div>';
-
-        for (var i = 0; i < queue.length; i++) {
-            var item = queue[i];
-            var displayText = item.text;
-            var sent = (i < queuePos);
-            var isCurrent = (i === queuePos);
-            var isWaiting = (isCurrent && !busy && !item.auto);
-
-            var cls = 'queue-item';
-            if (sent) cls += ' sent';
-            if (isCurrent) cls += ' current';
-            if (isWaiting) cls += ' waiting';
-
-            var checked = item.auto ? ' checked' : '';
-
-            html += '<div class="' + cls + '" data-index="' + i + '">'
-                + '<span class="queue-index">' + (i + 1) + '.</span>'
-                + '<span class="queue-text" title="' + escapeAttr(item.text) + '">'
-                + escapeHtml(displayText) + '</span>';
-
-            if (!sent) {
-                html += '<label class="queue-auto">'
-                    + '<input type="checkbox"' + checked + ' data-queue-auto="' + i + '"> Auto</label>';
-                var canUp = (i > queuePos);
-                var canDown = (i < queue.length - 1);
-                html += '<button class="queue-move" data-queue-up="' + i + '"'
-                    + (canUp ? '' : ' disabled') + ' title="Move up">&uarr;</button>';
-                html += '<button class="queue-move" data-queue-down="' + i + '"'
-                    + (canDown ? '' : ' disabled') + ' title="Move down">&darr;</button>';
-            }
-
-            html += '<button class="queue-edit" data-queue-edit="' + i + '" title="Edit (copy to input)">📝</button>';
-            html += '<button class="queue-remove" data-queue-remove="' + i + '" title="Remove">&times;</button>'
-                + '</div>';
-        }
-
-        queueArea.innerHTML = html;
-        queueArea.scrollTop = queueArea.scrollHeight;
-    }
-
-    // Delegate click events on queue area
-    queueArea.addEventListener('click', function (e) {
-        var editBtn = e.target.closest('[data-queue-edit]');
-        if (editBtn) {
-            var idx = parseInt(editBtn.getAttribute('data-queue-edit'), 10);
-            var item = queue[idx];
-            if (item) {
-                promptInput.value = item.text;
-                autoResize();
-                promptInput.focus();
-            }
-            return;
-        }
-
-        var removeBtn = e.target.closest('[data-queue-remove]');
-        if (removeBtn) {
-            var idx = parseInt(removeBtn.getAttribute('data-queue-remove'), 10);
-            removeFromQueue(idx);
-            return;
-        }
-
-        var upBtn = e.target.closest('[data-queue-up]');
-        if (upBtn) {
-            var idx = parseInt(upBtn.getAttribute('data-queue-up'), 10);
-            moveInQueue(idx, -1);
-            return;
-        }
-
-        var downBtn = e.target.closest('[data-queue-down]');
-        if (downBtn) {
-            var idx = parseInt(downBtn.getAttribute('data-queue-down'), 10);
-            moveInQueue(idx, 1);
-            return;
-        }
-
-        if (e.target.id === 'queue-save-btn' || e.target.closest('#queue-save-btn')) {
-            saveQueueAsMarkdown();
-            return;
-        }
-    });
-
-    queueArea.addEventListener('change', function (e) {
-        if (e.target.hasAttribute('data-queue-auto')) {
-            var idx = parseInt(e.target.getAttribute('data-queue-auto'), 10);
-            toggleAutoInQueue(idx);
-        }
-    });
-
-    // --- Input textarea resize handle ---
-    var INPUT_HEIGHT_KEY = 'chat-ui-input-height' + SESSION_SUFFIX;
-    var savedInputHeight = localStorage.getItem(INPUT_HEIGHT_KEY);
-    // Once the human drags the handle, autoResize() (fired on every keystroke) must treat that
-    // height as a floor, not recompute from content and shrink straight back past it — before
-    // this, a drag to e.g. 400px was undone by the very next character typed, since autoResize()
-    // capped at 200px unconditionally.
-    var manualInputHeight = savedInputHeight ? parseInt(savedInputHeight, 10) : null;
-    if (savedInputHeight) {
-        promptInput.style.height = savedInputHeight + 'px';
-    } else {
-        // Default: match rows="5" (line-height:1.5 * 14px * 5 + 2*10px padding)
-        promptInput.style.height = '125px';
-    }
-
-    (function () {
-        var dragging = false;
-        var startY = 0;
-        var startHeight = 0;
-
-        inputResizeHandle.addEventListener('mousedown', function (e) {
-            e.preventDefault();
-            dragging = true;
-            startY = e.clientY;
-            startHeight = promptInput.offsetHeight;
-            inputResizeHandle.classList.add('dragging');
-            document.body.style.cursor = 'ns-resize';
-            document.body.style.userSelect = 'none';
+    function initTheme() {
+        if (!themeSelect) return;
+        var saved = localStorage.getItem(THEME_KEY) || "dark-catppuccin";
+        document.documentElement.setAttribute("data-theme", saved);
+        themeSelect.value = saved;
+        themeSelect.addEventListener("change", function () {
+            var theme = themeSelect.value;
+            document.documentElement.setAttribute("data-theme", theme);
+            localStorage.setItem(THEME_KEY, theme);
         });
-
-        document.addEventListener('mousemove', function (e) {
-            if (!dragging) return;
-            var delta = startY - e.clientY;
-            var newHeight = Math.max(42, Math.min(startHeight + delta, 500));
-            promptInput.style.height = newHeight + 'px';
-        });
-
-        document.addEventListener('mouseup', function () {
-            if (!dragging) return;
-            dragging = false;
-            inputResizeHandle.classList.remove('dragging');
-            document.body.style.cursor = '';
-            document.body.style.userSelect = '';
-            manualInputHeight = promptInput.offsetHeight;
-            localStorage.setItem(INPUT_HEIGHT_KEY, manualInputHeight);
-        });
-    })();
-
-    // --- Queue resize handle ---
-    var QUEUE_HEIGHT_KEY = 'chat-ui-queue-height' + SESSION_SUFFIX;
-    var savedQueueHeight = localStorage.getItem(QUEUE_HEIGHT_KEY);
-    if (savedQueueHeight) {
-        queueArea.style.height = savedQueueHeight + 'px';
-    } else {
-        queueArea.style.height = '130px';
     }
 
-    (function () {
-        var dragging = false;
-        var startY = 0;
-        var startHeight = 0;
+    // ── Queue status (server-side: chat-ui-with-audit-trail queues on the server whenever
+    // ChatSession is busy, unlike chat-ui3's client-side-only draft queue) ─────
 
-        queueResizeHandle.addEventListener('mousedown', function (e) {
+    // Edit/remove/reorder/auto apply to every queued item regardless of who queued it (human or
+    // MCP agent) — QueueContentsEditing_260826_oo01. Index-addressed: a concurrent submitter
+    // (agent/workflow) could shift indices between fetch and action, same simplification
+    // quarkus-chat-ui3's own single-browser queue effectively has too.
+    // What the queue looked like the last time it was drawn. While ChatSession is busy this runs
+    // every 2s, and rebuilding the rows each time took the queue away from whoever was using it:
+    // the button being aimed at was replaced mid-click and the scroll position jumped to the
+    // bottom. The contents rarely change during a turn, so compare first and draw only on a
+    // change. quarkus-chat-ui has no such symptom because its queue never leaves the browser.
+    var queueDrawn = null;
+
+    function refreshQueue() {
+        if (!queueArea) return;
+        fetch(apiUrl(chatUrl("/queue")))
+            .then(function (r) { return r.json(); })
+            .then(function (q) {
+                var sent = (q && q.sent) || [];
+                var pending = (q && q.items) || [];
+                var total = sent.length + pending.length;
+
+                // Everything the drawing below depends on, and nothing else.
+                var shape = JSON.stringify([
+                    sent.map(function (it) { return it.prompt; }),
+                    pending.map(function (it) { return [it.prompt, it.auto]; }),
+                    queueArea.dataset.forcedOpen || "0",
+                    busy   // the first pending row is marked "waiting" only while idle
+                ]);
+                if (shape === queueDrawn) return;
+                var grew = queueDrawn !== null && total > queueCount;
+                var keepScroll = queueArea.scrollTop;
+                queueDrawn = shape;
+                queueCount = total;
+
+                queueArea.textContent = "";
+                var header = document.createElement("div");
+                header.className = "queue-header";
+                var headerText = document.createElement("span");
+                // quarkus-chat-ui's position-based checklist (QueueChecklistView_260913_oo01): the
+                // sent items stay listed before the pending ones, and the header counts both.
+                headerText.textContent = total === 0 ? "Queue is empty"
+                        : pending.length > 0 ? "Queue (" + total + ") - " + pending.length + " pending:"
+                        : "Queue (" + total + "):";
+                header.appendChild(headerText);
+                if (total > 0) {
+                    var saveBtn = document.createElement("button");
+                    saveBtn.className = "queue-save-btn";
+                    saveBtn.title = "Save as Markdown";
+                    saveBtn.textContent = "Save";
+                    saveBtn.addEventListener("click", function () { saveQueueAsMarkdown(sent, pending); });
+                    header.appendChild(saveBtn);
+                }
+                queueArea.appendChild(header);
+
+                sent.forEach(function (item, i) {
+                    var row = document.createElement("div");
+                    row.className = "queue-item sent";
+                    row.appendChild(queueIndex(i + 1));
+                    row.appendChild(queueText(item));
+                    row.appendChild(queueEditButton(item));
+                    var removeBtn = queueRemoveButton();
+                    removeBtn.addEventListener("click", function () {
+                        fetch(apiUrl(chatUrl("/queue/sent/" + i)), { method: "DELETE" }).then(refreshQueue);
+                    });
+                    row.appendChild(removeBtn);
+                    queueArea.appendChild(row);
+                });
+
+                pending.forEach(function (item, i) {
+                    var row = document.createElement("div");
+                    // "current" is the item that goes next; "waiting" is that item held back
+                    // because its Auto is off and nothing is running to hand it over.
+                    var cls = "queue-item";
+                    if (i === 0) cls += " current";
+                    if (i === 0 && !busy && !item.auto) cls += " waiting";
+                    // An urgent item went in ahead of the waiting items that are not urgent: a request sent
+                    // with ask_chat_urgent, its reply, or a message that resumes a paused turn
+                    // (UrgentRequestAndStatusReport_261107_oo01, TimekeeperPausesATurnForAnUrgentRequest_261107_oo01).
+                    if (item.urgent) cls += " urgent";
+                    row.className = cls;
+                    row.appendChild(queueIndex(sent.length + i + 1));
+                    if (item.urgent) {
+                        var urgentMark = document.createElement("span");
+                        urgentMark.className = "queue-urgent";
+                        urgentMark.textContent = "Urgent";
+                        urgentMark.title = "A request sent with ask_chat_urgent, its reply, or a message that resumes a paused turn: goes ahead of the waiting items that are not urgent";
+                        row.appendChild(urgentMark);
+                    }
+                    row.appendChild(queueText(item));
+
+                    var autoLabel = document.createElement("label");
+                    autoLabel.className = "queue-auto";
+                    var autoCheckbox = document.createElement("input");
+                    autoCheckbox.type = "checkbox";
+                    autoCheckbox.checked = !!item.auto;
+                    autoCheckbox.addEventListener("change", function () {
+                        fetch(apiUrl(chatUrl("/queue/" + i + "/auto")), {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ auto: autoCheckbox.checked })
+                        }).then(refreshQueue);
+                    });
+                    autoLabel.appendChild(autoCheckbox);
+                    autoLabel.appendChild(document.createTextNode(" Auto"));
+                    row.appendChild(autoLabel);
+
+                    // Jumps this prompt over all the others to the front, so it is the next one sent.
+                    var topBtn = document.createElement("button");
+                    topBtn.className = "queue-move queue-move-top";
+                    topBtn.title = "Move to the front (send next)";
+                    topBtn.innerHTML = "&#8657;";
+                    topBtn.disabled = (i === 0);
+                    topBtn.addEventListener("click", function () { moveQueueItem(i, "top"); });
+                    row.appendChild(topBtn);
+
+                    var upBtn = document.createElement("button");
+                    upBtn.className = "queue-move";
+                    upBtn.title = "Move up";
+                    upBtn.innerHTML = "&uarr;";
+                    upBtn.disabled = (i === 0);
+                    upBtn.addEventListener("click", function () { moveQueueItem(i, "up"); });
+                    row.appendChild(upBtn);
+
+                    var downBtn = document.createElement("button");
+                    downBtn.className = "queue-move";
+                    downBtn.title = "Move down";
+                    downBtn.innerHTML = "&darr;";
+                    downBtn.disabled = (i === pending.length - 1);
+                    downBtn.addEventListener("click", function () { moveQueueItem(i, "down"); });
+                    row.appendChild(downBtn);
+
+                    row.appendChild(queueEditButton(item));
+                    var removeBtn = queueRemoveButton();
+                    removeBtn.addEventListener("click", function () {
+                        fetch(apiUrl(chatUrl("/queue/" + i)), { method: "DELETE" }).then(refreshQueue);
+                    });
+                    row.appendChild(removeBtn);
+
+                    queueArea.appendChild(row);
+                });
+                var visible = (total > 0 || queueArea.dataset.forcedOpen === "1");
+                queueArea.style.display = visible ? "block" : "none";
+                if (queueResizeHandle) queueResizeHandle.style.display = visible ? "block" : "none";
+                // Only follow the end when something was added; otherwise stay where the reader was.
+                queueArea.scrollTop = grew ? queueArea.scrollHeight : keepScroll;
+            })
+            .catch(function () { /* leave the last known state on failure */ });
+    }
+
+    function queueIndex(n) {
+        var index = document.createElement("span");
+        index.className = "queue-index";
+        index.textContent = n + ".";
+        return index;
+    }
+
+    function queueText(item) {
+        var text = document.createElement("span");
+        text.className = "queue-text";
+        text.textContent = item.prompt;
+        // The row shows at most three lines; the hover text is the whole prompt.
+        text.title = (item.source && item.source !== "human")
+                ? "source: " + item.source + "\n\n" + item.prompt
+                : item.prompt;
+        return text;
+    }
+
+    function queueEditButton(item) {
+        var editBtn = document.createElement("button");
+        editBtn.className = "queue-edit";
+        editBtn.title = "Edit (copy to input)";
+        editBtn.textContent = "📝";
+        editBtn.addEventListener("click", function () {
+            promptInput.value = item.prompt;
+            promptInput.focus();
+        });
+        return editBtn;
+    }
+
+    function queueRemoveButton() {
+        var removeBtn = document.createElement("button");
+        removeBtn.className = "queue-remove";
+        removeBtn.title = "Remove";
+        removeBtn.innerHTML = "&times;";
+        return removeBtn;
+    }
+
+    // Downloads the queue as a Markdown checklist, the same shape quarkus-chat-ui writes: sent
+    // items checked, pending ones not.
+    function saveQueueAsMarkdown(sent, pending) {
+        if ((sent.length + pending.length) === 0) return;
+        var lines = ["# Prompt Queue", ""];
+        sent.forEach(function (item, i) { lines.push((i + 1) + ". [x] " + item.prompt); });
+        pending.forEach(function (item, i) { lines.push((sent.length + i + 1) + ". [ ] " + item.prompt); });
+        lines.push("");
+        var url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/markdown" }));
+        var a = document.createElement("a");
+        a.href = url;
+        var now = new Date();
+        var stamp = now.getFullYear()
+                + String(now.getMonth() + 1).padStart(2, "0")
+                + String(now.getDate()).padStart(2, "0")
+                + "-" + String(now.getHours()).padStart(2, "0")
+                + String(now.getMinutes()).padStart(2, "0");
+        a.download = "prompt-queue-" + stamp + ".md";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    // The handle above the queue area changes its height, within the same bounds quarkus-chat-ui
+    // uses; the height is kept across reloads.
+    var QUEUE_HEIGHT_KEY = "chat-ui-queue-height";
+    function initQueueResize() {
+        if (!queueArea || !queueResizeHandle) return;
+        var saved = parseInt(localStorage.getItem(QUEUE_HEIGHT_KEY), 10);
+        if (saved >= 60 && saved <= 400) queueArea.style.height = saved + "px";
+        var dragging = false, startY = 0, startHeight = 0;
+        queueResizeHandle.addEventListener("mousedown", function (e) {
             e.preventDefault();
             dragging = true;
             startY = e.clientY;
             startHeight = queueArea.offsetHeight;
-            queueResizeHandle.classList.add('dragging');
-            document.body.style.cursor = 'ns-resize';
-            document.body.style.userSelect = 'none';
+            queueResizeHandle.classList.add("dragging");
+            document.body.style.cursor = "ns-resize";
+            document.body.style.userSelect = "none";
         });
-
-        document.addEventListener('mousemove', function (e) {
+        document.addEventListener("mousemove", function (e) {
             if (!dragging) return;
-            var delta = startY - e.clientY;
-            var newHeight = Math.max(60, Math.min(startHeight + delta, 400));
-            queueArea.style.height = newHeight + 'px';
+            var newHeight = Math.max(60, Math.min(startHeight + (startY - e.clientY), 400));
+            queueArea.style.height = newHeight + "px";
         });
-
-        document.addEventListener('mouseup', function () {
+        document.addEventListener("mouseup", function () {
             if (!dragging) return;
             dragging = false;
-            queueResizeHandle.classList.remove('dragging');
-            document.body.style.cursor = '';
-            document.body.style.userSelect = '';
+            queueResizeHandle.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
             localStorage.setItem(QUEUE_HEIGHT_KEY, queueArea.offsetHeight);
         });
-    })();
+    }
 
-    function saveQueueAsMarkdown() {
-        if (queue.length === 0) return;
+    // Puts the text in the queue without sending it. The item sits there with its Auto off until
+    // a human turns it on or advances the queue.
+    function queuePrompt(text) {
+        var payload = { text: text, hold: true, images: takePendingImages(), source: "screen" };
+        fetch(apiUrl(chatUrl("/chat")), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).then(function (r) { return r.json(); })
+          .then(function (result) {
+              if (result && result.type === "error") { notify(result.message || "queue failed"); return; }
+              promptInput.value = "";
+              if (queueArea) queueArea.dataset.forcedOpen = "1";
+              refreshQueue();
+          })
+          .catch(function (e) { notify("queue failed: " + e.message); });
+    }
 
-        var lines = ['# Prompt Queue', ''];
-        for (var i = 0; i < queue.length; i++) {
-            var item = queue[i];
-            var marker = (i < queuePos) ? '[x]' : '[ ]';
-            lines.push((i + 1) + '. ' + marker + ' ' + item.text);
+    function moveQueueItem(index, direction) {
+        fetch(apiUrl(chatUrl("/queue/" + index + "/move")), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ direction: direction })
+        }).then(refreshQueue);
+    }
+
+    // ── SSE ──────────────────────────────────────────────────────────────────
+
+    function connectSSE() {
+        if (eventSource) eventSource.close();
+        eventSource = new EventSource(apiUrl(chatUrl("/chat/stream")));
+        eventSource.onopen = function () {
+            if (connStatus) { connStatus.textContent = "connected"; connStatus.className = "connected"; }
+        };
+        eventSource.onerror = function () {
+            if (connStatus) { connStatus.textContent = "disconnected"; connStatus.className = "disconnected"; }
+        };
+        eventSource.onmessage = function (ev) {
+            try { handleEvent(JSON.parse(ev.data)); } catch (e) { /* ignore non-JSON keepalive */ }
+        };
+    }
+
+    // How much of a step's reasoning the pane keeps on screen. The whole of it is written to the
+    // I/O log's REASONING: section and read in the Sessions tab, so this bounds a live view, not
+    // the record. Without a bound the pane held the only copy, and a thinking model that reasons
+    // for ten thousand tokens grew one text node to that size while rewriting it once per token.
+    var THINKING_TAIL_CHARS = 2000;
+    var thinkingText = "";
+    var thinkingFrame = null;
+
+    // Writes the tail at most once per animation frame. The reasoning arrives one token per SSE
+    // event; writing textContent and reading scrollHeight on each one forced a synchronous layout
+    // per token, which is what froze the tab.
+    function appendThinking(chunk) {
+        if (!thinkingEl) {
+            thinkingEl = document.createElement("div");
+            thinkingEl.className = "message thinking";
+            placeBubble(thinkingEl);
+            thinkingText = "";
         }
-        lines.push('');
-
-        var blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        var now = new Date();
-        var ts = now.getFullYear()
-            + String(now.getMonth() + 1).padStart(2, '0')
-            + String(now.getDate()).padStart(2, '0')
-            + '-' + String(now.getHours()).padStart(2, '0')
-            + String(now.getMinutes()).padStart(2, '0');
-        a.download = 'prompt-queue-' + ts + '.md';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-    }
-
-    function saveChatAsMarkdown() {
-        if (chatHistory.length === 0) return;
-
-        var now = new Date();
-        var dateStr = now.getFullYear() + '-'
-            + String(now.getMonth() + 1).padStart(2, '0') + '-'
-            + String(now.getDate()).padStart(2, '0') + ' '
-            + String(now.getHours()).padStart(2, '0') + ':'
-            + String(now.getMinutes()).padStart(2, '0');
-
-        var lines = ['# Conversation - ' + dateStr, ''];
-
-        for (var i = 0; i < chatHistory.length; i++) {
-            var entry = chatHistory[i];
-            if (entry.role === 'user') {
-                lines.push('## User', '', entry.text, '');
-            } else if (entry.role === 'assistant') {
-                lines.push('## Assistant', '', entry.text, '');
-            } else if (entry.role === 'info') {
-                lines.push('> [info] ' + entry.text, '');
-            } else if (entry.role === 'error') {
-                lines.push('> [error] ' + entry.text, '');
-            } else if (entry.role === 'prompt') {
-                lines.push('> [prompt] ' + entry.text, '');
-            }
+        thinkingText += chunk;
+        if (thinkingText.length > THINKING_TAIL_CHARS) {
+            thinkingText = thinkingText.slice(-THINKING_TAIL_CHARS);
         }
-
-        var blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        var ts = now.getFullYear()
-            + String(now.getMonth() + 1).padStart(2, '0')
-            + String(now.getDate()).padStart(2, '0')
-            + String(now.getHours()).padStart(2, '0')
-            + String(now.getMinutes()).padStart(2, '0');
-        a.download = 'conversation-' + ts + '.md';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        if (thinkingFrame !== null) return;
+        thinkingFrame = requestAnimationFrame(function () {
+            thinkingFrame = null;
+            if (!thinkingEl) return;
+            thinkingEl.textContent = thinkingText;
+            scrollToBottom();
+        });
     }
 
-    function escapeHtml(str) {
-        var div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
+    // A step's text is shown as a provisional answer while it streams (answer_delta). It is taken
+    // back if the step turns out to call a tool (answer_retract), and replaced by the confirmed
+    // text when the turn's "delta" arrives. Redrawn at most every ANSWER_REDRAW_MS: marked parses
+    // the whole text each time, and tokens arrive faster than that is worth doing.
+    var ANSWER_REDRAW_MS = 80;
+
+    function redrawAnswer() {
+        answerTimer = null;
+        if (!answerEl) return;
+        answerEl.innerHTML = renderMarkdown(answerText);
+        decorateCodeBlocks(answerEl);
+        scrollToBottom();
     }
 
-    function escapeAttr(str) {
-        return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
-                  .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    function showAnswer(text, replace) {
+        answerText = replace ? text : answerText + text;
+        if (!answerEl) answerEl = appendMarkdownMessage("assistant", "");
+        if (answerTimer === null) answerTimer = setTimeout(redrawAnswer, ANSWER_REDRAW_MS);
     }
 
-    function processQueue() {
-        if (pendingPrompt) return;
-        if (!hasPending()) return;
+    // Removes the provisional answer bubble and returns the text it held.
+    function dropAnswer() {
+        if (answerTimer !== null) { clearTimeout(answerTimer); answerTimer = null; }
+        var text = answerText;
+        if (answerEl) answerEl.remove();
+        answerEl = null;
+        answerText = "";
+        return text;
+    }
 
-        if (queue[queuePos].auto) {
-            sendFromQueue();
-        } else {
-            renderQueue();
+    function clearThinking() {
+        if (thinkingFrame !== null) { cancelAnimationFrame(thinkingFrame); thinkingFrame = null; }
+        if (thinkingEl) thinkingEl.remove();
+        thinkingEl = null;
+        thinkingText = "";
+    }
+
+    function handleEvent(event) {
+        switch (event.type) {
+            case "status":
+                setBusy(!!event.busy);
+                if (!event.busy) dropAnswer();   // a cancelled turn ends here with no delta or result
+                refreshQueue();
+                // The turn reports which model is running it. Following it keeps the dropdown
+                // honest when the model was settled on elsewhere — a REST caller or an MCP agent
+                // naming one, or the provider picking the first it was offered.
+                if (event.model && modelSelect) {
+                    var offered = Array.prototype.some.call(modelSelect.options, function (o) {
+                        return o.value === event.model;
+                    });
+                    if (offered) modelSelect.value = event.model;
+                }
+                break;
+            case "thinking":
+                appendThinking(event.content || "");
+                break;
+            case "delta":
+                // ChatSession's agent loop sends this exactly once per turn, from finish(), with the
+                // whole confirmed-final answer text (never incremental tokens on this channel — those
+                // stream as "thinking" instead, since an intermediate step might still be a tool call).
+                clearThinking();
+                streamingMarkdown = event.content || "";
+                if (answerEl) {
+                    // The provisional bubble becomes the answer, with the confirmed text.
+                    if (answerTimer !== null) { clearTimeout(answerTimer); answerTimer = null; }
+                    streamingEl = answerEl;
+                    answerEl = null;
+                    answerText = "";
+                    streamingEl.innerHTML = renderMarkdown(streamingMarkdown);
+                    decorateCodeBlocks(streamingEl);
+                } else {
+                    streamingEl = appendMarkdownMessage("assistant", streamingMarkdown);
+                }
+                markAnswer(streamingEl);
+                scrollToBottom();
+                break;
+            case "queue":
+                // A prompt entered the queue, from this pane, the REST endpoint or another
+                // conversation. The polling in setBusy() is only the fallback for a missed event.
+                refreshQueue();
+                break;
+            case "answer_delta":
+                showAnswer(event.content || "", false);
+                break;
+            case "answer_snapshot":
+                // Sent when the stream is opened mid-step: replaces rather than appends, as
+                // thinking_snapshot does.
+                showAnswer(event.content || "", true);
+                break;
+            case "answer_retract":
+                // The step turned out to call a tool: what was shown as the answer was the start
+                // of the call's trace, not the answer.
+                var retracted = dropAnswer();
+                if (retracted) appendThinking(retracted);
+                break;
+            case "result":
+                // The answer's bubble was added by the delta event above; this event is what
+                // carries the duration, session and model that go under it.
+                if (streamingEl) appendAnswerFooter(streamingEl, streamingMarkdown, event);
+                streamingEl = null;
+                streamingMarkdown = "";
+                dropAnswer();   // a turn that ended without an answer leaves no provisional bubble
+                clearThinking();
+                setBusy(false);
+                scrollToBottom();
+                break;
+            case "error":
+                appendMessage("error", "Error: " + (event.content || "unknown error"));
+                streamingEl = null;
+                dropAnswer();
+                clearThinking();
+                setBusy(false);
+                break;
+            case "user":
+                lastUserDiv = appendMessage("user", event.content || "", event.images, event.origin);
+                scrollToBottom();
+                refreshQueue(); // the item just moved from pending to sent (QueueChecklistView_260913_oo01)
+                break;
+            case "turn":
+                // The turn the prompt just drawn has started: its id, and the ask_chat request the
+                // prompt is or answers, go under it (TurnAndRequestIds_261107_oo01).
+                if (lastUserDiv) {
+                    var userFooter = lastUserDiv.querySelector(".message-footer") || newFooter(lastUserDiv);
+                    appendIds(userFooter, event.turnId, event.requestId);
+                    lastUserDiv = null;
+                }
+                break;
+            case "mcp_user":
+                // Kept for an emitter that still sends this kind; a prompt from elsewhere now
+                // arrives as a "user" event carrying its origin.
+                appendMessage("user", event.content || "", null, event.origin || "api");
+                scrollToBottom();
+                refreshQueue();
+                break;
+            case "info":
+                // In the pane, not only in the notification bar: a slash command's answer is what
+                // the person asked for, and /help is seven lines that a bar which fades cannot
+                // hold (SlashCommandsAndClearButton_260929_oo01). quarkus-chat-ui renders info the
+                // same way.
+                appendMessage("info", event.content || "");
+                break;
+            case "thinking_snapshot":
+                // Sent when the stream is opened mid-turn (switching back to this conversation, or a
+                // reconnect): the whole of the turn's activity so far. It replaces rather than
+                // appends, so a reconnect that did not clear the pane does not show it twice.
+                clearThinking();
+                appendThinking(event.content || "");
+                break;
+            case "heartbeat":
+                break;
+            default:
+                // log / prompt / mcp_user etc. — not rendered in this first cut.
+                break;
         }
     }
 
-    function sendFromQueue() {
-        if (!hasPending()) return;
-        var item = queue[queuePos];
-        queuePos++;
-        renderQueue();
-        saveQueue();
-        executePrompt(item.text, item.images || []);
-    }
-
-    // --- Send prompt ---
+    // ── Sending ──────────────────────────────────────────────────────────────
 
     function sendPrompt() {
         var text = promptInput.value.trim();
-
         if (!text) {
-            if (!busy && hasPending() && !queue[queuePos].auto) {
-                sendFromQueue();
-            }
+            // Empty send = "send the next one" (quarkus-chat-ui3's own semantics): force-dispatch
+            // the queue's front item, ignoring its auto flag. No-ops server-side if empty.
+            fetch(apiUrl(chatUrl("/queue/advance")), { method: "POST" }).then(refreshQueue);
             return;
         }
-
-        promptInput.value = '';
-        autoResize();
-        var images = takePendingImages();
-
-        // /btw: side question — runs independently, never queued, works while busy
-        if (text.toLowerCase().startsWith('/btw ')) {
-            var btwQuestion = text.slice(5).trim();
-            if (btwQuestion) executeBtw(btwQuestion);
-            return;
-        }
-
-        // Slash commands. chat-ui's own UI commands (/model, /clear, /session, /help)
-        // are handled locally via /api/command. Everything else starting with "/" —
-        // a chat-ui skill, or a backend-native command like /compact, /context — is
-        // sent to the backend so Claude Code (or Codex) dispatches it.
-        if (text.startsWith('/')) {
-            hideSkillSuggest();
-            var spaceIdx = text.indexOf(' ');
-            var cmdName = spaceIdx > 0 ? text.slice(1, spaceIdx) : text.slice(1);
-            var cmdArgs = spaceIdx > 0 ? text.slice(spaceIdx + 1).trim() : '';
-            var CHATUI_LOCAL = ['model', 'clear', 'session', 'help', '?'];
-            if (CHATUI_LOCAL.indexOf(cmdName.toLowerCase()) >= 0) {
-                executeSlashCommand(text);
-            } else {
-                executeSkillCommand(cmdName, cmdArgs, text);
-            }
-            return;
-        }
-
-        // Always add to queue, then send if not busy
-        addToQueue(text, images);
-        if (!busy) {
-            processQueue();
-        } else {
-            renderQueue();
-            showQueue();
-        }
-    }
-
-    async function executeSlashCommand(text) {
-        try {
-            var resp = await fetch(apiUrl('api/command'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: text })
-            });
-            var events = await resp.json();
-            events.forEach(handleEvent);
-        } catch (e) {
-            appendMessage('error', 'Command failed: ' + e.message);
-        }
-    }
-
-    // ── Skill command execution ───────────────────────────────────────────────
-
-    var skillsCache = null; // cached { skills: [{name, description}] }
-
-    function loadSkillsCache() {
-        if (skillsCache) return Promise.resolve(skillsCache);
-        return fetch('/api/extensions')
-            .then(function(r) { return r.json(); })
-            .then(function(d) { skillsCache = d; return skillsCache; });
-    }
-
-    /** Strip YAML frontmatter (--- ... ---) from markdown text. */
-    function stripFrontmatter(md) {
-        var lines = md.split('\n');
-        if (!lines.length || lines[0].trim() !== '---') return md;
-        for (var i = 1; i < lines.length; i++) {
-            if (lines[i].trim() === '---') {
-                return lines.slice(i + 1).join('\n').replace(/^\n+/, '');
-            }
-        }
-        return md;
-    }
-
-    /**
-     * Try to load cmdName as a skill. If found, inject content + args and queue
-     * as a regular prompt. If not found (404), fall back to REST slash command.
-     */
-    async function executeSkillCommand(cmdName, cmdArgs, originalText) {
-        try {
-            var resp = await fetch('/api/extensions/content?type=skills&name='
-                + encodeURIComponent(cmdName));
-            if (!resp.ok) {
-                // Not a skill — send the raw text as a normal prompt so the backend
-                // dispatches it. Claude's native slash commands (/compact, /context,
-                // /rewind, ...) run here, streaming their result over SSE.
-                addToQueue(originalText);
-                if (!busy) {
-                    processQueue();
-                } else {
-                    renderQueue();
-                    showQueue();
-                }
-                return;
-            }
-            var raw = await resp.text();
-            var skillBody = stripFrontmatter(raw);
-            // Combine: skill instructions + separator + user arguments
-            var combined = cmdArgs
-                ? skillBody + '\n\n---\n\n' + cmdArgs
-                : skillBody;
-            addToQueue(combined);
-            if (!busy) {
-                processQueue();
-            } else {
-                renderQueue();
-                showQueue();
-            }
-        } catch (e) {
-            appendMessage('error', 'Skill load failed: ' + e.message);
-        }
-    }
-
-    // ── Skill suggest popup ───────────────────────────────────────────────────
-
-    var skillSuggest     = document.getElementById('skill-suggest');
-    var skillSuggestList = [];   // currently shown skills
-    var skillSuggestIdx  = -1;   // keyboard selection index
-
-    function renderSkillSuggest(skills, typed) {
-        skillSuggestList = skills;
-        skillSuggestIdx  = -1;
-        skillSuggest.innerHTML = skills.map(function(s, i) {
-            // Bold-highlight the typed prefix
-            var hi = '/' + escapeHtml(typed)
-                   + '<em>' + escapeHtml(s.name.slice(typed.length)) + '</em>';
-            return '<div class="skill-suggest-item" data-idx="' + i + '">'
-                + '<span class="skill-suggest-name">' + hi + '</span>'
-                + '<span class="skill-suggest-desc">'
-                + escapeHtml(s.description || '') + '</span>'
-                + '</div>';
-        }).join('');
-        skillSuggest.style.display = 'block';
-    }
-
-    function hideSkillSuggest() {
-        skillSuggest.style.display = 'none';
-        skillSuggestList = [];
-        skillSuggestIdx  = -1;
-    }
-
-    function applySkillSuggest(idx) {
-        var item = skillSuggestList[idx];
-        if (!item) return;
-        promptInput.value = '/' + item.name + ' ';
-        promptInput.focus();
-        hideSkillSuggest();
-        autoResize();
-    }
-
-    function updateSkillSuggest() {
-        var val = promptInput.value;
-        // Only trigger when the whole input starts with /  and has no space yet
-        if (!val.startsWith('/') || val.startsWith('/btw')) {
-            hideSkillSuggest();
-            return;
-        }
-        if (val.indexOf(' ') >= 0) {
-            hideSkillSuggest(); // command already completed
-            return;
-        }
-        var typed = val.slice(1); // text after /
-        loadSkillsCache().then(function(cache) {
-            var matches = (cache.skills || []).filter(function(s) {
-                return s.name.toLowerCase().startsWith(typed.toLowerCase());
-            });
-            // Hide if no matches, or the only match is an exact hit (already complete)
-            if (!matches.length
-                || (matches.length === 1 && matches[0].name.toLowerCase() === typed.toLowerCase())) {
-                hideSkillSuggest();
-                return;
-            }
-            renderSkillSuggest(matches, typed);
-        }).catch(hideSkillSuggest);
-    }
-
-    skillSuggest.addEventListener('click', function(e) {
-        var item = e.target.closest('.skill-suggest-item');
-        if (!item) return;
-        applySkillSuggest(parseInt(item.dataset.idx, 10));
-    });
-
-    async function executePrompt(text, images) {
-        images = images || [];
-        // Display user message
-        appendMessage('user', text, images);
-        busy = true;
-        cancelBtn.disabled = false;
-
-        // Show immediate thinking indicator (before API responds)
-        currentAssistantMsg = document.createElement('div');
-        currentAssistantMsg.className = 'message assistant streaming';
-        currentAssistantMsg.innerHTML = '<span class="thinking-indicator">Waiting for response...</span>';
-        chatArea.appendChild(currentAssistantMsg);
+        // The prompt is NOT drawn here. The server echoes it when it dispatches it, so a prompt
+        // typed in this pane, one posted to the REST API, one from an MCP agent and one from
+        // another conversation's ask_chat all appear the same way and exactly once.
+        promptInput.value = "";
         forceScrollToBottom();
-        activityLabel.setAttribute('data-base', 'Waiting for response...');
-        activityLabel.textContent = 'Waiting for response...';
-        startThinkingTimer();
+        setBusy(true);
 
-        // Submit prompt via POST; events arrive through EventSource
-        try {
-            var response = await fetch(apiUrl('api/chat'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: text, model: modelSelect.value, noThink: !(document.getElementById('think-check') || {checked: true}).checked, images: images })
+        var payload = { text: text, images: takePendingImages(), source: "screen" };
+
+        fetch(apiUrl(chatUrl("/chat")), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).then(function (r) { return r.json(); })
+          .then(function (result) {
+              if (result && result.type === "error") {
+                  notify(result.message || "request rejected", true);
+                  setBusy(false);
+              } else {
+                  refreshQueue(); // may have landed in the server-side queue if already busy
+              }
+              // Otherwise: content arrives over SSE.
+          })
+          .catch(function (err) {
+              notify("send failed: " + err.message, true);
+              setBusy(false);
+          });
+    }
+
+    // ── Models ───────────────────────────────────────────────────────────────
+
+    // The model belongs to the conversation, not to the browser
+    // (ModelBelongsToTheConversation_260906_oo01). Choosing one here tells this conversation to run
+    // on it; nothing is remembered on this side, because one remembered value is exactly what
+    // cannot describe two conversations on two different models.
+    function initModelPersistence() {
+        if (!modelSelect) return;
+        modelSelect.addEventListener("change", function () {
+            var chosen = modelSelect.value;
+            if (!chosen) return;
+            var forChat = PROJECT_ID + "/" + CHAT_ID;
+            fetch(apiUrl(chatUrl("/model")), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ model: chosen })
+            }).then(function (r) { return r.json(); })
+              .then(function (result) {
+                  if (result && result.type === "error") {
+                      notify(result.message || "could not change the model", true);
+                      // Say what this conversation is actually on, rather than leave the name of a
+                      // model it is not running.
+                      if (forChat === PROJECT_ID + "/" + CHAT_ID) showCurrentModel();
+                  }
+              })
+              .catch(function (err) {
+                  notify("could not change the model: " + err.message, true);
+                  if (forChat === PROJECT_ID + "/" + CHAT_ID) showCurrentModel();
+              });
+        });
+    }
+
+    // The temperature belongs to the conversation as the model does
+    // (ConversationTemperature_260914_oo01). An empty box asks the server for nothing, which is
+    // what every conversation did before this setting existed.
+    function initTemperature() {
+        var box = el("temperature-input");
+        if (!box) return;
+        box.addEventListener("change", function () {
+            var forChat = PROJECT_ID + "/" + CHAT_ID;
+            var typed = box.value.trim();
+            fetch(apiUrl(chatUrl("/temperature")), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ temperature: typed === "" ? null : typed })
+            }).then(function (r) { return r.json(); })
+              .then(function (result) {
+                  if (result && result.type === "error") {
+                      notify(result.message || "could not change the temperature", true);
+                      if (forChat === PROJECT_ID + "/" + CHAT_ID) showCurrentModel();
+                  }
+              })
+              .catch(function (err) {
+                  notify("could not change the temperature: " + err.message, true);
+                  if (forChat === PROJECT_ID + "/" + CHAT_ID) showCurrentModel();
+              });
+        });
+    }
+
+    // Thinking and effort belong to the conversation as the model does
+    // (ThinkingAndEffortAreConversationSettings_260917_oo01). A workflow's ask_chat carries a prompt
+    // and nothing else, so a run that wants an answer without reasoning says it here, once.
+    function initThinkAndEffort() {
+        var think = el("think-check");
+        if (think) {
+            think.addEventListener("change", function () {
+                fetch(apiUrl(chatUrl("/no-think")), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ noThink: !think.checked })
+                }).catch(function (err) {
+                    notify("could not change thinking: " + err.message, true);
+                });
             });
-            if (!response.ok) {
-                stopThinkingTimer();
-                if (currentAssistantMsg && !currentAssistantText) {
-                    currentAssistantMsg.remove();
-                    currentAssistantMsg = null;
+        }
+        var effort = el("effort-input");
+        if (effort) {
+            effort.addEventListener("change", function () {
+                fetch(apiUrl(chatUrl("/effort")), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ effort: effort.value.trim() })
+                }).catch(function (err) {
+                    notify("could not change the effort: " + err.message, true);
+                });
+            });
+        }
+    }
+
+    // The provider belongs to the conversation as the model does (CliHarnessProvider_260912_oo01).
+    // The dropdown's value is "<kind>" or "<kind>:<tools>"; choosing one tells this conversation to
+    // switch, and the model list is reloaded from the new provider.
+    function initProviderSelect() {
+        if (!providerSelect) return;
+        // The choices are what this instance was started with (ProviderAndToolPlugins_260912_oo01):
+        // an instance without the harness plugin offers Local LLM alone.
+        fetch(apiUrl("api/plugins"))
+            .then(function (r) { return r.json(); })
+            .then(function (info) {
+                providerSelect.textContent = "";
+                ((info && info.providerChoices) || []).forEach(function (c) {
+                    var opt = document.createElement("option");
+                    opt.value = c.value;
+                    opt.textContent = c.label;
+                    opt.dataset.kind = c.kind;
+                    opt.dataset.toolSet = c.toolSet;
+                    providerSelect.appendChild(opt);
+                });
+                showCurrentModel();
+            })
+            .catch(function () { /* leave the dropdown empty on failure */ });
+        providerSelect.addEventListener("change", function () {
+            var chosen = providerSelect.value;
+            if (!chosen) return;
+            var parts = chosen.split(":");
+            var body = { provider: parts[0] };
+            if (parts.length > 1) body.tools = parts[1];
+            var forChat = PROJECT_ID + "/" + CHAT_ID;
+            fetch(apiUrl(chatUrl("/provider")), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(function (r) { return r.json(); })
+              .then(function (result) {
+                  if (forChat !== PROJECT_ID + "/" + CHAT_ID) return;
+                  if (result && result.type === "error") {
+                      notify(result.message || "could not change the provider", true);
+                  } else {
+                      notify("Provider: " + result.provider + " (tools: " + result.tools + ")");
+                  }
+                  loadModels();
+              })
+              .catch(function (err) {
+                  notify("could not change the provider: " + err.message, true);
+                  if (forChat === PROJECT_ID + "/" + CHAT_ID) loadModels();
+              });
+        });
+    }
+
+    // Points the provider dropdown at the option whose kind and tool set /status reports.
+    function showProvider(s) {
+        if (!providerSelect || !s || !s.provider) return;
+        var match = Array.prototype.find.call(providerSelect.options, function (o) {
+            return o.dataset.kind === s.provider && o.dataset.toolSet === s.tools;
+        });
+        if (match) providerSelect.value = match.value;
+    }
+
+    // Fills the dropdown with what this conversation's provider offers, then shows the one it is on.
+    function loadModels() {
+        if (!modelSelect) return;
+        var forChat = PROJECT_ID + "/" + CHAT_ID;
+        fetch(apiUrl(chatUrl("/models")))
+            .then(function (r) { return r.json(); })
+            .then(function (models) {
+                if (forChat !== PROJECT_ID + "/" + CHAT_ID) return;
+                // A busy conversation cannot answer this — the list is fetched through its mailbox
+                // and times out into an empty list. Keeping what is already there beats emptying
+                // the box for exactly the conversation being watched work.
+                if ((models || []).length > 0) {
+                    modelSelect.textContent = "";
+                    models.forEach(function (m) {
+                        var opt = document.createElement("option");
+                        opt.value = m.name;
+                        opt.textContent = m.name;
+                        modelSelect.appendChild(opt);
+                    });
                 }
-                var errText = await response.text();
-                appendMessage('error', 'HTTP ' + response.status + ': ' + errText.substring(0, 200));
-                busy = false;
-                cancelBtn.disabled = true;
-                processQueue();
-                return;
-            }
-            var result = await response.json();
-            if (result.type === 'error') {
-                appendMessage('error', result.content);
-                busy = false;
-                cancelBtn.disabled = true;
-                processQueue();
-            }
-            // Events will arrive through the EventSource connection
-        } catch (e) {
-            // Clean up thinking indicator if no content was streamed
-            stopThinkingTimer();
-            if (currentAssistantMsg && !currentAssistantText) {
-                currentAssistantMsg.remove();
-                currentAssistantMsg = null;
-            }
-            appendMessage('error', 'Request failed: ' + e.message);
-            busy = false;
-            cancelBtn.disabled = true;
-            processQueue();
-        }
+                showCurrentModel();
+            })
+            .catch(function () { /* leave the dropdown empty on failure */ });
     }
 
-    async function cancelRequest() {
-        try {
-            await fetch(apiUrl('api/cancel'), { method: 'POST' });
-        } catch (e) {
-            // ignore
-        }
-        appendMessage('info', 'Cancelled');
-    }
-
-    // --- Prediction popup ---
-
-    var predictPopup = document.getElementById('predict-popup');
-    var predictSelectedIdx = -1;
-    var predictCandidates = [];
-    var predictFetching = false;
-
-    function showPredictPopup(candidates) {
-        predictCandidates = candidates;
-        predictSelectedIdx = -1;
-        predictPopup.innerHTML = '';
-        candidates.forEach(function (text, idx) {
-            var item = document.createElement('div');
-            item.className = 'predict-item';
-            var key = document.createElement('span');
-            key.className = 'predict-key';
-            key.textContent = (idx + 1);
-            var span = document.createElement('span');
-            span.className = 'predict-text';
-            span.textContent = text;
-            item.appendChild(key);
-            item.appendChild(span);
-            item.addEventListener('click', function () {
-                acceptPrediction(idx);
-            });
-            predictPopup.appendChild(item);
-        });
-        predictPopup.style.display = 'block';
-    }
-
-    function hidePredictPopup() {
-        predictPopup.style.display = 'none';
-        predictCandidates = [];
-        predictSelectedIdx = -1;
-        predictFetching = false;
-    }
-
-    function acceptPrediction(idx) {
-        if (idx < 0 || idx >= predictCandidates.length) return;
-        var text = predictCandidates[idx];
-        var curVal = promptInput.value;
-        // Add a space before appending if the current text doesn't end with whitespace
-        var separator = (curVal.length > 0 && !/\s$/.test(curVal)) ? '' : '';
-        promptInput.value = curVal + separator + text;
-        autoResize();
-        hidePredictPopup();
-        promptInput.focus();
-    }
-
-    function updatePredictSelection(idx) {
-        var items = predictPopup.querySelectorAll('.predict-item');
-        items.forEach(function (el, i) {
-            el.classList.toggle('selected', i === idx);
-        });
-        predictSelectedIdx = idx;
-    }
-
-    function buildPredictContext() {
-        // Build context from recent conversation history (last 10 turns)
-        var recent = chatHistory.slice(-10);
-        var parts = [];
-        for (var i = 0; i < recent.length; i++) {
-            var entry = recent[i];
-            if (entry.role === 'user') {
-                parts.push('User: ' + entry.text);
-            } else if (entry.role === 'assistant') {
-                // Truncate long assistant responses
-                var t = entry.text.length > 500
-                    ? entry.text.substring(0, 500) + '...' : entry.text;
-                parts.push('Assistant: ' + t);
-            }
-        }
-        return parts.join('\n');
-    }
-
-    async function fetchPredictions() {
-        var text = promptInput.value.trim();
-        if (!text) return;
-        predictFetching = true;
-        predictPopup.innerHTML = '<div class="predict-loading">Predicting...</div>';
-        predictPopup.style.display = 'block';
-
-        try {
-            var resp = await fetch(apiUrl('api/predict'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    text: text,
-                    history: buildPredictContext(),
-                    n: 5
-                })
-            });
-            var data = await resp.json();
-            if (data.candidates && data.candidates.length > 0) {
-                showPredictPopup(data.candidates);
-            } else {
-                predictPopup.innerHTML = '<div class="predict-loading">No predictions</div>';
-                setTimeout(hidePredictPopup, 1500);
-            }
-        } catch (err) {
-            predictPopup.innerHTML = '<div class="predict-loading">Prediction failed</div>';
-            setTimeout(hidePredictPopup, 1500);
-        }
-        predictFetching = false;
-    }
-
-    // --- Input handling (IME-safe) ---
-
-    promptInput.addEventListener('keydown', function (e) {
-        // Skill suggest popup navigation
-        if (skillSuggest.style.display !== 'none' && skillSuggestList.length > 0) {
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                hideSkillSuggest();
-                return;
-            }
-            if (e.key === 'ArrowDown' || (e.key === 'Tab' && !e.shiftKey)) {
-                e.preventDefault();
-                skillSuggestIdx = Math.min(skillSuggestIdx + 1, skillSuggestList.length - 1);
-                skillSuggest.querySelectorAll('.skill-suggest-item').forEach(function(el, i) {
-                    el.classList.toggle('selected', i === skillSuggestIdx);
+    // Points the dropdown at the model this conversation is on. A model the list does not offer is
+    // not selected: the dropdown would then name one thing while the conversation runs another.
+    function showCurrentModel() {
+        if (!modelSelect) return;
+        var forChat = PROJECT_ID + "/" + CHAT_ID;
+        fetch(apiUrl(chatUrl("/status")))
+            .then(function (r) { return r.json(); })
+            .then(function (s) {
+                if (forChat !== PROJECT_ID + "/" + CHAT_ID) return;
+                showProvider(s);
+                var box = el("temperature-input");
+                // Empty when this conversation asks for nothing, so the box says what is true
+                // rather than a number the server was never told.
+                if (box) box.value = (s && typeof s.temperature === "number") ? s.temperature : "";
+                var think = el("think-check");
+                if (think) think.checked = !(s && s.noThink);
+                var effort = el("effort-input");
+                // Empty for a provider with no such setting, so the box says what is true.
+                if (effort) effort.value = (s && s.effort) ? s.effort : "";
+                var model = s && s.model;
+                if (!model) return;
+                var offered = Array.prototype.some.call(modelSelect.options, function (o) {
+                    return o.value === model;
                 });
-                return;
-            }
-            if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                skillSuggestIdx = Math.max(skillSuggestIdx - 1, 0);
-                skillSuggest.querySelectorAll('.skill-suggest-item').forEach(function(el, i) {
-                    el.classList.toggle('selected', i === skillSuggestIdx);
-                });
-                return;
-            }
-            if (e.key === 'Enter' && !e.shiftKey && skillSuggestIdx >= 0) {
-                e.preventDefault();
-                applySkillSuggest(skillSuggestIdx);
-                return;
-            }
-        }
+                // A model the list does not offer is added to it rather than ignored: the box must
+                // name what this conversation is running, and the list is only what the provider
+                // happened to answer with (ModelBelongsToTheConversation_260906_oo01).
+                if (!offered) {
+                    var opt = document.createElement("option");
+                    opt.value = model;
+                    opt.textContent = model;
+                    modelSelect.appendChild(opt);
+                }
+                modelSelect.value = model;
+            })
+            .catch(function () { /* leave whatever the list opened on */ });
+    }
 
-        // Prediction popup navigation
-        if (predictPopup.style.display !== 'none' && predictCandidates.length > 0) {
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                hidePredictPopup();
-                return;
-            }
-            if (e.key === 'ArrowDown' || (e.key === 'Tab' && !e.shiftKey)) {
-                e.preventDefault();
-                var next = (predictSelectedIdx + 1) % predictCandidates.length;
-                updatePredictSelection(next);
-                return;
-            }
-            if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                var prev = predictSelectedIdx <= 0 ? predictCandidates.length - 1 : predictSelectedIdx - 1;
-                updatePredictSelection(prev);
-                return;
-            }
-            if (e.key === 'Enter' && !e.shiftKey && predictSelectedIdx >= 0) {
-                e.preventDefault();
-                acceptPrediction(predictSelectedIdx);
-                return;
-            }
-            // Number keys 1-9 to select directly
-            if (e.key >= '1' && e.key <= '9') {
-                var num = parseInt(e.key) - 1;
-                if (num < predictCandidates.length) {
-                    e.preventDefault();
-                    acceptPrediction(num);
+    // Abandons the LLM call this conversation is running. The request is delivered with tellNow
+    // server-side, so it lands during the call rather than after it — including while a thinking
+    // model is still reasoning, which is when a wrong line of thought is worth stopping.
+    function cancelPrompt() {
+        fetch(apiUrl(chatUrl("/chat/cancel")), { method: "POST" })
+            .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+            .then(function (res) {
+                notify(res.ok && res.body && res.body.type === "cancelled"
+                        ? "Cancelled."
+                        : "Cancel failed: " + ((res.body && res.body.message) || "unknown"));
+            })
+            .catch(function (e) { notify("cancel failed: " + e.message); });
+    }
+
+    // ── Conversation tabs (switch which ConversationSquad this pane talks to) ────
+    // Switching is triggered from the Actors tree in console.js (click a conversation actor's
+    // name), not a bar in this pane — ActorTreeTabSwitcher_260826_oo01. switchChat is exposed on
+    // window at the bottom of this file so console.js can call it.
+
+    // Tears down the current conversation's live state and rebuilds the pane for another one —
+    // same sequence as the initial page load (hydrate history, load models, check queue, open
+    // SSE), just run again against different coordinates instead of only once at DOMContentLoaded.
+    function switchChat(projectId, chatId) {
+        if (projectId === PROJECT_ID && chatId === CHAT_ID) return;
+        if (eventSource) { eventSource.close(); eventSource = null; }
+        PROJECT_ID = projectId;
+        CHAT_ID = chatId;
+        localStorage.setItem(PROJECT_ID_KEY, projectId);
+        localStorage.setItem(CHAT_ID_KEY, chatId);
+        chatArea.textContent = "";
+        turnFromPerson = true;
+        streamingEl = null;
+        streamingMarkdown = "";
+        thinkingEl = null;
+        dropAnswer();
+        setBusy(false);
+        if (queueArea) { queueArea.style.display = "none"; queueArea.dataset.forcedOpen = "0"; }
+        queueDrawn = null;   // another conversation: draw its queue even if it has the same shape
+
+        applyViewMode();
+        loadModels();
+        hydrateConversation();
+        refreshQueue();
+        refreshBusyStatus();
+        connectSSE();
+    }
+
+    // Shows the existing "thinking…" activity label for the newly-active tab if it's busy —
+    // read directly (GET /api/projects/{p}/chats/{c}/status), so this reflects reality even when busy
+    // busy with a long turn (e.g. ask_chat) that would otherwise make the conversation/models
+    // fetches queue up and silently fail (BusyStateReadableSnapshot_260828_oo01).
+    function refreshBusyStatus() {
+        var forChat = PROJECT_ID + "/" + CHAT_ID;
+        fetch(apiUrl(chatUrl("/status")))
+            .then(function (r) { return r.json(); })
+            .then(function (s) {
+                if (forChat === PROJECT_ID + "/" + CHAT_ID) setBusy(!!(s && s.busy));
+            })
+            .catch(function () { /* leave whatever setBusy(false) above already set */ });
+    }
+
+    // ── History hydration ────────────────────────────────────────────────────
+
+    // ── Left-pane header buttons (SlashCommandsAndClearButton_260929_oo01) ────────────────────
+    // Clear starts the conversation over: the pane empties and the ChatSession drops the turns it
+    // would otherwise send as context, which is what someone pressing it wants. Nothing is
+    // deleted -- the I/O-log session ends and stays in the Sessions tab with all its turns.
+    // Save Chat reads the same GET /conversation the pane is drawn from.
+    function clearChatDisplay() {
+        chatArea.textContent = "";
+        turnFromPerson = true;
+        streamingEl = null;
+        streamingMarkdown = "";
+        thinkingEl = null;
+        dropAnswer();
+        if (promptInput) promptInput.focus();
+        fetch(apiUrl(chatUrl("/conversation")), { method: "DELETE" })
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); })
+            .catch(function (err) { notify("Could not clear the conversation: " + err.message); });
+    }
+
+    // ── Display toggle: every message, or only what is addressed to the person ─────────────────
+    // ChatDisplayToggle_261110_oo01. A ConversationSquad actor's pane also draws the turns other actors start
+    // (an ask_chat request, a reply, a notice, a reminder, a job, a resumed turn). "Show person-facing messages only" hides
+    // those turns' inputs and steps with one class on the chat area, and keeps every turn's final answer
+    // (turn-answer), since that answer is written to the person; the person's own turns stay whole. Nothing
+    // is deleted and the Queue panel, Save Chat and the server are not touched. The choice is kept per
+    // browser, per project and chat.
+    var VIEW_MODE_KEY_PREFIX = "chat-ui-view-mode:";
+
+    function viewModeKey() {
+        return VIEW_MODE_KEY_PREFIX + PROJECT_ID + "/" + CHAT_ID;
+    }
+
+    function currentViewMode() {
+        return localStorage.getItem(viewModeKey()) === "person" ? "person" : "all";
+    }
+
+    // Shows the stored choice of the chat now on screen: the class on the chat area and the button.
+    function applyViewMode() {
+        var personOnly = currentViewMode() === "person";
+        if (chatArea) chatArea.classList.toggle("person-only", personOnly);
+        var btn = document.getElementById("view-mode-btn");
+        if (!btn) return;
+        btn.textContent = personOnly ? "Show person-facing messages only" : "Show all messages";
+        btn.setAttribute("aria-pressed", personOnly ? "true" : "false");
+        btn.title = personOnly
+            ? "Showing the turns you started, and the final answer of every other turn. Click to show every message."
+            : "Showing every message of this ConversationSquad actor. Click to hide the inputs and steps of the turns "
+              + "you did not start, keeping their final answers.";
+    }
+
+    function toggleViewMode() {
+        localStorage.setItem(viewModeKey(), currentViewMode() === "person" ? "all" : "person");
+        applyViewMode();
+        scrollToBottom();
+    }
+
+    function saveChatAsMarkdown() {
+        fetch(apiUrl(chatUrl("/conversation")))
+            .then(function (r) { return r.json(); })
+            .then(function (turns) {
+                // Saying so rather than doing nothing: a button that answers a click with no
+                // change is indistinguishable from one that is not wired up at all, which is how
+                // this one spent its first weeks (SlashCommandsAndClearButton_260929_oo01).
+                if (!turns || turns.length === 0) {
+                    notify("Nothing to save: this conversation has no turns yet.");
                     return;
                 }
-            }
-        }
+                var now = new Date();
+                var pad = function (n) { return String(n).padStart(2, "0"); };
+                var stamp = now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate())
+                    + " " + pad(now.getHours()) + ":" + pad(now.getMinutes());
+                var lines = ["# " + PROJECT_ID + "/chat-" + CHAT_ID + " - " + stamp, ""];
+                turns.forEach(function (t) {
+                    if (t.role === "user") lines.push("## User", "", t.content, "");
+                    else if (t.role === "assistant") lines.push("## Assistant", "", t.content, "");
+                    else lines.push("> [" + t.role + "] " + t.content, "");
+                });
+                var url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/markdown" }));
+                var a = document.createElement("a");
+                a.href = url;
+                a.download = "conversation-" + PROJECT_ID + "-chat" + CHAT_ID + "-"
+                    + now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate())
+                    + pad(now.getHours()) + pad(now.getMinutes()) + ".md";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            })
+            .catch(function () { /* nothing to save when the conversation cannot be read */ });
+    }
 
-        // Tab -> fetch predictions (when popup not visible)
-        if (e.key === 'Tab' && !e.shiftKey && !e.isComposing && promptInput.value.trim()) {
-            e.preventDefault();
-            if (!predictFetching) {
-                fetchPredictions();
-            }
-            return;
-        }
+    function hydrateConversation() {
+        fetch(apiUrl(chatUrl("/conversation")))
+            .then(function (r) { return r.json(); })
+            .then(function (turns) {
+                (turns || []).forEach(function (t) {
+                    if (t.role === "assistant") {
+                        // GET /conversation returns the time, model and duration the server recorded
+                        // for the line. A line brought back from the I/O log after a restart has no
+                        // time, and gets none: the time of the reload would state something false.
+                        // The session id is not kept, so it is not shown.
+                        var div = markAnswer(appendMarkdownMessage(t.role, t.content));
+                        appendAnswerFooter(div, t.content, { durationMs: t.durationMs, model: t.model,
+                            turnId: t.turnId, requestId: t.requestId }, t.at == null ? null : t.at);
+                    } else {
+                        appendMessage(t.role, t.content, null, t.origin, t.at == null ? null : t.at,
+                            { turnId: t.turnId, requestId: t.requestId });
+                    }
+                });
+            })
+            .catch(function () { /* start with an empty pane on failure */ });
+    }
 
-        if (e.key === 'Enter' && e.shiftKey && !e.isComposing) {
-            e.preventDefault();
-            hidePredictPopup();
-            sendPrompt();
-        }
-    });
+    // Whether the human has scrolled away from the end of the conversation. While a thinking model
+    // streams, the pane was pinned to the bottom on every frame, so dragging the scrollbar up was
+    // undone before the drag finished and the earlier part of the conversation could not be read at
+    // all. Following the end is what someone at the end wants; someone who has scrolled up has
+    // said otherwise.
+    var userScrolledUp = false;
 
-    promptInput.addEventListener('input', function () {
-        autoResize();
-        // Hide prediction popup when user continues typing
-        if (predictPopup.style.display !== 'none') {
-            hidePredictPopup();
-        }
-        // Update skill suggest popup
-        updateSkillSuggest();
-    });
+    /** Follows the end of the conversation, unless the human has scrolled away from it. */
+    function scrollToBottom() {
+        if (!chatArea || userScrolledUp) return;
+        chatArea.scrollTop = chatArea.scrollHeight;
+    }
 
-    promptInput.addEventListener('blur', function () {
-        // Delay to allow click on popup items
-        setTimeout(function () {
-            if (!predictPopup.contains(document.activeElement)) {
-                hidePredictPopup();
-            }
-            if (!skillSuggest.contains(document.activeElement)) {
-                hideSkillSuggest();
-            }
-        }, 200);
-    });
+    /** Goes back to the end and follows it again — for when the human sends a prompt. */
+    function forceScrollToBottom() {
+        if (!chatArea) return;
+        userScrolledUp = false;
+        chatArea.scrollTop = chatArea.scrollHeight;
+    }
 
-    // --- Image attachments: paste, drop, or pick a file ---
+    // ── Image attachments: paste, drop, or pick a file ──────────────────────────
 
     function addImageFile(file) {
-        if (!file || file.type.indexOf('image/') !== 0) return;
+        if (!file || file.type.indexOf("image/") !== 0) return;
         var reader = new FileReader();
         reader.onload = function () {
-            pendingImages.push({ name: file.name || 'pasted-image', dataUrl: reader.result });
+            pendingImages.push({ name: file.name || "pasted-image", dataUrl: reader.result });
             renderPendingImages();
         };
         reader.readAsDataURL(file);
     }
 
     function renderPendingImages() {
+        if (!imageAttachments) return;
         if (!pendingImages.length) {
-            imageAttachments.style.display = 'none';
-            imageAttachments.innerHTML = '';
+            imageAttachments.style.display = "none";
+            imageAttachments.innerHTML = "";
             return;
         }
-        imageAttachments.style.display = 'flex';
+        imageAttachments.style.display = "flex";
         imageAttachments.innerHTML = pendingImages.map(function (img, i) {
             return '<span class="image-attachment"><img src="' + img.dataUrl + '" alt="">' +
                    '<button type="button" class="remove-attachment" data-idx="' + i + '" title="Remove">&times;</button></span>';
-        }).join('');
-        Array.prototype.forEach.call(imageAttachments.querySelectorAll('.remove-attachment'), function (btn) {
-            btn.addEventListener('click', function () {
+        }).join("");
+        Array.prototype.forEach.call(imageAttachments.querySelectorAll(".remove-attachment"), function (btn) {
+            btn.addEventListener("click", function () {
                 pendingImages.splice(parseInt(btn.dataset.idx, 10), 1);
                 renderPendingImages();
             });
-        });
-    }
-
-    promptInput.addEventListener('paste', function (e) {
-        var items = (e.clipboardData || {}).items || [];
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].type.indexOf('image/') === 0) {
-                addImageFile(items[i].getAsFile());
-            }
-        }
-    });
-
-    promptInput.addEventListener('dragover', function (e) { e.preventDefault(); });
-    promptInput.addEventListener('drop', function (e) {
-        e.preventDefault();
-        var files = (e.dataTransfer || {}).files || [];
-        for (var i = 0; i < files.length; i++) addImageFile(files[i]);
-    });
-
-    if (attachBtn && imageFileInput) {
-        attachBtn.addEventListener('click', function () { imageFileInput.click(); });
-        imageFileInput.addEventListener('change', function () {
-            Array.prototype.forEach.call(imageFileInput.files, addImageFile);
-            imageFileInput.value = '';
         });
     }
 
@@ -2123,381 +1692,168 @@
         return urls;
     }
 
+    // --- Input textarea resize: drag the handle, or let it grow as you type ---
+
+    var INPUT_HEIGHT_KEY = "chat-ui-input-height";
+
+    // Grows #prompt-input to fit what was typed, up to the drag handle's own max (500px) — and
+    // once the human has dragged the handle, treats that height as a floor instead of recomputing
+    // from scratch and shrinking straight back past it on the next keystroke.
+    // Fits the box to its text. Resetting the height to "auto" and reading scrollHeight makes the
+    // browser lay out the whole page again, and doing it at every key is slow on a long chat. So the
+    // reset is done only when the text got shorter (the box may have to shrink); while the text
+    // grows, scrollHeight is read as it is and the height is set only when it differs.
+    var lastPromptLength = 0;
     function autoResize() {
-        promptInput.style.height = 'auto';
+        var length = promptInput.value.length;
+        var shrank = length < lastPromptLength;
+        lastPromptLength = length;
+        if (shrank || length === 0) promptInput.style.height = "auto";
         var contentHeight = Math.min(promptInput.scrollHeight, 500);
-        promptInput.style.height = Math.max(contentHeight, manualInputHeight || 0) + 'px';
+        var height = Math.max(contentHeight, manualInputHeight || 0) + "px";
+        if (promptInput.style.height !== height) promptInput.style.height = height;
     }
 
-    sendBtn.addEventListener('click', sendPrompt);
-
-    function showQueue() {
-        queueArea.style.display = 'block';
-        queueResizeHandle.style.display = 'block';
-    }
-
-    function hideQueue() {
-        queueArea.style.display = 'none';
-        queueResizeHandle.style.display = 'none';
-    }
-
-    queueBtn.addEventListener('click', function () {
-        var text = promptInput.value.trim();
-        if (text) {
-            promptInput.value = '';
-            autoResize();
-            queue.push({ text: text, images: takePendingImages(), auto: false });
-            trimQueue();
-            showQueue();
-            renderQueue();
-            saveQueue();
-            queueArea.scrollTop = queueArea.scrollHeight;
-        } else {
-            if (queueArea.style.display === 'none' || !queueArea.style.display) {
-                showQueue();
-                renderQueue();
-                queueArea.scrollTop = queueArea.scrollHeight;
-            } else {
-                hideQueue();
-            }
-        }
-    });
-
-    cancelBtn.addEventListener('click', cancelRequest);
-
-    document.getElementById('save-chat-btn').addEventListener('click', saveChatAsMarkdown);
-
-    document.getElementById('clear-chat-btn').addEventListener('click', function () {
-        chatArea.innerHTML = '';
-        chatHistory = [];
-        currentAssistantMsg = null;
-        currentAssistantText = '';
-        needsParagraphBreak = false;
-        busy = false;
-        cancelBtn.disabled = true;
-        stopThinkingTimer();
-        queue = [];
-        queuePos = 0;
-        pendingPrompt = false;
-        localStorage.removeItem(HISTORY_KEY);
-        promptInput.focus();
-    });
-
-    modelSelect.addEventListener('change', async function () {
-        var selected = modelSelect.value;
-        var option = modelSelect.options[modelSelect.selectedIndex];
-        var isLocal = option && option.getAttribute('data-type') === 'local';
-
-        // Persist selected model across page reloads
-        try {
-            localStorage.setItem(MODEL_KEY, selected);
-            console.log('[chat-ui] model saved: ' + selected + ' verify=' + localStorage.getItem(MODEL_KEY));
-        } catch (e) {
-            console.error('[chat-ui] model save FAILED:', e);
+    function initInputResize() {
+        if (!inputResizeHandle || !promptInput) return;
+        var saved = localStorage.getItem(INPUT_HEIGHT_KEY);
+        if (saved) {
+            manualInputHeight = parseInt(saved, 10);
+            promptInput.style.height = manualInputHeight + "px";
         }
 
-        // Local models: no server-side /model command needed (model sent per-request)
-        if (isLocal) {
-            appendMessage('info', 'Switched to local model: ' + selected);
-            return;
-        }
+        var dragging = false;
+        var startY = 0;
+        var startHeight = 0;
 
-        // Claude models: update server-side config
-        try {
-            var resp = await fetch(apiUrl('api/command'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: '/model ' + selected })
-            });
-            var events = await resp.json();
-            events.forEach(handleEvent);
-        } catch (e) {
-            appendMessage('error', 'Failed to change model: ' + e.message);
-        }
-    });
-
-    document.getElementById('refresh-models-btn').addEventListener('click', function () {
-        loadModels();
-    });
-
-    // --- Effort ---
-    // The empty value means "send no --effort at all", which is not the same as any level: it
-    // leaves the choice to the CLI, so this page does not freeze today's default into the config.
-    effortSelect.addEventListener('change', async function () {
-        var level = effortSelect.value;
-        try {
-            localStorage.setItem(EFFORT_KEY, level);
-        } catch (e) {
-            console.error('[chat-ui] effort save FAILED:', e);
-        }
-        if (!level) {
-            appendMessage('info', 'Effort left to the CLI default from the next turn.');
-            return;
-        }
-        try {
-            var resp = await fetch(apiUrl('api/command'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: '/effort ' + level })
-            });
-            var events = await resp.json();
-            events.forEach(handleEvent);
-        } catch (e) {
-            appendMessage('error', 'Failed to change effort: ' + e.message);
-        }
-    });
-
-    // Restore the saved level and tell the server about it: the CLI process is started fresh on
-    // every page load, so a level only this page remembers would silently not be in effect.
-    (function restoreEffort() {
-        var saved = null;
-        try { saved = localStorage.getItem(EFFORT_KEY); } catch (e) { saved = null; }
-        if (!saved) return;
-        effortSelect.value = saved;
-        fetch(apiUrl('api/command'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: '/effort ' + saved })
-        }).catch(function (e) {
-            console.error('[chat-ui] effort restore FAILED:', e);
+        inputResizeHandle.addEventListener("mousedown", function (e) {
+            e.preventDefault();
+            dragging = true;
+            startY = e.clientY;
+            startHeight = promptInput.offsetHeight;
+            inputResizeHandle.classList.add("dragging");
+            document.body.style.cursor = "ns-resize";
+            document.body.style.userSelect = "none";
         });
-    })();
 
-    // --- Load app config (title, keybind, auth, logs) ---
-    fetch('api/config')
-        .then(function (resp) { return resp.json(); })
-        .then(function (cfg) {
-            if (cfg.title) {
-                document.title = cfg.title;
-                var h1 = document.querySelector('header h1');
-                if (h1) h1.textContent = cfg.title;
-                var loginTitle = document.getElementById('login-title');
-                if (loginTitle) loginTitle.textContent = cfg.title;
-            }
-            if (cfg.keybind) {
-                activeKeybind = cfg.keybind;
-            }
-            if (cfg.authenticated === false) {
-                showAuthDialog();
-            }
-            var thinkLabel = document.getElementById('think-label');
-            if (thinkLabel) {
-                thinkLabel.style.display = cfg.supportsThinkToggle ? '' : 'none';
-            }
-        })
-        .catch(function () {});
+        document.addEventListener("mousemove", function (e) {
+            if (!dragging) return;
+            var delta = startY - e.clientY;
+            var newHeight = Math.max(42, Math.min(startHeight + delta, 500));
+            promptInput.style.height = newHeight + "px";
+        });
 
-    // --- Initial data load ---
-    loadModels();
-    restoreHistory();
-    restoreQueue();
-    connectSSE();
-    promptInput.focus();
+        document.addEventListener("mouseup", function () {
+            if (!dragging) return;
+            dragging = false;
+            inputResizeHandle.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            manualInputHeight = promptInput.offsetHeight;
+            localStorage.setItem(INPUT_HEIGHT_KEY, manualInputHeight);
+        });
+    }
 
-    function showAuthDialog() {
-        var overlay = document.getElementById('auth-overlay');
-        var input = document.getElementById('api-key-input');
-        var submitBtn = document.getElementById('auth-submit-btn');
-        var errorEl = document.getElementById('auth-error');
+    // ── Init ─────────────────────────────────────────────────────────────────
 
-        if (!overlay) return;
-        overlay.style.display = 'flex';
+    var providerSelect;
 
-        function submitApiKey() {
-            var key = input.value.trim();
-            if (!key) {
-                errorEl.textContent = 'Please enter your API key.';
-                errorEl.style.display = 'block';
-                return;
-            }
-            submitBtn.disabled = true;
-            submitBtn.textContent = 'Verifying...';
-            errorEl.style.display = 'none';
+    document.addEventListener("DOMContentLoaded", function () {
+        chatArea = el("chat-area");
+        chatArea.addEventListener("scroll", function () {
+            // 80px of slack: a pane sitting a line or two from the end still counts as at the end,
+            // so following does not stop because of a rounding difference.
+            userScrolledUp = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight >= 80;
+        });
+        promptInput = el("prompt-input");
+        sendBtn = el("send-btn");
+        connStatus = el("connection-status");
+        activityLabel = el("activity-label");
+        modelSelect = el("model-select");
+        providerSelect = el("provider-select");
+        notificationBar = el("notification-bar");
+        themeSelect = el("theme-select");
+        queueBtn = el("queue-btn");
+        queueArea = el("queue-area");
+        queueResizeHandle = el("queue-resize-handle");
+        cancelBtn = el("cancel-btn");
+        attachBtn = el("attach-btn");
+        imageFileInput = el("image-file-input");
+        imageAttachments = el("image-attachments");
+        inputResizeHandle = el("input-resize-handle");
 
-            fetch('api/auth', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({apiKey: key})
-            })
-            .then(function(resp) { return resp.json(); })
-            .then(function(result) {
-                if (result.type === 'error') {
-                    errorEl.textContent = result.content || 'Failed to set API key.';
-                    errorEl.style.display = 'block';
-                    submitBtn.disabled = false;
-                    submitBtn.textContent = 'Submit';
-                } else {
-                    overlay.style.display = 'none';
+        var clearChatBtn = el("clear-chat-btn");
+        if (clearChatBtn) clearChatBtn.addEventListener("click", clearChatDisplay);
+        var saveChatBtn = el("save-chat-btn");
+        if (saveChatBtn) saveChatBtn.addEventListener("click", saveChatAsMarkdown);
+        var viewModeBtn = el("view-mode-btn");
+        if (viewModeBtn) viewModeBtn.addEventListener("click", toggleViewMode);
+        applyViewMode();
+
+        if (sendBtn) sendBtn.addEventListener("click", sendPrompt);
+        if (promptInput) {
+            promptInput.addEventListener("keydown", function (e) {
+                if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); sendPrompt(); return; }
+                if (activeKeybind === "emacs" && emacsKey(e)) e.preventDefault();
+            });
+            promptInput.addEventListener("paste", function (e) {
+                var items = (e.clipboardData || {}).items || [];
+                for (var i = 0; i < items.length; i++) {
+                    if (items[i].type.indexOf("image/") === 0) addImageFile(items[i].getAsFile());
                 }
-            })
-            .catch(function() {
-                errorEl.textContent = 'Network error. Please try again.';
-                errorEl.style.display = 'block';
-                submitBtn.disabled = false;
-                submitBtn.textContent = 'Submit';
+            });
+            promptInput.addEventListener("dragover", function (e) { e.preventDefault(); });
+            promptInput.addEventListener("drop", function (e) {
+                e.preventDefault();
+                var files = (e.dataTransfer || {}).files || [];
+                for (var i = 0; i < files.length; i++) addImageFile(files[i]);
+            });
+            promptInput.addEventListener("input", autoResize);
+        }
+        initInputResize();
+        if (attachBtn && imageFileInput) {
+            attachBtn.addEventListener("click", function () { imageFileInput.click(); });
+            imageFileInput.addEventListener("change", function () {
+                Array.prototype.forEach.call(imageFileInput.files, addImageFile);
+                imageFileInput.value = "";
             });
         }
-
-        submitBtn.addEventListener('click', submitApiKey);
-        input.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') submitApiKey();
-        });
-        input.focus();
-    }
-
-    // --- BTW overlay close ---
-
-    document.getElementById('btw-close').addEventListener('click', function () {
-        document.getElementById('btw-overlay').style.display = 'none';
+        if (queueBtn) {
+            // With text in the box the button queues it; with the box empty it just shows or hides
+            // the queue. Queueing holds the item — the point of writing a prompt now is to send it
+            // later, and an item that dispatched the moment the conversation went idle would not be
+            // a queue at all.
+            queueBtn.addEventListener("click", function () {
+                if (!queueArea) return;
+                var text = promptInput ? promptInput.value.trim() : "";
+                if (text) { queuePrompt(text); return; }
+                var opening = queueArea.style.display !== "block";
+                queueArea.dataset.forcedOpen = opening ? "1" : "0";
+                if (opening) { refreshQueue(); }
+                else { queueArea.style.display = "none"; if (queueResizeHandle) queueResizeHandle.style.display = "none"; }
+            });
+        }
+        if (cancelBtn) cancelBtn.addEventListener("click", cancelPrompt);
+        initTheme();
+        initQueueResize();
+        initModelPersistence();
+        initProviderSelect();
+        initTemperature();
+        initThinkAndEffort();
+        loadTranslationLanguages();
+        loadKeybind();
+        loadModels();
+        hydrateConversation();
+        refreshQueue();
+        refreshBusyStatus();
+        connectSSE();
     });
 
-    document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape'
-                && document.getElementById('btw-overlay').style.display !== 'none') {
-            document.getElementById('btw-overlay').style.display = 'none';
-        }
-    });
-
-    // ── Extensions panel ──────────────────────────────────────────────────────
-    (function initExtensions() {
-        var extBtn     = document.getElementById('extensions-btn');
-        var extPanel   = document.getElementById('extensions-panel');
-        var extTabs    = document.querySelectorAll('.ext-tab');
-        var extContent = document.getElementById('ext-content');
-        var extData    = null;
-        var extActive  = 'skills';
-
-        function renderTab(tab) {
-            extActive = tab;
-            if (!extData) { extContent.innerHTML = '<div class="ext-loading">Loading…</div>'; return; }
-            var map = {
-                skills: [['Command','Description'], extData.skills,
-                          function(r) { return ['/'+r.name, r.description]; }, 'skills'],
-                agents: [['Agent','Description'], extData.agents,
-                          function(r) { return [r.name, r.description]; }, 'agents'],
-                hooks:  [['Event','Matcher','Command'], extData.hooks,
-                          function(r) { return [r.event, r.matcher||'—', r.command]; }, null],
-                mcp:    [['Name','Type','Description / Endpoint'], extData.mcpServers,
-                          function(r) { return [r.name, r.type, r.description||r.endpoint||'']; }, null]
-            };
-            var cfg = map[tab];
-            if (!cfg) return;
-            extContent.innerHTML = buildTable(cfg[0], cfg[1], cfg[2], cfg[3]);
-        }
-
-        function buildTable(headers, rows, rowFn, clickType) {
-            if (!rows || !rows.length)
-                return '<div class="ext-loading">No entries found.</div>';
-            var h = '<table class="ext-table"><thead><tr>';
-            headers.forEach(function(hd) { h += '<th>'+esc(hd)+'</th>'; });
-            h += '</tr></thead><tbody>';
-            rows.forEach(function(r) {
-                var cells = rowFn(r);
-                var rowCls = clickType ? ' class="ext-clickable"' : '';
-                var rowData = clickType
-                    ? ' data-type="'+esc(clickType)+'" data-name="'+esc(r.name||'')+'"'
-                    : '';
-                h += '<tr'+rowCls+rowData+'>';
-                cells.forEach(function(c, i) {
-                    var cls = i===0 ? 'ext-name' : (i===headers.length-1 ? 'ext-desc' : '');
-                    h += '<td'+(cls?' class="'+cls+'"':'')+'>'+esc(c||'')+'</td>';
-                });
-                h += '</tr>';
-            });
-            return h + '</tbody></table>';
-        }
-
-        function esc(s) {
-            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
-                            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-        }
-
-        function setTabCounts() {
-            if (!extData) return;
-            var c = {skills:extData.skills.length, agents:extData.agents.length,
-                     hooks:extData.hooks.length, mcp:extData.mcpServers.length};
-            var labels = {skills:'Skills',agents:'Agents',hooks:'Hooks',mcp:'MCP Servers'};
-            extTabs.forEach(function(t) {
-                var k = t.dataset.tab;
-                t.innerHTML = labels[k]+' <span class="ext-count">'+'('+( c[k]||0 )+')'+'</span>';
-            });
-        }
-
-        function loadData() {
-            if (extData) return;
-            fetch('/api/extensions')
-                .then(function(r) { return r.json(); })
-                .then(function(d) { extData = d; setTabCounts(); renderTab(extActive); })
-                .catch(function(e) {
-                    extContent.innerHTML = '<div class="ext-loading">Error: '+esc(e.message)+'</div>';
-                });
-        }
-
-        extBtn.addEventListener('click', function(e) {
-            e.stopPropagation();
-            var open = extPanel.style.display !== 'none';
-            extPanel.style.display = open ? 'none' : 'flex';
-            if (!open) loadData();
-        });
-
-        extTabs.forEach(function(t) {
-            t.addEventListener('click', function() {
-                extTabs.forEach(function(x) { x.classList.remove('active'); });
-                t.classList.add('active');
-                renderTab(t.dataset.tab);
-            });
-        });
-
-        // Click on skill/agent row → open content dialog
-        extContent.addEventListener('click', function(e) {
-            var row = e.target.closest('tr[data-type]');
-            if (!row) return;
-            openExtDialog(row.dataset.type, row.dataset.name);
-        });
-
-        document.addEventListener('click', function(e) {
-            if (!document.getElementById('extensions-menu').contains(e.target))
-                extPanel.style.display = 'none';
-        });
-
-        // ── Extension content dialog ─────────────────────────────────────────
-        var extDialogOverlay = document.getElementById('ext-dialog-overlay');
-        var extDialogTitle   = document.getElementById('ext-dialog-title');
-        var extDialogBody    = document.getElementById('ext-dialog-body');
-
-        function openExtDialog(type, name) {
-            var prefix = type === 'skills' ? '/' : '';
-            extDialogTitle.textContent = prefix + name;
-            extDialogBody.innerHTML = '<div class="ext-loading">Loading…</div>';
-            extDialogOverlay.style.display = 'flex';
-            fetch('/api/extensions/content?type=' + encodeURIComponent(type)
-                  + '&name=' + encodeURIComponent(name))
-                .then(function(r) {
-                    if (!r.ok) throw new Error('HTTP ' + r.status);
-                    return r.text();
-                })
-                .then(function(md) {
-                    extDialogBody.innerHTML = (typeof marked !== 'undefined')
-                        ? renderMd(md)
-                        : '<pre>' + esc(md) + '</pre>';
-                })
-                .catch(function(err) {
-                    extDialogBody.innerHTML = '<div class="ext-loading">Error: ' + esc(err.message) + '</div>';
-                });
-        }
-
-        document.getElementById('ext-dialog-close').addEventListener('click', function() {
-            extDialogOverlay.style.display = 'none';
-        });
-        extDialogOverlay.addEventListener('click', function(e) {
-            if (e.target === extDialogOverlay) extDialogOverlay.style.display = 'none';
-        });
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape' && extDialogOverlay.style.display !== 'none')
-                extDialogOverlay.style.display = 'none';
-        });
-    })();
-    // ── End Extensions panel ──────────────────────────────────────────────────
-
-    } // end doInitApp
+    // Exposed for console.js's Actors-tree click handler (ActorTreeTabSwitcher_260826_oo01) —
+    // clicking a conversation actor's name calls window.chatUiSwitchChat(projectId, chatId).
+    window.chatUiSwitchChat = switchChat;
+    // Which conversation this pane shows, so console.js can move it off a project it deletes.
+    window.chatUiCurrentProjectId = function () { return PROJECT_ID; };
+    window.chatUiCurrentChatId = function () { return CHAT_ID; };
+    window.chatUiGetActiveChat = function () { return { projectId: PROJECT_ID, chatId: CHAT_ID }; };
 })();

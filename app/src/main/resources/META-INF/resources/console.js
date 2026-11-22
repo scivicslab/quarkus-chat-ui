@@ -1,105 +1,452 @@
-/* Console shell behaviour: splitter drag, right-pane tab switching, and the Logs tab.
-   This script only drives the shell (#console-root / #right-panel); the chat-ui app.js
-   owns everything inside #left-panel and is left untouched. */
+// Console script for chat-ui-with-audit-trail.
+//   - right-pane menu (#right-tab-select): which section the right pane shows
+//   - Actors tab: fetch GET /api/actors and render the actor tree
+//   - Sessions tab: GET /api/sessions?conversationSquadId=<active ConversationSquad>, trace view unchanged (ported from
+//     quarkus-chat-ui3)
+//   - System Log tab: GET /api/projects/{p}/chats/{c}/log (150_TabScopedLogging_260826_oo01);
+//     falls back to GET /api/logs (LogTap, server-wide) only if no conversation is active yet
+//   - Log Search tab: GET /api/iolog/search — one query against every conversation this instance
+//     has recorded, the ones whose actor was removed included (CrossConversationLogSearch_260913_oo01)
+//   - Agent Loop tab: GET /api/projects/{p}/chats/{c}/workflows[/<name>] (AgentLoopTab_260827_oo01),
+//     read-only YAML viewer ported from quarkus-chat-ui3's own "Agent Loop" tab
 (function () {
-    'use strict';
+    "use strict";
 
-    // ── Draggable splitter ──────────────────────────────────────────────────
-    function initSplitter() {
-        var splitter = document.getElementById('splitter');
-        var left = document.getElementById('left-panel');
-        var root = document.getElementById('console-root');
-        if (!splitter || !left || !root) return;
-
-        var dragging = false;
-
-        function onMove(e) {
-            if (!dragging) return;
-            var rect = root.getBoundingClientRect();
-            var x = e.clientX - rect.left;
-            var min = 320;                 // keep the chat usable
-            var max = rect.width - 280;    // keep the right pane usable
-            if (x < min) x = min;
-            if (x > max) x = max;
-            left.style.width = x + 'px';
-            e.preventDefault();
-        }
-
-        function stop() {
-            if (!dragging) return;
-            dragging = false;
-            splitter.classList.remove('dragging');
-            document.body.style.userSelect = '';
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', stop);
-        }
-
-        splitter.addEventListener('mousedown', function (e) {
-            dragging = true;
-            splitter.classList.add('dragging');
-            document.body.style.userSelect = 'none';
-            document.addEventListener('mousemove', onMove);
-            document.addEventListener('mouseup', stop);
-            e.preventDefault();
-        });
+    // ── Right-pane menu ─────────────────────────────────────────────────────
+    // The right pane shows one section (#tab-<name>) at a time, chosen in #right-tab-select. Every
+    // switch -- the person choosing an entry, a change of perspective, a link elsewhere on the page --
+    // goes through showRightTab, so a section's own onShow runs once, the same way whoever asked.
+    // (A second, separate listener once raced with initIo()'s own and started two concurrent
+    // ioLoadSessions() calls stepping on each other's DOM update.)
+    function rightTabSelect() {
+        return document.getElementById("right-tab-select");
     }
 
-    // ── Right-pane tabs ─────────────────────────────────────────────────────
+    // Why the person opens each entry of the right-pane menu and what the panel does about it, keyed by the entry's value
+    // (the section tab-<value>). Shown in the line under the menu (#right-tab-desc) and as each
+    // entry's tooltip. Actions is the same panel in both perspectives, so it has one description.
+    var RIGHT_TAB_DESCRIPTIONS = {
+        logdb: "To see exactly what this conversation sent to its model and what came back, open a recorded session and follow its turns step by step.",
+        syslog: "When a turn of this conversation went wrong, read its log here; set Level to WARN or ERROR to find the failure.",
+        agentloop: "This conversation runs each of its turns by the agent loop shown here; choose another one to change how it works.",
+        logsearch: "When you remember what was said but not which conversation said it, search here: it covers every conversation this instance recorded.",
+        actions: "A workflow step names an actor and one of its actions, so while writing a workflow, look up here which actors exist and what each action takes.",
+        projectprop: "To set up this project, edit its name, working directory, conversations and liaison here.",
+        jobrun: "To run the workflow open in the centre pane as a batch job, fill in its inputs here and press Run.",
+        joblog: "When a batch job did not do what you expected, read the lines it wrote; open it from the job's Log button under Batch Jobs.",
+        jobs: "To follow the batch jobs you started, see their state here, and open a job's log or stop it.",
+        methodsearch: "When you know a method's name but not which actor offers it, search for it here.",
+        timekeeper: "A timekeeper has nothing to show in this pane; what it is watching is in the centre pane."
+    };
+
+    /** Writes the selected entry's description into the line under the menu. */
+    function showRightTabDescription() {
+        var sel = rightTabSelect();
+        var line = document.getElementById("right-tab-desc");
+        if (!sel || !line) return;
+        var opt = sel.options[sel.selectedIndex];
+        var text = opt ? (RIGHT_TAB_DESCRIPTIONS[opt.value] || "") : "";
+        line.textContent = text;
+        line.title = text;   // the line shows at most two lines; the tooltip has all of it
+    }
+
+    /** The menu entry for section {@code tab} in perspective {@code kind}, or null. */
+    function rightTabOption(tab, kind) {
+        var sel = rightTabSelect();
+        if (!sel) return null;
+        return sel.querySelector('option[value="' + tab + '"][data-perspective="' + kind + '"]');
+    }
+
+    /** Shows section {@code tab} of the current perspective, selects its menu entry and runs its onShow. */
+    function showRightTab(tab) {
+        var opt = rightTabOption(tab, perspective);
+        if (!opt) return;
+        opt.selected = true;
+        showRightTabDescription();
+        document.querySelectorAll(".rtab-content").forEach(function (c) {
+            c.classList.toggle("active", c.id === "tab-" + tab);
+        });
+        if (tab === "logdb") ioOnShow();
+        if (tab === "syslog") refreshLogs();
+        if (tab === "agentloop") wfOnShow();
+        if (tab === "logsearch") lsearchOnShow();
+        if (tab === "jobrun") jobRunOnShow();
+        if (tab === "jobs") jobsOnShow();
+        if (tab === "joblog") jobLogOnShow();
+        if (tab === "actions") actOnShow();
+        if (tab === "methodsearch") msOnShow();
+    }
+
     function initTabs() {
-        var bar = document.getElementById('right-tab-bar');
-        if (!bar) return;
-        bar.addEventListener('click', function (e) {
-            var btn = e.target.closest('.rtab-btn');
-            if (!btn) return;
-            var tab = btn.getAttribute('data-tab');
-            bar.querySelectorAll('.rtab-btn').forEach(function (b) {
-                b.classList.toggle('active', b === btn);
-            });
-            document.querySelectorAll('.rtab-content').forEach(function (c) {
-                c.classList.toggle('active', c.id === 'tab-' + tab);
-            });
-            if (tab === 'actors') refreshActors();
-            if (tab === 'logdb') ioOnShow();
-            if (tab === 'syslog') refreshLogs();
-            if (tab === 'workflow') wfOnShow();
+        var sel = rightTabSelect();
+        if (!sel) return;
+        Array.prototype.forEach.call(sel.options, function (o) {
+            o.title = RIGHT_TAB_DESCRIPTIONS[o.value] || "";
         });
+        showRightTabDescription();
+        sel.addEventListener("change", function () { showRightTab(sel.value); });
     }
 
-    // ── Logs tab ────────────────────────────────────────────────────────────
+    // ── Project perspective, right pane: run a workflow, list the jobs, read a job's log ────
+    // (ProjectPerspective_260911_oo01, step 4). A job is one workflow run as the project's child
+    // actor; the Project actor owns the list. Lists auto-refresh every 3s while their tab shows.
+    var jobLogSelected = null;
+    var jobsTimer = null;
+    var jobLogTimer = null;
+
+    function projectJobsUrl(suffix) {
+        if (!perspectiveProjectId) return null;
+        return "api/projects/" + encodeURIComponent(perspectiveProjectId) + "/jobs" + (suffix || "");
+    }
+    function setText(id, text) { var el = document.getElementById(id); if (el) el.textContent = text || ""; }
+    function tabShowing(id) {
+        var el = document.getElementById(id);
+        return !!el && el.classList.contains("active") && perspective === "project";
+    }
+
+    // Run tab: mirrors what the centre pane has open, with one field per input that workflow
+    // declares in its params section (JobParameterForm_260913_oo01).
+    function jobRunOnShow() {
+        setText("jobrun-workflow", projectWfOpenName || "(none open)");
+        var btn = document.getElementById("jobrun-run");
+        if (btn) btn.disabled = !projectWfOpenName;
+        jobRunRenderParams();
+    }
+
+    /** @return the inputs of the workflow the centre pane has open, or [] when none is open */
+    function jobRunParams() {
+        if (!projectWfDoc || projectWfDoc.name !== projectWfOpenName) return [];
+        return projectWfDoc.params || [];
+    }
+
+    function jobRunFieldEl(p) {
+        var wrap = document.createElement("div");
+        wrap.className = "jobrun-param";
+        wrap.dataset.paramKey = p.key;
+
+        var label = document.createElement("label");
+        label.className = "jobrun-param-key";
+        label.textContent = p.label || p.key;
+        if (p.required) {
+            var star = document.createElement("span");
+            star.className = "jobrun-param-required";
+            star.textContent = "*";
+            label.appendChild(star);
+        }
+        wrap.appendChild(label);
+
+        var field;
+        if (p.type === "textarea") {
+            field = document.createElement("textarea");
+        } else if (p.type === "select" && (p.options || []).length > 0) {
+            field = document.createElement("select");
+            p.options.forEach(function (o) {
+                var opt = document.createElement("option");
+                opt.value = o;
+                opt.textContent = o;
+                field.appendChild(opt);
+            });
+        } else if (p.type === "bool") {
+            field = document.createElement("input");
+            field.type = "checkbox";
+        } else {
+            field = document.createElement("input");
+            field.type = p.type === "int" ? "number" : "text";
+        }
+        field.className = "jobrun-param-input";
+        if (p.defaultValue !== null && p.defaultValue !== undefined) {
+            if (p.type === "bool") field.checked = p.defaultValue === "true";
+            else field.value = p.defaultValue;
+        }
+        wrap.appendChild(field);
+
+        if (p.description) {
+            var desc = document.createElement("div");
+            desc.className = "jobrun-param-desc";
+            desc.textContent = p.description;
+            wrap.appendChild(desc);
+        }
+        return wrap;
+    }
+
+    function jobRunRenderParams() {
+        var box = document.getElementById("jobrun-params");
+        var hint = document.getElementById("jobrun-hint");
+        if (!box) return;
+        box.innerHTML = "";
+        var params = jobRunParams();
+        params.forEach(function (p) { box.appendChild(jobRunFieldEl(p)); });
+        if (hint) {
+            hint.style.display = params.length > 0 ? "none" : "";
+            if (projectWfOpenName && params.length === 0) {
+                hint.textContent = projectWfOpenName + " declares no inputs. Press Run to start it.";
+            } else if (!projectWfOpenName) {
+                hint.textContent = "Open a workflow in the centre pane, then Run. The job appears under"
+                    + " Batch Jobs, and its log under Job Log.";
+            }
+        }
+    }
+
+    /** @return what the fields hold, keyed by the name the workflow declared */
+    function jobRunValues() {
+        var out = {};
+        document.querySelectorAll("#jobrun-params .jobrun-param").forEach(function (wrap) {
+            var field = wrap.querySelector(".jobrun-param-input");
+            if (!field) return;
+            out[wrap.dataset.paramKey] = field.type === "checkbox"
+                ? String(field.checked)
+                : field.value;
+        });
+        return out;
+    }
+
+    /** Marks the first required field left empty and returns its key, or null when all are filled. */
+    function jobRunFirstMissing(values) {
+        var missing = null;
+        document.querySelectorAll("#jobrun-params .jobrun-param").forEach(function (wrap) {
+            wrap.classList.remove("jobrun-param-missing");
+        });
+        jobRunParams().forEach(function (p) {
+            if (missing || !p.required) return;
+            var value = values[p.key];
+            if (value !== undefined && String(value).trim() !== "") return;
+            missing = p.key;
+            var wrap = document.querySelector('#jobrun-params .jobrun-param[data-param-key="'
+                + (window.CSS && CSS.escape ? CSS.escape(p.key) : p.key) + '"]');
+            if (wrap) {
+                wrap.classList.add("jobrun-param-missing");
+                var field = wrap.querySelector(".jobrun-param-input");
+                if (field) field.focus();
+            }
+        });
+        return missing;
+    }
+
+    function jobRun() {
+        var url = projectJobsUrl("");
+        if (!url || !projectWfOpenName) return;
+        var values = jobRunValues();
+        var missing = jobRunFirstMissing(values);
+        if (missing) { setText("jobrun-status", missing + " is required"); return; }
+        setText("jobrun-status", "starting…");
+        fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+                     body: JSON.stringify({ workflow: projectWfOpenName, parameters: values }) })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); })
+            .then(function (res) {
+                if (!res.ok) { setText("jobrun-status", (res.body && res.body.error) || ("HTTP " + res.status)); return; }
+                // One job runs at a time per project; a later one waits its turn
+                // (ProjectJobQueue_261014_oo01).
+                setText("jobrun-status", res.body.state === "QUEUED"
+                        ? "queued " + res.body.jobId + " (" + ordinal(res.body.position) + " in line)"
+                        : "started " + res.body.jobId);
+                jobLogSelected = res.body.jobId;
+                jobsOnShow();
+            })
+            .catch(function (e) { setText("jobrun-status", "error: " + e.message); });
+    }
+
+    function ordinal(n) {
+        var tens = n % 100;
+        var suffix = (tens >= 11 && tens <= 13) ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th");
+        return n + suffix;
+    }
+
+    function fmtInstant(s) {
+        if (!s) return "";
+        var d = new Date(s);
+        if (isNaN(d.getTime())) return s;
+        var p = function (n) { return String(n).padStart(2, "0"); };
+        return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+    }
+
+    function jobRowEl(j) {
+        var row = document.createElement("div");
+        row.className = "job-row job-" + (j.state || "").toLowerCase() + (j.jobId === jobLogSelected ? " selected" : "");
+        var head = document.createElement("div");
+        head.className = "job-head";
+        var id = document.createElement("span"); id.className = "job-id"; id.textContent = j.jobId;
+        var wf = document.createElement("span"); wf.className = "job-wf"; wf.textContent = j.workflow || "";
+        var st = document.createElement("span"); st.className = "job-state";
+        st.textContent = (j.state || "") + (j.state === "QUEUED" && j.position ? " #" + j.position : "");
+        var when = document.createElement("span"); when.className = "job-when";
+        when.textContent = j.startedAt
+                ? fmtInstant(j.startedAt) + (j.finishedAt ? " → " + fmtInstant(j.finishedAt) : "")
+                : "queued " + fmtInstant(j.queuedAt) + (j.finishedAt ? " → " + fmtInstant(j.finishedAt) : "");
+        head.appendChild(id); head.appendChild(wf); head.appendChild(st); head.appendChild(when);
+        var actions = document.createElement("span");
+        actions.className = "job-actions";
+        var logBtn = document.createElement("button");
+        logBtn.type = "button"; logBtn.textContent = "Log"; logBtn.title = "Show this job's log";
+        logBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            jobLogSelected = j.jobId;
+            showRightTab("joblog");
+        });
+        actions.appendChild(logBtn);
+        if (j.state === "RUNNING" || j.state === "QUEUED") {
+            var stop = document.createElement("button");
+            stop.type = "button"; stop.textContent = "Stop";
+            stop.title = j.state === "QUEUED" ? "Take this job out of the line; it will not run"
+                                              : "Ask this job to stop between steps";
+            stop.addEventListener("click", function (e) {
+                e.stopPropagation();
+                fetch(projectJobsUrl("/" + encodeURIComponent(j.jobId) + "/stop"), { method: "POST" })
+                    .then(function (r) { return r.json().then(function (b) { setText("jobs-status", r.ok ? "stop requested for " + j.jobId : ((b && b.error) || ("HTTP " + r.status))); }); })
+                    .catch(function (err) { setText("jobs-status", "error: " + err.message); })
+                    .finally(jobsLoad);
+            });
+            actions.appendChild(stop);
+        }
+        head.appendChild(actions);
+        row.appendChild(head);
+        if (j.result) {
+            var res = document.createElement("div");
+            res.className = "job-result";
+            res.textContent = j.result;
+            row.appendChild(res);
+        }
+        row.addEventListener("click", function () {
+            jobLogSelected = j.jobId;
+            document.querySelectorAll("#jobs-list .job-row").forEach(function (r) { r.classList.toggle("selected", r === row); });
+        });
+        return row;
+    }
+
+    var jobsLoading = false;
+    function jobsLoad() {
+        var list = document.getElementById("jobs-list");
+        var url = projectJobsUrl("");
+        if (!list || !url || jobsLoading) return;
+        jobsLoading = true;
+        fetch(url)
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+            .then(function (jobs) {
+                list.textContent = "";
+                if (!jobs || !jobs.length) {
+                    var empty = document.createElement("div");
+                    empty.className = "project-placeholder";
+                    empty.textContent = "No jobs yet. Open a workflow and Run it.";
+                    list.appendChild(empty);
+                } else {
+                    jobs.forEach(function (j) { list.appendChild(jobRowEl(j)); });
+                }
+                var running = (jobs || []).filter(function (j) { return j.state === "RUNNING"; }).length;
+                var queued = (jobs || []).filter(function (j) { return j.state === "QUEUED"; }).length;
+                setText("jobs-status", (jobs || []).length + " job(s), " + running + " running"
+                        + (queued ? ", " + queued + " queued" : ""));
+            })
+            .catch(function (e) { setText("jobs-status", "error: " + e.message); })
+            .finally(function () { jobsLoading = false; });
+    }
+
+    function jobsOnShow() {
+        jobsLoad();
+        jobsApplyAuto();
+    }
+
+    function jobsApplyAuto() {
+        var auto = document.getElementById("jobs-auto");
+        if (jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; }
+        if (auto && auto.checked) {
+            jobsTimer = setInterval(function () { if (tabShowing("tab-jobs")) jobsLoad(); }, 3000);
+        }
+    }
+
+    function jobLogRender(entries) {
+        var list = document.getElementById("joblog-list");
+        if (!list) return;
+        list.textContent = "";
+        (entries || []).forEach(function (e) {
+            var line = document.createElement("div");
+            line.className = "joblog-line joblog-" + String(e.type || "").toLowerCase();
+            var t = document.createElement("span"); t.className = "joblog-time"; t.textContent = fmtLogTime(e.time);
+            var ty = document.createElement("span"); ty.className = "joblog-type"; ty.textContent = e.type || "";
+            var d = document.createElement("span"); d.className = "joblog-data"; d.textContent = e.data || "";
+            line.appendChild(t); line.appendChild(ty); line.appendChild(d);
+            list.appendChild(line);
+        });
+        list.scrollTop = list.scrollHeight;
+    }
+
+    var jobLogLoading = false;
+    function jobLogLoad() {
+        setText("joblog-job", jobLogSelected || "(none selected)");
+        if (!jobLogSelected) { setText("joblog-status", "pick a job under Batch Jobs"); return; }
+        var url = projectJobsUrl("/" + encodeURIComponent(jobLogSelected) + "/log");
+        if (!url || jobLogLoading) return;
+        jobLogLoading = true;
+        fetch(url)
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+            .then(function (entries) {
+                jobLogRender(entries);
+                setText("joblog-status", (entries || []).length + " line(s)");
+            })
+            .catch(function (e) { setText("joblog-status", "error: " + e.message); })
+            .finally(function () { jobLogLoading = false; });
+    }
+
+    function jobLogOnShow() {
+        jobLogLoad();
+        jobLogApplyAuto();
+    }
+
+    function jobLogApplyAuto() {
+        var auto = document.getElementById("joblog-auto");
+        if (jobLogTimer) { clearInterval(jobLogTimer); jobLogTimer = null; }
+        if (auto && auto.checked) {
+            jobLogTimer = setInterval(function () { if (tabShowing("tab-joblog")) jobLogLoad(); }, 3000);
+        }
+    }
+
+    function initJobs() {
+        var run = document.getElementById("jobrun-run");
+        if (run) run.addEventListener("click", jobRun);
+        var jr = document.getElementById("jobs-refresh");
+        if (jr) jr.addEventListener("click", jobsLoad);
+        var ja = document.getElementById("jobs-auto");
+        if (ja) ja.addEventListener("change", jobsApplyAuto);
+        var lr = document.getElementById("joblog-refresh");
+        if (lr) lr.addEventListener("click", jobLogLoad);
+        var la = document.getElementById("joblog-auto");
+        if (la) la.addEventListener("change", jobLogApplyAuto);
+    }
+
+    // ── System Log tab (GET /api/logs — LogTap's server-wide ring buffer) ──────
+    // Ported near-verbatim from quarkus-chat-ui3's console.js.
     function fmtLogTime(ms) {
-        if (!ms) return '';
+        if (!ms) return "";
         var d = new Date(ms);
-        var p = function (n, w) { return String(n).padStart(w || 2, '0'); };
-        return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
-            + '.' + p(d.getMilliseconds(), 3);
+        var p = function (n, w) { return String(n).padStart(w || 2, "0"); };
+        return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds())
+            + "." + p(d.getMilliseconds(), 3);
     }
 
     function renderLogs(entries) {
-        var list = document.getElementById('logs-list');
+        var list = document.getElementById("logs-list");
         if (!list) return;
-        list.textContent = '';
+        list.textContent = "";
         if (!Array.isArray(entries) || entries.length === 0) {
-            var empty = document.createElement('div');
-            empty.className = 'log-empty';
-            empty.textContent = 'No log entries yet.';
+            var empty = document.createElement("div");
+            empty.className = "log-empty";
+            empty.textContent = "No log entries yet.";
             list.appendChild(empty);
             return;
         }
         entries.forEach(function (e) {
-            var line = document.createElement('div');
-            line.className = 'log-line log-' + (e.level || 'INFO');
-            if (typeof e.levelValue === 'number') line.setAttribute('data-lv', e.levelValue);
-            var t = document.createElement('span');
-            t.className = 'log-time';
-            t.textContent = fmtLogTime(e.time) + ' ';
-            var lv = document.createElement('span');
-            lv.className = 'log-level';
-            lv.textContent = '[' + (e.level || '?') + '] ';
-            var lg = document.createElement('span');
-            lg.className = 'log-logger';
-            lg.textContent = (e.logger || '') + ': ';
-            var msg = document.createElement('span');
-            msg.textContent = e.message || '';   // textContent => no HTML injection
+            var line = document.createElement("div");
+            line.className = "log-line log-" + (e.level || "INFO");
+            if (typeof e.levelValue === "number") line.setAttribute("data-lv", e.levelValue);
+            var t = document.createElement("span");
+            t.className = "log-time";
+            t.textContent = fmtLogTime(e.time) + " ";
+            var lv = document.createElement("span");
+            lv.className = "log-level";
+            lv.textContent = "[" + (e.level || "?") + "] ";
+            var lg = document.createElement("span");
+            lg.className = "log-logger";
+            lg.textContent = (e.logger || "") + ": ";
+            var msg = document.createElement("span");
+            msg.textContent = e.message || "";   // textContent => no HTML injection
             line.appendChild(t);
             line.appendChild(lv);
             line.appendChild(lg);
@@ -112,23 +459,18 @@
     var lastLogEntries = [];
 
     // Re-render the last-fetched logs, keeping only entries at or above the selected severity.
-    // Filtering uses the numeric level value supplied by the backend (Level.intValue()), so it is
-    // independent of the level's name (JUL "WARNING" and JBoss "WARN" are both 900). ALL = no floor.
-    // An entry without a numeric value is never hidden.
     function applyLevelFilter() {
-        var sel = document.getElementById('logs-level');
-        var min = (sel && sel.value !== '') ? Number(sel.value) : -Infinity;
+        var sel = document.getElementById("logs-level");
+        var min = (sel && sel.value !== "") ? Number(sel.value) : -Infinity;
         var filtered = lastLogEntries.filter(function (e) {
-            var lv = (typeof e.levelValue === 'number') ? e.levelValue : NaN;
+            var lv = (typeof e.levelValue === "number") ? e.levelValue : NaN;
             return isNaN(lv) || lv >= min;   // unknown value: always show
         });
         renderLogs(filtered);
-        var status = document.getElementById('logs-status');
-        if (status) status.textContent = filtered.length + ' / ' + lastLogEntries.length + ' line(s)';
+        var status = document.getElementById("logs-status");
+        if (status) status.textContent = filtered.length + " / " + lastLogEntries.length + " line(s)";
     }
 
-    // True while the user has an active text selection inside the given element.
-    // Used to suppress auto-refresh re-renders so a copy operation is not wiped.
     function hasTextSelectionIn(el) {
         var sel = window.getSelection();
         if (!el || !sel || sel.isCollapsed || sel.rangeCount === 0) return false;
@@ -136,21 +478,31 @@
         return !!(node && el.contains(node));
     }
 
-    // Map a server-log row to the shape renderLogs expects. Accepts both the chat-ui3 shape
-    // ({time,level,levelValue,logger,message}) and this app's ChatEvent log shape
-    // ({timestamp,logLevel,loggerName,content}).
-    var LEVEL_VALUE = { TRACE:400, FINEST:300, FINER:400, FINE:500, DEBUG:500, CONFIG:700,
-                        INFO:800, WARN:900, WARNING:900, ERROR:1000, SEVERE:1000 };
-    function mapLogEntry(e) {
-        var level = e.level || e.logLevel || 'INFO';
-        return {
-            time: (e.time != null ? e.time : e.timestamp),
-            level: level,
-            levelValue: (typeof e.levelValue === 'number') ? e.levelValue
-                        : (LEVEL_VALUE[String(level).toUpperCase()] || 800),
-            logger: e.logger || e.loggerName || '',
-            message: (e.message != null ? e.message : e.content) || ''
-        };
+    // Maps a tab log multiplexer's RecentEntriesAccumulator.Entry (time/source/type/data) into the
+    // shape renderLogs()/applyLevelFilter() already know (LogTap.Entry: time/level/levelValue/
+    // logger/message), so the existing rendering + severity filter keep working unchanged. `type`
+    // is "INFO" for entries ChatSession/PromptQueue log explicitly, or "log-<LEVEL>" for framework
+    // noise forwarded via MultiplexerLogHandler (150_TabScopedLogging_260826_oo01).
+    var JUL_LEVEL_VALUES = { SEVERE: 1000, WARNING: 900, INFO: 800, CONFIG: 700, FINE: 500, FINER: 400, FINEST: 300 };
+    function fromTabLogShape(entries) {
+        return entries.map(function (e) {
+            var level = (e.type && e.type.indexOf("log-") === 0) ? e.type.substring(4) : "INFO";
+            return {
+                time: e.time,
+                level: level,
+                levelValue: JUL_LEVEL_VALUES.hasOwnProperty(level) ? JUL_LEVEL_VALUES[level] : 800,
+                logger: e.source || "",
+                message: e.data || ""
+            };
+        });
+    }
+
+    // Base path of the active conversation's endpoints, or null if app.js hasn't loaded yet.
+    function activeChatUrl(suffix) {
+        var c = (typeof window.chatUiGetActiveChat === "function") ? window.chatUiGetActiveChat() : null;
+        if (!c) return null;
+        return "api/projects/" + encodeURIComponent(c.projectId)
+                + "/chats/" + encodeURIComponent(c.chatId) + suffix;
     }
 
     var logsRefreshing = false;
@@ -158,14 +510,17 @@
     function refreshLogs() {
         if (logsRefreshing) return;
         logsRefreshing = true;
-        var status = document.getElementById('logs-status');
-        fetch('api/logs')
+        var status = document.getElementById("logs-status");
+        var chatLogUrl = activeChatUrl("/log");
+        var url = chatLogUrl || "api/logs";
+        fetch(url)
             .then(function (r) {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
+                if (!r.ok) throw new Error("HTTP " + r.status);
                 return r.json();
             })
-            .then(function (raw) {
-                var entries = (Array.isArray(raw) ? raw : []).map(mapLogEntry);
+            .then(function (entries) {
+                entries = Array.isArray(entries) ? entries : [];
+                if (chatLogUrl) entries = fromTabLogShape(entries);
                 var sig = JSON.stringify(entries);
                 if (sig === lastLogSig) return;   // unchanged (e.g. idle): do not touch the DOM
                 lastLogSig = sig;
@@ -173,26 +528,25 @@
                 applyLevelFilter();
             })
             .catch(function (err) {
-                if (status) status.textContent = 'error: ' + err.message;
+                if (status) status.textContent = "error: " + err.message;
             })
             .finally(function () { logsRefreshing = false; });
     }
 
     function initLogs() {
-        var btn = document.getElementById('logs-refresh');
-        var auto = document.getElementById('logs-auto');
-        if (btn) btn.addEventListener('click', refreshLogs);
-        var levelSel = document.getElementById('logs-level');
-        if (levelSel) levelSel.addEventListener('change', applyLevelFilter);
+        var btn = document.getElementById("logs-refresh");
+        var auto = document.getElementById("logs-auto");
+        if (btn) btn.addEventListener("click", refreshLogs);
+        var levelSel = document.getElementById("logs-level");
+        if (levelSel) levelSel.addEventListener("change", applyLevelFilter);
 
         var timer = null;
         function applyAuto() {
             if (auto && auto.checked) {
                 if (!timer) timer = setInterval(function () {
-                    var tab = document.getElementById('tab-syslog');
-                    // Skip the tick while the user is selecting/copying inside the log list.
-                    if (tab && tab.classList.contains('active')
-                        && !hasTextSelectionIn(document.getElementById('logs-list'))) {
+                    var tab = document.getElementById("tab-syslog");
+                    if (tab && tab.classList.contains("active")
+                        && !hasTextSelectionIn(document.getElementById("logs-list"))) {
                         refreshLogs();
                     }
                 }, 3000);
@@ -201,48 +555,1660 @@
                 timer = null;
             }
         }
-        if (auto) auto.addEventListener('change', applyAuto);
+        if (auto) auto.addEventListener("change", applyAuto);
         applyAuto();
-        refreshLogs();   // Logs is the default tab — load immediately
+    }
+
+    // ── Agent Loop tab (GET /api/projects/{p}/chats/{c}/workflows[/<name>]) — read-only YAML viewer,
+    // ported near-verbatim from quarkus-chat-ui3's console.js, made tab-scoped (AgentLoopTab_260827_oo01).
+    function wfStatus(msg) {
+        var s = document.getElementById("wf-status");
+        if (s) s.textContent = msg || "";
+    }
+
+    // Splits a workflow YAML into a preamble (everything before the first step) and the top-level
+    // step items (lines beginning with exactly "  - "). Display only — no reassembly.
+    function wfSplitSteps(yaml) {
+        var lines = (yaml || "").split("\n");
+        var preamble = [], steps = [], cur = null;
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (/^  - /.test(line)) {
+                if (cur) steps.push(cur.join("\n"));
+                cur = [line];
+            } else if (cur) {
+                cur.push(line);
+            } else {
+                preamble.push(line);
+            }
+        }
+        if (cur) steps.push(cur.join("\n"));
+        return { preamble: preamble.join("\n").replace(/\s+$/, ""), steps: steps };
+    }
+
+    // Box heading: the step's transition direction (the states array) plus its 0-based step number.
+    function wfStepTitle(text, idx) {
+        var m = text.match(/(^|\n)\s*-?\s*states:\s*(.+)/);
+        var states = m ? m[2].trim() : "";
+        return (states ? states + "   " : "") + "# step " + idx;
+    }
+
+    function wfRenderBox(parent, title, body, kind) {
+        var box = document.createElement("div");
+        box.className = "wf-box" + (kind ? " wf-" + kind : "");
+        var h = document.createElement("div");
+        h.className = "wf-box-title";
+        h.textContent = title;
+        var pre = document.createElement("pre");
+        pre.className = "wf-box-yaml";
+        pre.textContent = body;   // read-only; textContent => no HTML injection
+        box.appendChild(h);
+        box.appendChild(pre);
+        parent.appendChild(box);
+    }
+
+    // Draws a workflow as boxes into any container. Shared by the Agent Loop tab and the project
+    // pane (ProjectPerspective_260911_oo01). Returns the step count for the caller's status line.
+    function wfRenderInto(container, yaml) {
+        if (!container) return 0;
+        container.textContent = "";
+        var parts = wfSplitSteps(yaml);
+        if (parts.preamble) wfRenderBox(container, "workflow header", parts.preamble, "head");
+        parts.steps.forEach(function (s, i) {
+            wfRenderBox(container, wfStepTitle(s, i), s, "step");
+        });
+        return parts.steps.length;
+    }
+
+    function wfRender(yaml) {
+        var n = wfRenderInto(document.getElementById("wf-list"), yaml);
+        wfStatus(n + " step(s) — read-only");
+    }
+
+    function wfLoad(name) {
+        if (!name) return;
+        wfStatus("loading…");
+        var wfUrl = activeChatUrl("/workflows/" + encodeURIComponent(name));
+        if (!wfUrl) { wfStatus("no active conversation"); return; }
+        fetch(wfUrl)
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (!d || !d.yaml) { wfStatus("not found"); return; }
+                wfRender(d.yaml);
+            })
+            .catch(function (e) { wfStatus("error: " + e.message); });
+    }
+
+    function wfPopulate(then) {
+        var sel = document.getElementById("wf-select");
+        if (!sel) return;
+        var wfListUrl = activeChatUrl("/workflows");
+        if (!wfListUrl) { wfStatus("no active conversation"); return; }
+        fetch(wfListUrl)
+            .then(function (r) { return r.json(); })
+            .then(function (arr) {
+                sel.textContent = "";
+                (arr || []).forEach(function (w) {
+                    var o = document.createElement("option");
+                    o.value = w.name;
+                    o.textContent = w.title || w.name;
+                    sel.appendChild(o);
+                });
+                if (then) then();
+            })
+            .catch(function (e) { wfStatus("error: " + e.message); });
+    }
+
+    // The agent loops this conversation can be put on (GET .../agent-loops), with the one it is on
+    // selected. Choosing one is POST .../agent-loop-workflow; the loop also names the prompt
+    // construction, so the viewer below is refreshed after (AgentLoopDecidesThePrompt_261020_oo01).
+    function wfPopulateLoops() {
+        var sel = document.getElementById("wf-loop-select");
+        if (!sel) return;
+        var url = activeChatUrl("/agent-loops");
+        if (!url) return;
+        fetch(url)
+            .then(function (r) { return r.json(); })
+            .then(function (loops) {
+                sel.textContent = "";
+                (loops || []).forEach(function (l) {
+                    var o = document.createElement("option");
+                    o.value = l.file;
+                    o.textContent = l.file.replace(/\.yaml$/, "") + " (prompt: " + l.promptWorkflow.replace(/\.yaml$/, "") + ")";
+                    o.title = l.description || "";
+                    o.selected = !!l.current;
+                    sel.appendChild(o);
+                });
+            })
+            .catch(function (e) { wfStatus("error: " + e.message); });
+    }
+
+    function wfChooseLoop(file) {
+        var url = activeChatUrl("/agent-loop-workflow");
+        if (!url || !file) return;
+        wfStatus("switching…");
+        fetch(url, { method: "POST", headers: { "Content-Type": "text/plain" }, body: file })
+            .then(function (r) {
+                return r.json().then(function (d) {
+                    if (!r.ok) throw new Error(d && d.message ? d.message : "refused");
+                    return d;
+                });
+            })
+            .then(function () { wfOnShow(); })
+            .catch(function (e) { wfStatus("error: " + e.message); wfPopulateLoops(); });
+    }
+
+    // Always re-populates the catalog (not just on first show) so switching conversation tabs
+    // updates which workflow(s) are listed/selected — each tab can be configured with a different
+    // agent-loop workflow file (AgentLoopTab_260827_oo01 — tab-sync has no exceptions here).
+    function wfOnShow() {
+        var sel = document.getElementById("wf-select");
+        wfPopulateLoops();
+        wfPopulate(function () { if (sel) wfLoad(sel.value); });
+    }
+
+    function initWorkflow() {
+        var sel = document.getElementById("wf-select");
+        if (sel) sel.addEventListener("change", function () { wfLoad(sel.value); });
+        var loopSel = document.getElementById("wf-loop-select");
+        if (loopSel) loopSel.addEventListener("change", function () { wfChooseLoop(loopSel.value); });
+        var btn = document.getElementById("wf-refresh");
+        if (btn) btn.addEventListener("click", function () { wfLoad(sel ? sel.value : ""); });
+    }
+
+
+    // ── Actions tab ─────────────────────────────────────────────────────────
+    //
+    // Upper pane: every actor a workflow may name, grouped by where it comes from; a row selects
+    // it. Lower pane: the selected actor's actions, each with the first sentence of its Javadoc;
+    // a row shows what that action does, what it takes and the step as a workflow YAML writes it.
+    // Both come from the action catalog over api/actions, so no workflow has to be running
+    // (ActionCatalogWithJavadoc_260930_oo01).
+
+    var ACT_ACTORS_HEIGHT_KEY = "chat-ui-act-actors-height";
+    var actActors = [];          // the rows as the server gave them: {name, type, origin}
+    var actSelected = null;      // the selected row, or null
+
+    function actStatus(text) {
+        var el = document.getElementById("act-status");
+        if (el) el.textContent = text || "";
+    }
+
+    function actPanel() { return document.getElementById("act-list"); }
+
+    /** How the upper pane names each origin. */
+    function actOriginLabel(origin) {
+        switch (origin) {
+            case "workflow": return "workflow run";
+            case "agent-loop": return "agent loop";
+            case "plan": return "plan";
+            case "application": return "application";
+            default:
+                if (origin && origin.indexOf("running:") === 0) return "running: " + origin.substring(8);
+                return origin || "";
+        }
+    }
+
+    /** Draws the upper pane from actActors, keeping only the rows the filter text matches. */
+    function actRenderActors() {
+        var box = document.getElementById("act-actors");
+        if (!box) return;
+        var filter = ((document.getElementById("act-filter") || {}).value || "").trim().toLowerCase();
+        box.textContent = "";
+        var lastOrigin = null;
+        var shown = 0;
+        actActors.forEach(function (a) {
+            if (filter && (a.name + " " + a.type).toLowerCase().indexOf(filter) < 0) return;
+            if (a.origin !== lastOrigin) {
+                var h = document.createElement("div");
+                h.className = "act-origin";
+                h.textContent = actOriginLabel(a.origin);
+                box.appendChild(h);
+                lastOrigin = a.origin;
+            }
+            var row = document.createElement("button");
+            row.type = "button";
+            row.className = "act-actor-row" + (actSelected && actSelected.name === a.name && actSelected.origin === a.origin ? " selected" : "");
+            var name = document.createElement("span");
+            name.className = "act-actor-name";
+            name.textContent = a.name;
+            row.appendChild(name);
+            var type = document.createElement("span");
+            type.className = "act-actor-type";
+            type.textContent = a.type || "";
+            row.appendChild(type);
+            row.addEventListener("click", function () { actSelect(a); });
+            box.appendChild(row);
+            shown++;
+        });
+        if (shown === 0) {
+            var none = document.createElement("p");
+            none.className = "act-problem";
+            none.textContent = actActors.length ? "no actor matches the filter" : "no actors";
+            box.appendChild(none);
+        }
+    }
+
+    /** Fetches the rows and redraws; the selection survives when its row is still there. */
+    function actLoadActors() {
+        fetch("api/actions")
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                actActors = d.actors || [];
+                if (actSelected && !actActors.some(function (a) { return a.name === actSelected.name && a.origin === actSelected.origin; })) {
+                    actSelected = null;
+                    var panel = actPanel();
+                    if (panel) panel.textContent = "";
+                }
+                actRenderActors();
+            })
+            .catch(function (e) { actStatus(e.message); });
+    }
+
+    function actSelect(a) {
+        actSelected = a;
+        actRenderActors();
+        actListActions(a);
+    }
+
+    function actQuery(a) {
+        return "origin=" + encodeURIComponent(a.origin || "") + "&actor=" + encodeURIComponent(a.name);
+    }
+
+    /**
+     * One action in full: the heading, the first sentence, the rest of the Javadoc, what the action
+     * takes (the record's fields, or the String the method documents), and the step as a workflow
+     * YAML writes it — or a problem line.
+     */
+    function actRow(actor, action, d) {
+        var row = document.createElement("div");
+        row.className = "act-item";
+        var head = document.createElement("div");
+        head.className = "act-head";
+        head.textContent = actor + "." + action;
+        row.appendChild(head);
+        if (!d || d.error) {
+            var pr = document.createElement("p");
+            pr.className = "act-problem";
+            pr.textContent = (d && d.error) || "no answer";
+            row.appendChild(pr);
+            return row;
+        }
+        if (d.description) {
+            var desc = document.createElement("p");
+            desc.className = "act-desc";
+            desc.textContent = d.description;
+            row.appendChild(desc);
+        }
+        if (d.details) {
+            var det = document.createElement("p");
+            det.className = "act-details";
+            det.textContent = d.details;
+            row.appendChild(det);
+        }
+        var schema = d.schema;
+        if (schema && schema.properties) {
+            var required = schema.required || [];
+            var ul = document.createElement("ul");
+            ul.className = "act-fields";
+            Object.keys(schema.properties).forEach(function (name) {
+                var prop = schema.properties[name] || {};
+                var li = document.createElement("li");
+                var code = document.createElement("code");
+                code.textContent = name;
+                li.appendChild(code);
+                li.appendChild(document.createTextNode(
+                    " (" + (prop.type || "any") + (required.indexOf(name) >= 0 ? ", required" : "") + ")"
+                    + (prop.description ? " — " + prop.description : "")));
+                ul.appendChild(li);
+            });
+            row.appendChild(ul);
+        } else if (d.argument) {
+            // A raw-String action: what its Javadoc says of the String is all that is declared of it.
+            var pa = document.createElement("p");
+            pa.className = "act-fields";
+            var ca = document.createElement("code");
+            ca.textContent = d.argument.name || "args";
+            pa.appendChild(ca);
+            pa.appendChild(document.createTextNode(" (string)"
+                + (d.argument.description ? " — " + d.argument.description : "")));
+            row.appendChild(pa);
+        } else if (d.note) {
+            var pn = document.createElement("p");
+            pn.className = "act-fields";
+            pn.textContent = d.note;
+            row.appendChild(pn);
+        }
+        if (d.yaml) {
+            var lab = document.createElement("div");
+            lab.className = "act-example-label";
+            lab.textContent = d.example ? "as the workflow YAML writes it" : "as the workflow YAML writes it (composed from the declaration)";
+            row.appendChild(lab);
+            var pre = document.createElement("pre");
+            pre.className = "act-example";
+            pre.textContent = d.yaml;
+            row.appendChild(pre);
+        }
+        return row;
+    }
+
+    /** Shows one action in the lower pane, with a way back to the actor's list. */
+    function actShowAction(a, action) {
+        var panel = actPanel();
+        if (!panel) return;
+        actStatus("loading " + a.name + "." + action + "…");
+        fetch("api/actions/describe?" + actQuery(a) + "&action=" + encodeURIComponent(action))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                panel.textContent = "";
+                var back = document.createElement("button");
+                back.type = "button";
+                back.className = "act-back";
+                back.textContent = "← " + a.name + "'s actions";
+                back.addEventListener("click", function () { actListActions(a); });
+                panel.appendChild(back);
+                panel.appendChild(actRow(a.name, action, d));
+                actStatus("");
+            })
+            .catch(function (e) { actStatus(e.message); });
+    }
+
+    /** Lists the selected actor's actions in the lower pane, each with its first sentence. */
+    function actListActions(a) {
+        var panel = actPanel();
+        if (!panel) return;
+        actStatus("loading " + a.name + "…");
+        fetch("api/actions/list?" + actQuery(a))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                panel.textContent = "";
+                if (d.error) {
+                    var pr = document.createElement("p");
+                    pr.className = "act-problem";
+                    pr.textContent = d.error;
+                    panel.appendChild(pr);
+                    actStatus("");
+                    return;
+                }
+                var head = document.createElement("div");
+                head.className = "act-item";
+                var h = document.createElement("div");
+                h.className = "act-head";
+                h.textContent = a.name;
+                head.appendChild(h);
+                var cls = document.createElement("p");
+                cls.className = "act-desc";
+                cls.textContent = d["class"] || "";
+                head.appendChild(cls);
+                panel.appendChild(head);
+                (d.actions || []).forEach(function (x) {
+                    var name = typeof x === "string" ? x : x.name;
+                    var item = document.createElement("div");
+                    item.className = "act-item";
+                    var b = document.createElement("button");
+                    b.type = "button";
+                    b.className = "act-head";
+                    b.textContent = name;
+                    b.addEventListener("click", function () { actShowAction(a, name); });
+                    item.appendChild(b);
+                    if (x && x.description) {
+                        var p = document.createElement("p");
+                        p.className = "act-desc";
+                        p.textContent = x.description;
+                        item.appendChild(p);
+                    }
+                    panel.appendChild(item);
+                });
+                actStatus(String((d.actions || []).length) + " actions");
+            })
+            .catch(function (e) { actStatus(e.message); });
+    }
+
+    /** The Clear button: no selection, no filter, the lower pane empty — the tab as first opened. */
+    function actClear() {
+        actSelected = null;
+        var f = document.getElementById("act-filter");
+        if (f) f.value = "";
+        var panel = actPanel();
+        if (panel) panel.textContent = "";
+        actStatus("");
+        actRenderActors();
+    }
+
+    /** The line between the two panes: dragging it sets the upper pane's height, which is kept. */
+    function actInitResize() {
+        var box = document.getElementById("act-actors");
+        var handle = document.getElementById("act-resize-handle");
+        if (!box || !handle) return;
+        var saved = parseInt(localStorage.getItem(ACT_ACTORS_HEIGHT_KEY), 10);
+        if (saved && saved > 0) box.style.height = saved + "px";
+        var dragging = false, startY = 0, startHeight = 0;
+        handle.addEventListener("mousedown", function (e) {
+            e.preventDefault();
+            dragging = true;
+            startY = e.clientY;
+            startHeight = box.offsetHeight;
+            handle.classList.add("dragging");
+            document.body.style.cursor = "row-resize";
+            document.body.style.userSelect = "none";
+        });
+        document.addEventListener("mousemove", function (e) {
+            if (!dragging) return;
+            var room = box.parentElement ? box.parentElement.clientHeight : 0;
+            var most = room > 0 ? Math.max(80, room - 120) : 2000;
+            box.style.height = Math.max(60, Math.min(startHeight + (e.clientY - startY), most)) + "px";
+        });
+        document.addEventListener("mouseup", function () {
+            if (!dragging) return;
+            dragging = false;
+            handle.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            localStorage.setItem(ACT_ACTORS_HEIGHT_KEY, String(box.offsetHeight));
+        });
+    }
+
+    function actOnShow() {
+        actLoadActors();
+    }
+
+    function initActions() {
+        var clear = document.getElementById("act-clear");
+        if (clear) clear.addEventListener("click", actClear);
+        var f = document.getElementById("act-filter");
+        if (f) f.addEventListener("input", actRenderActors);
+        actInitResize();
+    }
+
+    // ── Method Search tab (MethodSearch_261011_oo01) ────────────────────────
+    // Part of a method name in, one row per class and action out, from api/actions/search. A row
+    // opens the action's full description through api/actions/describe with the first actor that
+    // has it, drawn by actRow as the Actions tab draws it.
+    var msTimer = null;
+    var MS_ACTORS_SHOWN = 3;
+
+    function msStatus(text) {
+        var el = document.getElementById("ms-status");
+        if (el) el.textContent = text || "";
+    }
+
+    function msActorsLine(actors) {
+        var shown = actors.slice(0, MS_ACTORS_SHOWN).join(", ");
+        var rest = actors.length - MS_ACTORS_SHOWN;
+        return "actors: " + shown + (rest > 0 ? " and " + rest + " more" : "");
+    }
+
+    function msSearch() {
+        var input = document.getElementById("ms-query");
+        var panel = document.getElementById("ms-list");
+        if (!input || !panel) return;
+        var q = input.value.trim();
+        if (!q) {
+            panel.textContent = "";
+            msStatus("type part of a method name");
+            return;
+        }
+        msStatus("searching…");
+        fetch("api/actions/search?q=" + encodeURIComponent(q))
+            .then(function (r) { return r.json(); })
+            .then(function (body) {
+                if (input.value.trim() !== q) return;   // a newer query is on its way
+                msRender(q, body.matches || []);
+            })
+            .catch(function (e) { msStatus(e.message); });
+    }
+
+    function msRender(q, matches) {
+        var panel = document.getElementById("ms-list");
+        panel.textContent = "";
+        msStatus(matches.length + " match" + (matches.length === 1 ? "" : "es"));
+        matches.forEach(function (m) {
+            var row = document.createElement("div");
+            row.className = "act-item";
+            var head = document.createElement("button");
+            head.type = "button";
+            head.className = "act-head";
+            head.textContent = m.action;
+            var cls = document.createElement("span");
+            cls.className = "ms-class";
+            cls.textContent = m.class;
+            head.appendChild(cls);
+            head.addEventListener("click", function () { msShow(q, m); });
+            row.appendChild(head);
+            if (m.description) {
+                var desc = document.createElement("p");
+                desc.className = "act-desc";
+                desc.textContent = m.description;
+                row.appendChild(desc);
+            }
+            var who = document.createElement("p");
+            who.className = "ms-actors";
+            who.textContent = msActorsLine(m.actors || []);
+            row.appendChild(who);
+            panel.appendChild(row);
+        });
+    }
+
+    /** One match in full, with a way back to the results it came from. */
+    function msShow(q, m) {
+        var panel = document.getElementById("ms-list");
+        var actor = (m.actors || [])[0];
+        if (!panel || !actor) return;
+        msStatus("loading " + m.action + "…");
+        fetch("api/actions/describe?actor=" + encodeURIComponent(actor) + "&action=" + encodeURIComponent(m.action))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                panel.textContent = "";
+                var back = document.createElement("button");
+                back.type = "button";
+                back.className = "act-back";
+                back.textContent = "← results for \"" + q + "\"";
+                back.addEventListener("click", msSearch);
+                panel.appendChild(back);
+                panel.appendChild(actRow(actor, m.action, d));
+                var who = document.createElement("p");
+                who.className = "ms-actors";
+                who.textContent = "also callable as: " + (m.actors.length > 1 ? m.actors.slice(1).join(", ") : "(none)");
+                panel.appendChild(who);
+                msStatus("");
+            })
+            .catch(function (e) { msStatus(e.message); });
+    }
+
+    function msOnShow() {
+        var input = document.getElementById("ms-query");
+        if (input) input.focus();
+        if (input && input.value.trim()) msSearch();
+        else msStatus("type part of a method name");
+    }
+
+    function initMethodSearch() {
+        var input = document.getElementById("ms-query");
+        if (!input) return;
+        input.addEventListener("input", function () {
+            if (msTimer) clearTimeout(msTimer);
+            msTimer = setTimeout(msSearch, 300);
+        });
+        input.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                if (msTimer) clearTimeout(msTimer);
+                msSearch();
+            }
+        });
+    }
+
+    // ── (2) Collapsible left dock (actor tree) ──────────────────────────────
+    function initDock() {
+        var toggle = document.getElementById("dock-toggle");
+        var dock = document.getElementById("left-dock");
+        if (!toggle || !dock) return;
+        toggle.addEventListener("click", function () {
+            var collapsed = dock.classList.toggle("collapsed");
+            if (!collapsed) refreshActors();   // refresh when re-opening
+        });
+    }
+
+    // ── Left dock width resize (drag handle, persisted like Theme/model) ────
+    var LEFT_DOCK_WIDTH_KEY = "chat-ui-left-dock-width";
+
+    function initLeftDockResize() {
+        var dock = document.getElementById("left-dock");
+        var handle = document.getElementById("left-dock-resize-handle");
+        if (!dock || !handle) return;
+
+        var saved = parseInt(localStorage.getItem(LEFT_DOCK_WIDTH_KEY), 10);
+        if (saved && saved > 0) dock.style.width = saved + "px";
+
+        var dragging = false;
+        var startX = 0;
+        var startWidth = 0;
+
+        handle.addEventListener("mousedown", function (e) {
+            e.preventDefault();
+            dragging = true;
+            startX = e.clientX;
+            startWidth = dock.offsetWidth;
+            dock.classList.add("resizing");
+            handle.classList.add("dragging");
+            document.body.style.cursor = "ew-resize";
+            document.body.style.userSelect = "none";
+        });
+
+        document.addEventListener("mousemove", function (e) {
+            if (!dragging) return;
+            var newWidth = Math.max(120, Math.min(startWidth + (e.clientX - startX), 600));
+            dock.style.width = newWidth + "px";
+        });
+
+        document.addEventListener("mouseup", function () {
+            if (!dragging) return;
+            dragging = false;
+            dock.classList.remove("resizing");
+            handle.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            localStorage.setItem(LEFT_DOCK_WIDTH_KEY, dock.offsetWidth);
+        });
+    }
+
+    // ── Centre/right splitter (drag handle, persisted like the left dock) ────
+    // Sets the width of the three centre panes, #main-panel, #project-panel and #timekeeper-panel, so switching perspective
+    // keeps the line where it was. Kept as a percentage of #console-root rather than pixels, so a
+    // narrower window still leaves the right pane its minimum width.
+    var CENTRE_WIDTH_KEY = "chat-ui-centre-width-pct";
+    var CENTRE_MIN_PX = 320;   // #main-panel's min-width
+    var RIGHT_MIN_PX = 280;    // #right-panel's min-width
+
+    function initSplitter() {
+        var root = document.getElementById("console-root");
+        var splitter = document.getElementById("splitter");
+        var panes = [document.getElementById("main-panel"), document.getElementById("project-panel"),
+                     document.getElementById("timekeeper-panel")]
+            .filter(function (p) { return !!p; });
+        if (!root || !splitter || !panes.length) return;
+
+        function setPct(pct) {
+            panes.forEach(function (p) { p.style.width = pct + "%"; });
+        }
+
+        var saved = parseFloat(localStorage.getItem(CENTRE_WIDTH_KEY));
+        if (saved > 0 && saved < 100) setPct(saved);
+
+        var dragging = false;
+        var startX = 0;
+        var startWidth = 0;
+
+        function visiblePane() {
+            return panes.filter(function (p) { return p.offsetWidth > 0; })[0] || panes[0];
+        }
+
+        splitter.addEventListener("mousedown", function (e) {
+            e.preventDefault();
+            dragging = true;
+            startX = e.clientX;
+            startWidth = visiblePane().offsetWidth;
+            splitter.classList.add("dragging");
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+        });
+
+        document.addEventListener("mousemove", function (e) {
+            if (!dragging) return;
+            var total = root.clientWidth;
+            var most = total - splitter.offsetWidth - RIGHT_MIN_PX;
+            var px = Math.max(CENTRE_MIN_PX, Math.min(startWidth + (e.clientX - startX), most));
+            setPct(px / total * 100);
+        });
+
+        document.addEventListener("mouseup", function () {
+            if (!dragging) return;
+            dragging = false;
+            splitter.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            localStorage.setItem(CENTRE_WIDTH_KEY, (visiblePane().offsetWidth / root.clientWidth * 100).toFixed(2));
+        });
+    }
+
+    // ── Project pane: the line between the workflow catalog and the one being read ────
+    // The catalog is as tall as its contents up to 40% until somebody drags the line; from then on
+    // it keeps the height it was given, here and on the next visit.
+    var PROJECT_WF_LIST_HEIGHT_KEY = "chat-ui-project-wf-list-height";
+
+    function initProjectWorkflowsResize() {
+        var list = document.getElementById("project-wf-list");
+        var handle = document.getElementById("project-wf-resize-handle");
+        if (!list || !handle) return;
+
+        function setHeight(px) {
+            list.style.height = px + "px";
+            // The stylesheet caps the catalog at 40%; a height asked for by hand is not capped.
+            list.style.maxHeight = "none";
+        }
+
+        var saved = parseInt(localStorage.getItem(PROJECT_WF_LIST_HEIGHT_KEY), 10);
+        if (saved && saved > 0) setHeight(saved);
+
+        var dragging = false;
+        var startY = 0;
+        var startHeight = 0;
+
+        handle.addEventListener("mousedown", function (e) {
+            e.preventDefault();
+            dragging = true;
+            startY = e.clientY;
+            startHeight = list.offsetHeight;
+            handle.classList.add("dragging");
+            document.body.style.cursor = "row-resize";
+            document.body.style.userSelect = "none";
+        });
+
+        document.addEventListener("mousemove", function (e) {
+            if (!dragging) return;
+            var room = list.parentElement ? list.parentElement.clientHeight : 0;
+            var most = room > 0 ? Math.max(80, room - 120) : 2000;
+            setHeight(Math.max(60, Math.min(startHeight + (e.clientY - startY), most)));
+        });
+
+        document.addEventListener("mouseup", function () {
+            if (!dragging) return;
+            dragging = false;
+            handle.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            localStorage.setItem(PROJECT_WF_LIST_HEIGHT_KEY, list.offsetHeight);
+        });
+    }
+
+    // ── Perspective: what the centre and right panes show (ProjectPerspective_260911_oo01) ──
+    // "chat" shows one conversation (#main-panel and the chat-scoped right tabs); "project" shows
+    // one project (#project-panel and the project-scoped right tabs). Persisted like the theme, so
+    // a reload comes back to the same view.
+    var PERSPECTIVE_KEY = "chat-ui-perspective";
+    var PERSPECTIVE_PROJECT_KEY = "chat-ui-perspective-project";
+    var perspective = "chat";
+    var perspectiveProjectId = null;
+    // The conversation whose timekeeper the "timekeeper" perspective shows: {projectId, chatId}
+    // (TimekeeperViewInTheActorTree_261115_oo01).
+    var PERSPECTIVE_TIMEKEEPER_KEY = "chat-ui-perspective-timekeeper";
+    var perspectiveTimekeeper = null;
+    // The project every start creates; it has no delete button (ProjectDeletion_261011_oo01).
+    var DEFAULT_PROJECT_ID = "project1";
+
+    // For "project", projectId names the project; for "timekeeper", projectId and chatId name the conversation.
+    function switchPerspective(kind, projectId, chatId) {
+        if (kind !== "project" && kind !== "timekeeper") kind = "chat";
+        if (kind === "timekeeper" && !(projectId && chatId) && !perspectiveTimekeeper) kind = "chat";
+        var root = document.getElementById("console-root");
+        if (!root) return;
+        perspective = kind;
+        if (kind === "project" && projectId) perspectiveProjectId = projectId;
+        if (kind === "timekeeper" && projectId && chatId) perspectiveTimekeeper = { projectId: projectId, chatId: chatId };
+        root.setAttribute("data-perspective", kind);
+        localStorage.setItem(PERSPECTIVE_KEY, kind);
+        if (perspectiveProjectId) localStorage.setItem(PERSPECTIVE_PROJECT_KEY, perspectiveProjectId);
+        if (perspectiveTimekeeper) localStorage.setItem(PERSPECTIVE_TIMEKEEPER_KEY, JSON.stringify(perspectiveTimekeeper));
+        var title = document.getElementById("project-panel-title");
+        if (title && kind === "project") title.textContent = perspectiveProjectId || "Project";
+        activateFirstTabOf(kind);
+        if (kind === "project") {
+            projectWfOnShow();
+            projectPropLoad();
+        }
+        if (kind === "timekeeper") timekeeperLoad();
+    }
+
+    // ── Timekeeper perspective, centre pane: what one conversation's timekeeper is watching ─────
+    // GET api/projects/{p}/chats/{c}/timekeeper reads it, without waiting for a running turn; nothing here
+    // changes it (TimekeeperViewInTheActorTree_261115_oo01). Refreshed every 3s while the pane shows, as the
+    // job lists are.
+    var timekeeperTimer = null;
+
+    // "7m 05s", "-2m 00s" (negative: already past); under a minute "42s".
+    function tkSpan(ms) {
+        var neg = ms < 0;
+        var s = Math.floor(Math.abs(ms) / 1000);
+        var m = Math.floor(s / 60);
+        var text = m > 0 ? m + "m " + ("0" + (s % 60)).slice(-2) + "s" : s + "s";
+        return neg ? "-" + text : text;
+    }
+
+    // Time to come reads "in 3m 00s"; time that has passed reads "3m 00s ago", marked as late.
+    function tkWhen(ms) {
+        return ms >= 0 ? "in " + tkSpan(ms) : tkSpan(-ms) + " ago";
+    }
+
+    function tkCell(tr, text, cls) {
+        var td = document.createElement("td");
+        td.textContent = text;
+        if (cls) td.className = cls;
+        tr.appendChild(td);
+    }
+
+    function tkTable(into, heads, rows, emptyText) {
+        into.textContent = "";
+        if (!rows.length) {
+            var none = document.createElement("div");
+            none.className = "tk-none";
+            none.textContent = emptyText;
+            into.appendChild(none);
+            return;
+        }
+        var table = document.createElement("table");
+        table.className = "tk-table";
+        var head = document.createElement("tr");
+        heads.forEach(function (h) {
+            var th = document.createElement("th");
+            th.textContent = h;
+            head.appendChild(th);
+        });
+        table.appendChild(head);
+        rows.forEach(function (r) { table.appendChild(r); });
+        into.appendChild(table);
+    }
+
+    function timekeeperRender(w) {
+        setText("tk-urgent-wait", w.urgentWaitMinutes + (w.urgentWaitMinutes === 1 ? " minute" : " minutes"));
+        setText("tk-warn", w.childReplyWarnMinutes + (w.childReplyWarnMinutes === 1 ? " minute" : " minutes"));
+        setText("tk-turn", w.running
+            ? "running" + (w.runningSince ? ", started " + tkSpan(Date.now() - w.runningSince) + " ago" : "")
+            : "not running a turn");
+
+        var urgent = document.getElementById("tk-urgent");
+        if (urgent) {
+            if (w.urgentWaitingMillis == null) {
+                urgent.textContent = "None waiting.";
+                urgent.className = "tk-none";
+            } else {
+                urgent.className = "";
+                urgent.textContent = "Waiting " + tkSpan(w.urgentWaitingMillis) + ". "
+                    + (w.pauseInMillis == null
+                        ? "No turn is running, so nothing would be paused; it is answered next."
+                        : w.pauseInMillis >= 0
+                            ? "The running turn would be paused in " + tkSpan(w.pauseInMillis) + "."
+                            : "Past the limit: the running turn is paused at the next check (every 30s).");
+            }
+        }
+
+        tkTable(document.getElementById("tk-sent"),
+            ["Request id", "Target", "Out for", "Notice"],
+            (w.sent || []).map(function (s) {
+                var tr = document.createElement("tr");
+                tkCell(tr, s.requestId);
+                tkCell(tr, s.target || "(unknown)");
+                tkCell(tr, tkSpan(s.outMillis));
+                tkCell(tr, s.noticeSent ? "sent"
+                    : s.noticeDueInMillis >= 0 ? "not sent; due " + tkWhen(s.noticeDueInMillis)
+                    : "not sent; due at the next check", s.noticeSent ? "tk-late" : "");
+                return tr;
+            }),
+            "None: every request this conversation sent has had its reply.");
+
+        tkTable(document.getElementById("tk-promised"),
+            ["Request id", "Reminder due", "Reminder"],
+            (w.promised || []).map(function (p) {
+                var tr = document.createElement("tr");
+                tkCell(tr, p.requestId || "(to the person)");
+                tkCell(tr, p.dueInMillis >= 0 ? tkWhen(p.dueInMillis) : "due now (next check)");
+                tkCell(tr, "#" + p.number);
+                return tr;
+            }),
+            "None registered.");
+    }
+
+    function timekeeperLoad() {
+        var tk = perspectiveTimekeeper;
+        var title = document.getElementById("timekeeper-panel-title");
+        if (!tk) {
+            if (title) title.textContent = "Timekeeper";
+            return Promise.resolve();
+        }
+        if (title) title.textContent = tk.projectId + "/chat-" + tk.chatId + ".timekeeper";
+        return fetch("api/projects/" + encodeURIComponent(tk.projectId) + "/chats/" + encodeURIComponent(tk.chatId) + "/timekeeper")
+            .then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(function (w) {
+                if (perspective !== "timekeeper" || perspectiveTimekeeper !== tk) return;
+                timekeeperRender(w);
+                setText("timekeeper-status", "");
+            })
+            .catch(function (err) { setText("timekeeper-status", "error: " + err.message); });
+    }
+
+    function initTimekeeperPane() {
+        var refresh = document.getElementById("timekeeper-refresh");
+        if (refresh) refresh.addEventListener("click", timekeeperLoad);
+        if (!timekeeperTimer) timekeeperTimer = setInterval(function () {
+            if (perspective === "timekeeper") timekeeperLoad();
+        }, 3000);
+    }
+
+    // ── Project perspective, right pane: the project's own name and working directory ──────────
+    // GET api/projects/{p} reads both, POST .../name and POST .../working-dir set them, and
+    // POST .../chats adds a conversation with an id the server allocates
+    // (ProjectProperty_260929_oo01).
+    // A message to show once the tab has loaded, for an action that moves the tab to another
+    // project (deleting one) and so would otherwise have its message cleared by that load.
+    var projectPropNotice = "";
+
+    function projectPropStatus(msg) {
+        var el = document.getElementById("projectprop-status");
+        if (el) el.textContent = msg || "";
+    }
+
+    function projectPropLoad() {
+        var idEl = document.getElementById("projectprop-id");
+        var nameEl = document.getElementById("projectprop-name");
+        var dirEl = document.getElementById("projectprop-dir");
+        if (!perspectiveProjectId) {
+            if (idEl) idEl.textContent = "(none selected)";
+            return;
+        }
+        if (idEl) idEl.textContent = perspectiveProjectId;
+        var deleteField = document.getElementById("projectprop-delete-field");
+        if (deleteField) deleteField.style.display = perspectiveProjectId === DEFAULT_PROJECT_ID ? "none" : "";
+        var deleteOutcome = document.getElementById("projectprop-delete-outcome");
+        if (deleteOutcome) deleteOutcome.textContent = "";
+        var chatsOutcome = document.getElementById("projectprop-chats-outcome");
+        if (chatsOutcome) chatsOutcome.textContent = "";
+        projectPropListChats();
+        fetch("api/projects/" + encodeURIComponent(perspectiveProjectId))
+            .then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(function (body) {
+                if (nameEl) nameEl.value = body.name || "";
+                if (dirEl) dirEl.value = body.workingDir || "";
+                projectPropStatus(projectPropNotice);
+                projectPropNotice = "";
+            })
+            .catch(function (err) { projectPropStatus("error: " + err.message); });
+    }
+
+    function projectPropSaveName() {
+        if (!perspectiveProjectId) return;
+        var nameEl = document.getElementById("projectprop-name");
+        projectPropStatus("saving...");
+        fetch("api/projects/" + encodeURIComponent(perspectiveProjectId) + "/name", {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: nameEl ? nameEl.value : ""
+        })
+            .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+            .then(function (res) {
+                projectPropStatus(res.body.message || (res.ok ? "saved" : "error"));
+                // The tree shows the name beside the id, so it has to be redrawn.
+                refreshActors();
+            })
+            .catch(function (err) { projectPropStatus("error: " + err.message); });
+    }
+
+    function projectPropSaveDir() {
+        if (!perspectiveProjectId) return;
+        var dirEl = document.getElementById("projectprop-dir");
+        var outcome = document.getElementById("projectprop-dir-outcome");
+        projectPropStatus("saving...");
+        fetch("api/projects/" + encodeURIComponent(perspectiveProjectId) + "/working-dir", {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: dirEl ? dirEl.value : ""
+        })
+            .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+            .then(function (res) {
+                projectPropStatus(res.ok ? "saved" : "error");
+                if (outcome) outcome.textContent = res.body.message || "";
+            })
+            .catch(function (err) { projectPropStatus("error: " + err.message); });
+    }
+
+    function projectPropAddChat() {
+        if (!perspectiveProjectId) return;
+        projectPropStatus("adding...");
+        fetch("api/projects/" + encodeURIComponent(perspectiveProjectId) + "/chats", { method: "POST" })
+            .then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(function (body) {
+                projectPropStatus("added chat-" + body.chatId);
+                projectPropListChats();
+                refreshActors();
+                if (body.chatId && window.chatUiSwitchChat) {
+                    window.chatUiSwitchChat(perspectiveProjectId, body.chatId);
+                }
+            })
+            .catch(function (err) { projectPropStatus("error: " + err.message); });
+    }
+
+    // Asks first, naming the project and how many conversations go with it. On success the
+    // console moves to project1, and so does the chat pane if it was showing one of the
+    // deleted conversations. A refusal (409: something is still running) is shown under the
+    // button and changes nothing.
+    function projectPropDelete() {
+        var projectId = perspectiveProjectId;
+        if (!projectId || projectId === DEFAULT_PROJECT_ID) return;
+        var outcome = document.getElementById("projectprop-delete-outcome");
+        var nameEl = document.getElementById("projectprop-name");
+        var label = projectId + (nameEl && nameEl.value ? " (" + nameEl.value + ")" : "");
+        fetch("api/projects/" + encodeURIComponent(projectId) + "/chats")
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (chats) {
+                var n = Array.isArray(chats) ? chats.length : 0;
+                if (!window.confirm("Delete project " + label + " and its " + n + " conversation(s)?\n"
+                        + "What they said stays in the Sessions tab.")) return null;
+                projectPropStatus("deleting...");
+                return fetch("api/projects/" + encodeURIComponent(projectId), { method: "DELETE" })
+                    .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); });
+            })
+            .then(function (res) {
+                if (!res) return;
+                if (!res.ok) {
+                    projectPropStatus("not deleted");
+                    if (outcome) outcome.textContent = res.body.message || "";
+                    return;
+                }
+                if (window.chatUiCurrentProjectId && window.chatUiCurrentProjectId() === projectId
+                        && window.chatUiSwitchChat) {
+                    window.chatUiSwitchChat(DEFAULT_PROJECT_ID, "01");
+                }
+                projectPropNotice = "deleted " + projectId;
+                switchPerspective("project", DEFAULT_PROJECT_ID);
+                refreshActors();
+            })
+            .catch(function (err) { projectPropStatus("error: " + err.message); });
+    }
+
+    // The project's conversations, each with its name, a Save button for the name, and a Delete
+    // button; project1's chat-01, which every start creates, has no Delete
+    // (ConversationDeletion_261011_oo01). The names come from GET api/projects/{p}.
+    function projectPropListChats() {
+        var list = document.getElementById("projectprop-chats");
+        var projectId = perspectiveProjectId;
+        if (!list || !projectId) return;
+        var base = "api/projects/" + encodeURIComponent(projectId);
+        Promise.all([
+            fetch(base + "/chats").then(function (r) { return r.ok ? r.json() : []; }),
+            fetch(base).then(function (r) { return r.ok ? r.json() : {}; })
+        ])
+            .then(function (both) {
+                var chatIds = both[0];
+                var chatNames = (both[1] && both[1].chatNames) || {};
+                var org = (both[1] && both[1].organization) || {};
+                var superiors = org.superiors || {};
+                if (projectId !== perspectiveProjectId) return;   // another project was chosen meanwhile
+                list.textContent = "";
+                var liaisonEl = document.getElementById("projectprop-liaison");
+                var maxEl = document.getElementById("projectprop-maxsub");
+                if (liaisonEl) liaisonEl.value = org.liaison || "01";
+                if (maxEl) maxEl.value = org.maxSubordinates || 5;
+                (chatIds || []).forEach(function (chatId) {
+                    var li = document.createElement("li");
+                    // Clicking it shows the conversation as clicking its name in the tree does
+                    // (ProjectPropertyChatLinks_261114_oo01).
+                    var id = document.createElement("button");
+                    id.type = "button";
+                    id.className = "projectprop-chat-id projectprop-chat-link";
+                    id.textContent = "chat-" + chatId;
+                    id.title = "Show chat-" + chatId + (chatNames[chatId] ? " (" + chatNames[chatId] + ")" : "");
+                    id.addEventListener("click", function () { showConversation(projectId, chatId); });
+                    li.appendChild(id);
+                    var nameInput = document.createElement("input");
+                    nameInput.type = "text";
+                    nameInput.value = chatNames[chatId] || "";
+                    nameInput.placeholder = "What this conversation is for";
+                    var save = document.createElement("button");
+                    save.type = "button";
+                    save.className = "projectprop-chat-save";
+                    save.textContent = "Save";
+                    save.title = "Save the name of chat-" + chatId;
+                    save.addEventListener("click", function () { projectPropSaveChatName(projectId, chatId, nameInput.value); });
+                    nameInput.addEventListener("keydown", function (e) {
+                        if (e.key === "Enter") { e.preventDefault(); projectPropSaveChatName(projectId, chatId, nameInput.value); }
+                    });
+                    li.appendChild(nameInput);
+                    li.appendChild(save);
+                    // Where the conversation stands in the organization (ConversationReportingLines_261108_oo01).
+                    var line = document.createElement("span");
+                    line.className = "projectprop-chat-superior";
+                    line.textContent = chatId === (org.liaison || "01") ? "liaison"
+                        : (superiors[chatId] ? "reports to chat-" + superiors[chatId] : "no superior");
+                    li.appendChild(line);
+                    if (!(projectId === DEFAULT_PROJECT_ID && chatId === "01")) {
+                        var del = document.createElement("button");
+                        del.type = "button";
+                        del.className = "projectprop-danger";
+                        del.textContent = "Delete";
+                        del.title = "Delete chat-" + chatId;
+                        del.addEventListener("click", function () { projectPropDeleteChat(projectId, chatId); });
+                        li.appendChild(del);
+                    }
+                    list.appendChild(li);
+                });
+            })
+            .catch(function () { /* leave the list as it was */ });
+    }
+
+    // Saves the liaison and the subordinate limit (ConversationReportingLines_261108_oo01).
+    document.addEventListener("click", function (e) {
+        if (!e.target || e.target.id !== "projectprop-org-save") return;
+        var projectId = perspectiveProjectId;
+        var outcome = document.getElementById("projectprop-org-outcome");
+        if (!projectId) return;
+        fetch("api/projects/" + encodeURIComponent(projectId) + "/organization", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                liaison: document.getElementById("projectprop-liaison").value,
+                maxSubordinates: document.getElementById("projectprop-maxsub").value
+            })
+        })
+            .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+            .then(function (res) {
+                if (outcome) outcome.textContent = res.ok ? "saved" : (res.body.message || "not saved");
+                projectPropListChats();
+            })
+            .catch(function (err) { if (outcome) outcome.textContent = "error: " + err.message; });
+    });
+
+    function projectPropSaveChatName(projectId, chatId, name) {
+        var outcome = document.getElementById("projectprop-chats-outcome");
+        projectPropStatus("saving...");
+        fetch("api/projects/" + encodeURIComponent(projectId) + "/chats/" + encodeURIComponent(chatId) + "/name", {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: name || ""
+        })
+            .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+            .then(function (res) {
+                projectPropStatus(res.ok ? "saved chat-" + chatId : "not saved");
+                if (outcome) outcome.textContent = res.ok ? "" : (res.body.message || "");
+                // The tree shows the name beside the id, so it has to be redrawn.
+                refreshActors();
+            })
+            .catch(function (err) { projectPropStatus("error: " + err.message); });
+    }
+
+    // Asks first. On success the list and the tree are redrawn, and the chat pane moves to the
+    // project's first remaining conversation if it was showing the deleted one. A refusal is shown
+    // under the list and changes nothing.
+    function projectPropDeleteChat(projectId, chatId) {
+        var outcome = document.getElementById("projectprop-chats-outcome");
+        if (!window.confirm("Delete conversation " + projectId + "/chat-" + chatId + "?\n"
+                + "What it said stays in the Sessions tab.")) return;
+        projectPropStatus("deleting...");
+        fetch("api/projects/" + encodeURIComponent(projectId) + "/chats/" + encodeURIComponent(chatId), { method: "DELETE" })
+            .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+            .then(function (res) {
+                if (!res.ok) {
+                    projectPropStatus("not deleted");
+                    if (outcome) outcome.textContent = res.body.message || "";
+                    return;
+                }
+                projectPropStatus("deleted chat-" + chatId);
+                if (outcome) outcome.textContent = "";
+                if (window.chatUiCurrentProjectId && window.chatUiCurrentProjectId() === projectId
+                        && window.chatUiCurrentChatId && window.chatUiCurrentChatId() === chatId
+                        && window.chatUiSwitchChat) {
+                    fetch("api/projects/" + encodeURIComponent(projectId) + "/chats")
+                        .then(function (r) { return r.ok ? r.json() : []; })
+                        .then(function (left) { if (left && left.length) window.chatUiSwitchChat(projectId, left[0]); });
+                }
+                projectPropListChats();
+                refreshActors();
+            })
+            .catch(function (err) { projectPropStatus("error: " + err.message); });
+    }
+
+    function initProjectProp() {
+        var nameBtn = document.getElementById("projectprop-name-save");
+        var dirBtn = document.getElementById("projectprop-dir-save");
+        var addBtn = document.getElementById("projectprop-add-chat");
+        if (nameBtn) nameBtn.addEventListener("click", projectPropSaveName);
+        if (dirBtn) dirBtn.addEventListener("click", projectPropSaveDir);
+        if (addBtn) addBtn.addEventListener("click", projectPropAddChat);
+        var deleteBtn = document.getElementById("projectprop-delete");
+        if (deleteBtn) deleteBtn.addEventListener("click", projectPropDelete);
+        var nameEl = document.getElementById("projectprop-name");
+        if (nameEl) nameEl.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") { e.preventDefault(); projectPropSaveName(); }
+        });
+        var dirEl = document.getElementById("projectprop-dir");
+        if (dirEl) dirEl.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") { e.preventDefault(); projectPropSaveDir(); }
+        });
+    }
+
+    // ── Project perspective, centre pane: the project's workflows ─────────────
+    // GET api/projects/{p}/workflows lists them (the project's own under workflows/ in its working
+    // directory first, then the bundled ones); GET .../workflows/{name} reads one
+    // (ProjectPerspective_260911_oo01, step 2). Drawn with the same boxes as the Agent Loop tab.
+    var projectWfOpenName = null;
+
+    function projectWfUrl(suffix) {
+        if (!perspectiveProjectId) return null;
+        return "api/projects/" + encodeURIComponent(perspectiveProjectId) + "/workflows" + (suffix || "");
+    }
+
+    function projectWfStatus(msg) {
+        var s = document.getElementById("project-wf-status");
+        if (s) s.textContent = msg || "";
+    }
+
+    function projectWfRowEl(w) {
+        var row = document.createElement("div");
+        row.className = "pwf-row" + (w.name === projectWfOpenName ? " selected" : "");
+        var name = document.createElement("span");
+        name.className = "pwf-name";
+        name.textContent = w.title && w.title !== w.name ? w.title + "  (" + w.name + ")" : w.name;
+        var origin = document.createElement("span");
+        origin.className = "pwf-origin pwf-origin-" + (w.origin || "");
+        origin.textContent = w.origin === "project" ? "project" : "bundled";
+        origin.title = w.origin === "project"
+            ? "This project's own file, under workflows/ in its working directory. Editable."
+            : "Shipped with this program. Read-only.";
+        var desc = document.createElement("div");
+        desc.className = "pwf-desc";
+        desc.textContent = w.description || "";
+        row.appendChild(name);
+        row.appendChild(origin);
+        if (w.description) row.appendChild(desc);
+        row.addEventListener("click", function () { projectWfOpen(w.name); });
+        return row;
+    }
+
+    function projectWfLoadList() {
+        var list = document.getElementById("project-wf-list");
+        var search = document.getElementById("project-wf-search");
+        if (!list) return;
+        var q = search ? search.value.trim() : "";
+        var url = projectWfUrl(q ? "?q=" + encodeURIComponent(q) : "");
+        if (!url) { projectWfStatus("no project selected"); return; }
+        projectWfStatus("loading…");
+        fetch(url)
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+            .then(function (rows) {
+                list.textContent = "";
+                (rows || []).forEach(function (w) { list.appendChild(projectWfRowEl(w)); });
+                var own = (rows || []).filter(function (w) { return w.origin === "project"; }).length;
+                projectWfStatus((rows || []).length + " workflow(s), " + own + " of this project"
+                    + (q ? " matching “" + q + "”" : ""));
+            })
+            .catch(function (e) { projectWfStatus("error: " + e.message); });
+    }
+
+    // The workflow last opened, as the server sent it: {name, yaml, origin, editable}. What Edit
+    // starts from.
+    var projectWfDoc = null;
+
+    function projectWfOpen(name) {
+        var url = projectWfUrl("/" + encodeURIComponent(name));
+        var head = document.getElementById("project-wf-head");
+        var view = document.getElementById("project-wf-view");
+        if (!url || !view) return;
+        projectWfOpenName = name;
+        projectWfEditorHide();
+        document.querySelectorAll("#project-wf-list .pwf-row").forEach(function (r) {
+            r.classList.toggle("selected", r.querySelector(".pwf-name") && r.querySelector(".pwf-name").textContent.indexOf(name) >= 0);
+        });
+        if (head) head.textContent = "loading " + name + "…";
+        fetch(url)
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+            .then(function (d) {
+                projectWfDoc = d;
+                var n = wfRenderInto(view, d.yaml || "");
+                if (head) head.textContent = d.name + "  —  " + n + " step(s), "
+                    + (d.editable ? "this project's own file" : "bundled, read-only");
+                view.scrollTop = 0;
+                var edit = document.getElementById("project-wf-edit");
+                if (edit) {
+                    edit.disabled = false;
+                    edit.textContent = d.editable ? "Edit" : "Edit a copy";
+                    edit.title = d.editable
+                        ? "Edit this file"
+                        : "Bundled workflows are read-only; saving creates this project's own copy, which then replaces it";
+                }
+                jobRunOnShow(); // the Run tab mirrors what is open here
+            })
+            .catch(function (e) { if (head) head.textContent = "error: " + e.message; projectWfDoc = null; });
+    }
+
+    // ── Editing (ProjectPerspective_260911_oo01, step 3) ──
+    // The editor takes the reader's place. Save PUTs the text as-is; the server refuses anything
+    // Turing-workflow cannot read, and its reason is shown next to the buttons.
+    var WF_TEMPLATE = "name: my-workflow\ndescription: |\n  What this workflow does.\nsteps:\n"
+        + "  - states: [\"0\", \"1\"]\n    label: first-step\n    actions:\n"
+        + "      - actor: this\n        method: noop\n        arguments: []\n        execution: direct\n";
+
+    function projectWfEditStatus(msg, isError) {
+        var s = document.getElementById("project-wf-edit-status");
+        if (!s) return;
+        s.textContent = msg || "";
+        s.classList.toggle("pwf-error", !!isError);
+    }
+
+    function projectWfEditorShow(name, yaml, hint) {
+        var editor = document.getElementById("project-wf-editor");
+        var view = document.getElementById("project-wf-view");
+        var nameEl = document.getElementById("project-wf-edit-name");
+        var yamlEl = document.getElementById("project-wf-edit-yaml");
+        if (!editor || !view || !nameEl || !yamlEl) return;
+        nameEl.value = name || "";
+        yamlEl.value = yaml || "";
+        view.style.display = "none";
+        editor.style.display = "";
+        projectWfEditStatus(hint || "");
+        (name ? yamlEl : nameEl).focus();
+    }
+
+    function projectWfEditorHide() {
+        var editor = document.getElementById("project-wf-editor");
+        var view = document.getElementById("project-wf-view");
+        if (editor) editor.style.display = "none";
+        if (view) view.style.display = "";
+    }
+
+    function projectWfEdit() {
+        if (!projectWfDoc) return;
+        projectWfEditorShow(projectWfDoc.name, projectWfDoc.yaml,
+            projectWfDoc.editable ? "" : "Saving creates this project's own copy of this bundled workflow.");
+    }
+
+    function projectWfNew() {
+        projectWfEditorShow("", WF_TEMPLATE, "Give it a name, then Save.");
+    }
+
+    function projectWfSave() {
+        var nameEl = document.getElementById("project-wf-edit-name");
+        var yamlEl = document.getElementById("project-wf-edit-yaml");
+        if (!nameEl || !yamlEl) return;
+        var name = nameEl.value.trim();
+        if (!name) { projectWfEditStatus("a name is required", true); nameEl.focus(); return; }
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+            projectWfEditStatus("a name is letters, digits, '.', '_' and '-' only", true); nameEl.focus(); return;
+        }
+        var url = projectWfUrl("/" + encodeURIComponent(name));
+        if (!url) { projectWfEditStatus("no project selected", true); return; }
+        projectWfEditStatus("saving…");
+        fetch(url, { method: "PUT", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: yamlEl.value })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); })
+            .then(function (res) {
+                if (!res.ok) {
+                    projectWfEditStatus((res.body && res.body.error) || ("HTTP " + res.status), true);
+                    return;
+                }
+                projectWfEditStatus("saved");
+                projectWfLoadList();
+                projectWfOpen(name);
+            })
+            .catch(function (e) { projectWfEditStatus("error: " + e.message, true); });
+    }
+
+    function initProjectWorkflowEditor() {
+        var edit = document.getElementById("project-wf-edit");
+        var neu = document.getElementById("project-wf-new");
+        var save = document.getElementById("project-wf-save");
+        var cancel = document.getElementById("project-wf-cancel");
+        if (edit) edit.addEventListener("click", projectWfEdit);
+        if (neu) neu.addEventListener("click", projectWfNew);
+        if (save) save.addEventListener("click", projectWfSave);
+        if (cancel) cancel.addEventListener("click", projectWfEditorHide);
+    }
+
+    function projectWfOnShow() {
+        projectWfLoadList();
+    }
+
+    function initProjectWorkflows() {
+        var search = document.getElementById("project-wf-search");
+        var refresh = document.getElementById("project-wf-refresh");
+        var debounce = null;
+        if (search) search.addEventListener("input", function () {
+            if (debounce) clearTimeout(debounce);
+            debounce = setTimeout(projectWfLoadList, 200);
+        });
+        if (refresh) refresh.addEventListener("click", function () {
+            projectWfLoadList();
+            if (projectWfOpenName) projectWfOpen(projectWfOpenName);
+        });
+    }
+
+    // The menu offers only the entries of the current perspective. After a switch, the entry that
+    // was selected may belong to the other perspective; then the new perspective's first entry is
+    // shown, through showRightTab, so its own onShow runs as if the person had chosen it.
+    function activateFirstTabOf(kind) {
+        var sel = rightTabSelect();
+        if (!sel) return;
+        var opts = Array.prototype.slice.call(sel.options);
+        opts.forEach(function (o) {
+            var other = o.getAttribute("data-perspective") !== kind;
+            o.hidden = other;
+            o.disabled = other;   // hidden alone still lets some browsers reach it with the arrow keys
+        });
+        var mine = opts.filter(function (o) { return o.getAttribute("data-perspective") === kind; });
+        if (!mine.length) return;
+        var selected = sel.options[sel.selectedIndex];
+        if (!selected || selected.getAttribute("data-perspective") !== kind) showRightTab(mine[0].value);
+    }
+
+    function restorePerspective() {
+        var kind = localStorage.getItem(PERSPECTIVE_KEY) || "chat";
+        var pid = localStorage.getItem(PERSPECTIVE_PROJECT_KEY);
+        if (kind === "project" && !pid) kind = "chat";
+        perspectiveProjectId = pid;
+        try { perspectiveTimekeeper = JSON.parse(localStorage.getItem(PERSPECTIVE_TIMEKEEPER_KEY)); }
+        catch (e) { perspectiveTimekeeper = null; }
+        if (kind === "timekeeper" && !perspectiveTimekeeper) kind = "chat";
+        switchPerspective(kind, pid);
     }
 
     // ── Actors tab ──────────────────────────────────────────────────────────
-    // Renders the actor tree from GET /api/actors. Each node: {name, type, alive, children[]}.
-    function actorNodeEl(node) {
-        var wrap = document.createElement('div');
-        wrap.className = 'actor-node';
-        var label = document.createElement('div');
-        label.className = 'actor-label' + (node.alive ? '' : ' actor-dead');
-        var dot = document.createElement('span');
-        dot.className = 'actor-dot ' + (node.alive ? 'alive' : 'dead');
-        dot.textContent = '●';
-        var name = document.createElement('span');
-        name.className = 'actor-name';
-        name.textContent = node.name;
-        var type = document.createElement('span');
-        type.className = 'actor-type';
-        type.textContent = node.type ? '  ' + node.type : '';
+    // Each node: {name, type, alive, children[]}. Collapsed state is keyed by actor name (unique
+    // in this actor system) and kept outside the tree DOM, so it survives the full rebuild
+    // renderActorTree() does on every refresh (including the 3s auto-refresh timer).
+    var collapsedActorNodes = new Set();
+
+    // The actor whose name the log search is reached by (ChatUiActorSystem.SYSTEM_LOG_ACTOR).
+    var LOG_SEARCH_ACTOR = "outputMultiplexer";
+
+    // Calls relayed through POST /v1/chat/completions (ArtexProxyResource) land under this actor
+    // (ChatUiActorSystem.EXTERNAL_PROXY_LOG_ACTOR) rather than any ConversationSquad's own log, so
+    // clicking it opens Log Search the same way outputMultiplexer does — there is no live tab of
+    // its own yet (ArtexProxyLogging_261017_oo01).
+    var EXTERNAL_PROXY_LOG_ACTOR = "externalProxy.log";
+
+    // Actor names are absolute ("project1/chat-01.chat.promptBuilder"), so every row would repeat
+    // its ancestors. The tree's indentation already shows the hierarchy: strip the parent's name
+    // from the front and show only what this node adds. The full name stays in the tooltip.
+    function actorDisplayName(node, parentName) {
+        var n = node.name;
+        if (parentName && n.indexOf(parentName) === 0 && n.length > parentName.length) {
+            n = n.substring(parentName.length).replace(/^[./]+/, "");
+        }
+        n = n || node.name;
+        // A named project reads "the name (project1)", a named conversation "the name (chat-02)":
+        // the id stays because the REST paths and the actor names are built from it
+        // (ProjectProperty_260929_oo01).
+        if (node.displayName) return node.displayName + " (" + n + ")";
+        return n;
+    }
+
+    // Puts the screen on one conversation: the chat pane, the right pane and the tree's highlight. The
+    // conversation's name in the tree and its name in the Project Property list both call this, so the
+    // two cannot drift apart (ProjectPropertyChatLinks_261114_oo01).
+    function showConversation(projectId, chatId) {
+        window.chatUiSwitchChat(projectId, chatId);
+        // A conversation is shown in the chat perspective; leave the project one if in it
+        // (ProjectPerspective_260911_oo01).
+        switchPerspective("chat");
+        // Open the nodes above the conversation, so that its highlight is not inside a folded node. A click
+        // in the tree finds them open already.
+        expandActorsAbove(projectId + "/chat-" + chatId);
+        // Re-render so the tab-active highlight moves immediately, then bring it into view.
+        refreshActors().then(scrollActiveActorIntoView);
+        // Right pane follows the newly active tab (150_TabScopedLogging_260826_oo01) —
+        // re-fetch immediately rather than waiting for the next poll/tab-open.
+        ioSessionsLoaded = false;
+        if (document.getElementById("tab-logdb") && document.getElementById("tab-logdb").classList.contains("active")) {
+            ioLoadSessions();
+        }
+        lastLogSig = null;
+        if (document.getElementById("tab-syslog") && document.getElementById("tab-syslog").classList.contains("active")) {
+            refreshLogs();
+        }
+        if (document.getElementById("tab-agentloop") && document.getElementById("tab-agentloop").classList.contains("active")) {
+            wfOnShow();
+        }
+    }
+
+    // The last tree drawn, to find the nodes above a conversation.
+    var lastActorTree = null;
+
+    // Unfolds every node above the named actor. When the tree has not been drawn yet or does not hold the
+    // actor (a conversation just made), unfolds the project the name begins with.
+    function expandActorsAbove(actorName) {
+        var path = lastActorTree ? actorPathTo(lastActorTree, actorName) : null;
+        if (!path) {
+            var slash = actorName.indexOf("/");
+            if (slash > 0) collapsedActorNodes.delete(actorName.substring(0, slash));
+            return;
+        }
+        path.slice(0, -1).forEach(function (n) { collapsedActorNodes.delete(n); });
+    }
+
+    // The names from the root down to the actor, or null when the tree does not hold it.
+    function actorPathTo(node, actorName) {
+        if (node.name === actorName) return [node.name];
+        var kids = node.children || [];
+        for (var i = 0; i < kids.length; i++) {
+            var below = actorPathTo(kids[i], actorName);
+            if (below) return [node.name].concat(below);
+        }
+        return null;
+    }
+
+    function scrollActiveActorIntoView() {
+        var tree = document.getElementById("actors-tree");
+        var active = tree && tree.querySelector(".actor-name.tab-active");
+        if (!active || !active.scrollIntoView) return;
+        // A row already in view stays where it is (a click on a row in the tree always finds it so); one out of
+        // view is brought to the middle of the tree, with its neighbours around it.
+        var box = tree.getBoundingClientRect();
+        var row = active.getBoundingClientRect();
+        if (row.top < box.top || row.bottom > box.bottom) active.scrollIntoView({ block: "center" });
+    }
+
+    function actorNodeEl(node, parentName) {
+        var wrap = document.createElement("div");
+        wrap.className = "actor-node";
+        var label = document.createElement("div");
+        label.className = "actor-label" + (node.alive ? "" : " actor-dead");
+        var hasChildren = !!(node.children && node.children.length);
+        var toggle = document.createElement("span");
+        toggle.className = "actor-toggle";
+        if (hasChildren) toggle.textContent = collapsedActorNodes.has(node.name) ? "▸" : "▾";
+        var dot = document.createElement("span");
+        dot.className = "actor-dot " + (node.alive ? "alive" : "dead");
+        dot.textContent = "●";
+        var name = document.createElement("span");
+        name.className = "actor-name";
+        name.textContent = actorDisplayName(node, parentName);
+        // The note of the workflow transition that created this actor, if a workflow created it:
+        // what its author said that step was for (ActorPurposeFromWorkflowNote_260831_oo01).
+        // Actors Java created carry none, and then the tooltip falls back to the class name.
+        label.title = node.note ? (node.name + "\n\n" + node.note) : (node.name + "\n\n" + (node.type || ""));
+        if (node.note) label.classList.add("actor-has-note");
+        // "chat-<id>" (ConversationSquad) nodes double as the tab switcher — click the name (not
+        // the fold toggle) to switch the chat pane, instead of a separate bar in that pane
+        // (ActorTreeTabSwitcher_260826_oo01). Children like "chat-<id>.chat" don't match.
+        var tabMatch = /^([^/]+)\/chat-([^.]+)$/.exec(node.name);
+        if (tabMatch && typeof window.chatUiSwitchChat === "function") {
+            name.classList.add("tab-switchable");
+            var active = (typeof window.chatUiGetActiveChat === "function") ? window.chatUiGetActiveChat() : null;
+            if (perspective === "chat" && active
+                    && active.projectId === tabMatch[1] && active.chatId === tabMatch[2]) {
+                name.classList.add("tab-active");
+            }
+            name.title = "Switch to " + tabMatch[1] + " / " + tabMatch[2];
+            name.addEventListener("click", function (e) {
+                e.stopPropagation(); // don't also trigger the fold/unfold toggle on the label
+                showConversation(tabMatch[1], tabMatch[2]);
+            });
+        }
+        // A Project node switches the whole console to that project's perspective
+        // (ProjectPerspective_260911_oo01): the centre pane shows its workflows, the right pane
+        // its jobs. Matched by type rather than by name, so a project named anything switches.
+        if (node.type === "Project") {
+            name.classList.add("tab-switchable");
+            if (perspective === "project" && perspectiveProjectId === node.name) {
+                name.classList.add("tab-active");
+            }
+            name.title = "Show project " + node.name;
+            name.addEventListener("click", function (e) {
+                e.stopPropagation(); // don't also trigger the fold/unfold toggle on the label
+                switchPerspective("project", node.name);
+                refreshActors(); // re-render so the tab-active highlight moves immediately
+            });
+        }
+        // A Timekeeper node (the ".timekeeper" child of a ConversationSquad actor) switches the console to that
+        // conversation's timekeeper perspective: the centre pane shows what it is watching, the right pane
+        // has nothing for it (TimekeeperViewInTheActorTree_261115_oo01). Matched by type, as Project is.
+        var tkMatch = node.type === "Timekeeper" ? /^([^/]+)\/chat-([^.]+)\.timekeeper$/.exec(node.name) : null;
+        if (tkMatch) {
+            name.classList.add("tab-switchable");
+            if (perspective === "timekeeper" && perspectiveTimekeeper
+                    && perspectiveTimekeeper.projectId === tkMatch[1] && perspectiveTimekeeper.chatId === tkMatch[2]) {
+                name.classList.add("tab-active");
+            }
+            name.title = "Show what the timekeeper of " + tkMatch[1] + " / " + tkMatch[2] + " is watching";
+            name.addEventListener("click", function (e) {
+                e.stopPropagation(); // don't also trigger the fold/unfold toggle on the label
+                switchPerspective("timekeeper", tkMatch[1], tkMatch[2]);
+                refreshActors(); // re-render so the tab-active highlight moves immediately
+            });
+        }
+        // outputMultiplexer is where every conversation's lines pass through, and the log database
+        // is what they are kept in: clicking it searches the whole of that database, including the
+        // conversations whose tabs have been removed (CrossConversationLogSearch_260913_oo01).
+        if (node.name === LOG_SEARCH_ACTOR) {
+            name.classList.add("tab-switchable");
+            name.title = "Search every recorded conversation";
+            name.addEventListener("click", function (e) {
+                e.stopPropagation(); // don't also trigger the fold/unfold toggle on the label
+                lsearchOpen();
+            });
+        }
+        // externalProxy.log holds ARTEX's (and any other external caller's) relayed calls. Each
+        // caller has its own I/O log session (chat-ui-job-externalProxy:<callerId>), recorded with
+        // the same turnN/step1/llm label shape a conversation uses, so the Sessions tab's existing
+        // trace viewer renders it — openExternalProxySessions() opens that tab and lists those
+        // sessions directly, bypassing the per-conversation filter (ArtexProxyLogging_261017_oo01).
+        if (node.name === EXTERNAL_PROXY_LOG_ACTOR) {
+            name.classList.add("tab-switchable");
+            name.title = "Show calls relayed through POST /v1/chat/completions";
+            name.addEventListener("click", function (e) {
+                e.stopPropagation();
+                openExternalProxySessions();
+            });
+        }
+        var type = document.createElement("span");
+        type.className = "actor-type";
+        type.textContent = node.type ? "  " + node.type : "";
+        label.appendChild(toggle);
         label.appendChild(dot);
         label.appendChild(name);
         label.appendChild(type);
         wrap.appendChild(label);
-        if (node.children && node.children.length) {
-            var kids = document.createElement('div');
-            kids.className = 'actor-children';
-            node.children.forEach(function (c) { kids.appendChild(actorNodeEl(c)); });
+        if (hasChildren) {
+            var kids = document.createElement("div");
+            kids.className = "actor-children" + (collapsedActorNodes.has(node.name) ? " collapsed" : "");
+            node.children.forEach(function (c) { kids.appendChild(actorNodeEl(c, node.name)); });
             wrap.appendChild(kids);
+
+            label.classList.add("actor-label-toggleable");
+            label.addEventListener("click", function () {
+                var willCollapse = !collapsedActorNodes.has(node.name);
+                if (willCollapse) collapsedActorNodes.add(node.name);
+                else collapsedActorNodes.delete(node.name);
+                toggle.textContent = willCollapse ? "▸" : "▾";
+                kids.classList.toggle("collapsed", willCollapse);
+            });
         }
         return wrap;
     }
 
     function renderActorTree(root) {
-        var el = document.getElementById('actors-tree');
+        var el = document.getElementById("actors-tree");
         if (!el) return;
-        el.textContent = '';
+        lastActorTree = root;
+        el.textContent = "";
         if (!root) {
-            var empty = document.createElement('div');
-            empty.className = 'actor-empty';
-            empty.textContent = 'No actors.';
+            var empty = document.createElement("div");
+            empty.className = "actor-empty";
+            empty.textContent = "No actors.";
             el.appendChild(empty);
             return;
         }
@@ -257,252 +2223,831 @@
     }
 
     var actorsRefreshing = false;
-    var lastActorSig = null;
+    var actorsRefreshAgain = false;
+    var actorsRefreshPromise = Promise.resolve();
+    // Returns a promise that settles when the tree shows what the call asked for. A call made while a
+    // refresh is running would have drawn what that refresh began before it: it runs once more after it.
     function refreshActors() {
-        if (actorsRefreshing) return;
+        if (actorsRefreshing) {
+            actorsRefreshAgain = true;
+            return actorsRefreshPromise;
+        }
         actorsRefreshing = true;
-        var status = document.getElementById('actors-status');
-        fetch('api/actors')
+        var status = document.getElementById("actors-status");
+        actorsRefreshPromise = fetch("api/actors")
             .then(function (r) {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
+                if (!r.ok) throw new Error("HTTP " + r.status);
                 return r.json();
             })
             .then(function (root) {
-                var sig = JSON.stringify(root);
-                if (sig === lastActorSig) return;   // unchanged: leave the DOM alone
-                lastActorSig = sig;
                 renderActorTree(root);
-                if (status) status.textContent = countActors(root) + ' actor(s)';
+                // Only while the tree is shown: other code refreshes the tree too (opening a conversation), and the
+                // Graph view's count must not be overwritten.
+                if (status && leftView !== "graph") status.textContent = countActors(root) + " actor(s)";
             })
             .catch(function (err) {
-                if (status) status.textContent = 'error: ' + err.message;
+                if (status) status.textContent = "error: " + err.message;
             })
-            .finally(function () { actorsRefreshing = false; });
+            .then(function () {
+                actorsRefreshing = false;
+                if (!actorsRefreshAgain) return;
+                actorsRefreshAgain = false;
+                return refreshActors();
+            });
+        return actorsRefreshPromise;
+    }
+
+    // Creates a new, independent project (ProjectScopedActorTree_260829_oo01) and switches the
+    // right pane to its first tab.
+    function createProject() {
+        fetch("api/projects", { method: "POST" })
+            .then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(function (body) {
+                refreshActors();
+                if (body && body.projectId && window.chatUiSwitchChat) {
+                    window.chatUiSwitchChat(body.projectId, "01");
+                }
+            })
+            .catch(function (err) {
+                var status = document.getElementById("actors-status");
+                if (status) status.textContent = "error: " + err.message;
+            });
+    }
+
+    // ── Left dock, Graph view (ConversationGraphInTheLeftPane_261117_oo01) ─────────────────────────
+    // Every project of the instance in one tree, read by GET api/graph on every call: each project a top-level row
+    // with its name (the id beside it, lighter), and under it its conversations with superior -> subordinate edges
+    // from its Organization actor and the roles they play from the CollaborationGraph actor. The dock is narrow,
+    // so the conversations are rows: indented by depth in the org chart, superior edges as elbows on the left, and
+    // the roles a conversation plays as emoji in front of its label. A project row folds and unfolds its
+    // conversations; which are folded is remembered like the view choice.
+    var LEFT_VIEW_KEY = "chat-ui-left-view";
+    var leftView = localStorage.getItem(LEFT_VIEW_KEY) === "graph" ? "graph" : "tree";
+    var GRAPH_COLLAPSED_KEY = "chat-ui-graph-collapsed";
+    var graphCollapsed = (function () {
+        try {
+            var saved = JSON.parse(localStorage.getItem(GRAPH_COLLAPSED_KEY) || "[]");
+            return new Set(Array.isArray(saved) ? saved : []);
+        } catch (e) {
+            return new Set();
+        }
+    })();
+    var graphLastSig = null;           // what was last drawn, so an unchanged graph is not redrawn
+    var graphLastData = null;          // the last answer, to redraw at once when a project is folded or unfolded
+    var SVG_NS = "http://www.w3.org/2000/svg";
+
+    function svgEl(tag, attrs, parent) {
+        var e = document.createElementNS(SVG_NS, tag);
+        Object.keys(attrs || {}).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+        if (parent) parent.appendChild(e);
+        return e;
+    }
+
+    function toggleGraphProject(projectId) {
+        if (graphCollapsed.has(projectId)) graphCollapsed.delete(projectId);
+        else graphCollapsed.add(projectId);
+        localStorage.setItem(GRAPH_COLLAPSED_KEY, JSON.stringify(Array.from(graphCollapsed)));
+        var box = document.getElementById("conv-graph");
+        if (box && graphLastData) {
+            renderGraph(graphLastData, box);
+            graphLastSig = null;   // the next refresh draws again from the server's answer
+        }
+    }
+
+    // The rows of one project: roots first (the liaison first among them), each followed by its subordinates,
+    // depth first. Keys are "<project>/<id>", so the same id in two projects is two rows.
+    function projectRows(g, depth0) {
+        var kids = {}, hasSuperior = {};
+        (g.superiorEdges || []).forEach(function (e) {
+            (kids[e.from] = kids[e.from] || []).push(e.to);
+            hasSuperior[e.to] = true;
+        });
+        var byId = {};
+        (g.nodes || []).forEach(function (n) { byId[n.chatId] = n; });
+        var roots = (g.nodes || []).filter(function (n) { return !hasSuperior[n.chatId]; })
+            .map(function (n) { return n.chatId; })
+            .sort(function (a, b) { return (a === g.liaison ? -1 : b === g.liaison ? 1 : (a < b ? -1 : a > b ? 1 : 0)); });
+        var rows = [], seen = {};
+        function visit(id, depth) {
+            if (seen[id]) return;
+            seen[id] = true;
+            rows.push({ kind: "chat", key: g.projectId + "/" + id, id: id, node: byId[id], depth: depth, project: g.projectId });
+            (kids[id] || []).slice().sort().forEach(function (k) { visit(k, depth + 1); });
+        }
+        roots.forEach(function (r) { visit(r, depth0); });
+        // A cycle in the table would leave nodes unvisited; they are drawn as roots rather than lost.
+        (g.nodes || []).forEach(function (n) { visit(n.chatId, depth0); });
+        return rows;
+    }
+
+    // Where a role edge points: a conversation here is "<project>/<id>"; one on another chat-ui instance
+    // (set_collaborator with node) is "<node>:<project>/<id>", since the same name there is another conversation.
+    function roleTargetKey(e) {
+        return (e.node ? e.node + ":" : "") + e.toProject + "/" + e.to;
+    }
+
+    // Every row of the tree: each project's row, then (unless folded) its conversations. A role target that is
+    // not a conversation of any project here (it lives on another chat-ui instance, or is gone) gets a placeholder
+    // row at the bottom.
+    function graphRowsAll(all) {
+        var rows = [], present = {};
+        (all.projects || []).forEach(function (g) {
+            (g.nodes || []).forEach(function (n) { present[g.projectId + "/" + n.chatId] = true; });
+        });
+        (all.projects || []).forEach(function (g) {
+            rows.push({ kind: "project", key: "project:" + g.projectId, project: g.projectId, g: g, depth: 0 });
+            if (!graphCollapsed.has(g.projectId)) rows = rows.concat(projectRows(g, 1));
+        });
+        var placed = {};
+        (all.projects || []).forEach(function (g) {
+            (g.roleEdges || []).forEach(function (e) {
+                var key = roleTargetKey(e);
+                if ((e.node || !present[key]) && !placed[key]) {
+                    placed[key] = true;
+                    rows.push({ kind: "chat", key: key, id: e.to, node: null, depth: 0, project: e.toProject, external: true,
+                        remoteNode: e.node || null });
+                }
+            });
+        });
+        return rows;
+    }
+
+    // A conversation that plays a role for another (the collaborator of a set_collaborator edge) carries one
+    // emoji per role in front of its label, instead of an arc to the conversation it serves. Common roles have
+    // their own emoji; any other role name shares the fallback. The legend lists the emoji in use.
+    var ROLE_EMOJI = {
+        worker: "🔧", reviewer: "🔍", helper: "🤝", auditor: "📋", tester: "🧪",
+        writer: "✏️", researcher: "📚", manager: "🧭", checker: "✅", translator: "🌐"
+    };
+    var ROLE_EMOJI_FALLBACK = "🏷️";
+    var ROLE_EMOJI_LIMIT = 3;   // emoji shown in front of one node; the tooltip keeps every role
+
+    function roleEmoji(role) {
+        return Object.prototype.hasOwnProperty.call(ROLE_EMOJI, role) ? ROLE_EMOJI[role] : ROLE_EMOJI_FALLBACK;
+    }
+
+    // Who serves whom: for each node key (a bare id in the project, "project/id" outside it), the roles it plays,
+    // each with the conversation it plays it for. Sorted by role, then by that conversation.
+    // Who serves whom across all projects: for each row key ("<project>/<id>"), the roles it plays, each with the
+    // conversation it plays it for, named relative to the target ("chat-02" in the same project, else
+    // "project2/chat-02"). Sorted by role, then by that conversation.
+    function rolesPlayedAll(all) {
+        var by = {};
+        (all.projects || []).forEach(function (g) {
+            (g.roleEdges || []).forEach(function (e) {
+                var key = roleTargetKey(e);
+                var forChat = !e.node && e.toProject === g.projectId ? "chat-" + e.from : g.projectId + "/chat-" + e.from;
+                (by[key] = by[key] || []).push({ role: e.role, forChat: forChat });
+            });
+        });
+        Object.keys(by).forEach(function (k) {
+            by[k].sort(function (a, b) {
+                return a.role === b.role ? (a.forChat < b.forChat ? -1 : 1) : (a.role < b.role ? -1 : 1);
+            });
+        });
+        return by;
+    }
+
+    // The node's tooltip: the pane's own box rather than the SVG <title>, which shows only after the browser's
+    // delay and cannot be styled. One box for the page, placed beside the pointer.
+    function graphTipEl() {
+        var el = document.getElementById("cg-tip");
+        if (!el) {
+            el = document.createElement("div");
+            el.id = "cg-tip";
+            el.setAttribute("role", "tooltip");
+            document.body.appendChild(el);
+        }
+        return el;
+    }
+
+    function showGraphTip(text, ev) {
+        var el = graphTipEl();
+        el.textContent = text;
+        el.style.display = "block";
+        var x = ev.clientX + 14, y = ev.clientY + 12;
+        var w = el.offsetWidth, h = el.offsetHeight;
+        if (x + w > window.innerWidth - 4) x = Math.max(4, window.innerWidth - w - 4);
+        if (y + h > window.innerHeight - 4) y = Math.max(4, ev.clientY - h - 8);
+        el.style.left = x + "px";
+        el.style.top = y + "px";
+    }
+
+    function hideGraphTip() {
+        var el = document.getElementById("cg-tip");
+        if (el) el.style.display = "none";
+    }
+
+    function renderGraph(all, box) {
+        hideGraphTip();   // the node under the pointer may be redrawn away
+        box.textContent = "";
+        var rows = graphRowsAll(all);
+        if (!(all.projects || []).length) {
+            var none = document.createElement("div");
+            none.className = "cg-note";
+            none.textContent = "No projects.";
+            box.appendChild(none);
+            return;
+        }
+        var roles = rolesPlayedAll(all);
+        var W = Math.max(220, box.clientWidth - 12), ROW = 26;
+
+        // The legend: the tree line, then each emoji in use with its role name, in two columns.
+        var inUse = {};
+        (all.projects || []).forEach(function (g) {
+            (g.roleEdges || []).forEach(function (e) {
+                var em = roleEmoji(e.role);
+                inUse[em] = inUse[em] || [];
+                if (inUse[em].indexOf(e.role) < 0) inUse[em].push(e.role);
+            });
+        });
+        var legendItems = Object.keys(inUse).sort(function (a, b) {
+            return a === ROLE_EMOJI_FALLBACK ? 1 : b === ROLE_EMOJI_FALLBACK ? -1 : (inUse[a][0] < inUse[b][0] ? -1 : 1);
+        }).map(function (em) { return { emoji: em, names: inUse[em].sort().join(", ") }; });
+        var COL = Math.floor((W - 8) / 2), legendLines = [];
+        for (var li0 = 0; li0 < legendItems.length; li0 += 2) legendLines.push(legendItems.slice(li0, li0 + 2));
+        var legendH = 18 + Math.max(1, legendLines.length) * 15;
+        var TOP = legendH + 14;
+        var H = TOP + rows.length * ROW + 10;
+        var svg = svgEl("svg", { width: W, height: H, viewBox: "0 0 " + W + " " + H, role: "img",
+            "aria-label": "Every project's conversations: superior to subordinate, and the roles they play" }, box);
+
+        var legend = svgEl("g", { "class": "cg-legend" }, svg);
+        svgEl("path", { d: "M4 10 H24", "class": "cg-sup" }, legend);
+        svgEl("text", { x: 28, y: 13 }, legend).textContent = "superior → subordinate";
+        if (!legendItems.length) svgEl("text", { x: 4, y: 28 }, legend).textContent = "no roles set (set_collaborator)";
+        legendLines.forEach(function (items, li) {
+            var y = 28 + li * 15;
+            items.forEach(function (it, ci) {
+                var x = 4 + ci * COL;
+                var room = Math.max(4, Math.floor((COL - 24) / 6.2));
+                var names = it.names.length > room ? it.names.substring(0, room - 1) + "…" : it.names;
+                var t = svgEl("text", { x: x, y: y, "class": "cg-legend-item", "data-emoji": it.emoji }, legend);
+                svgEl("tspan", { "class": "cg-roles" }, t).textContent = it.emoji;
+                svgEl("tspan", { x: x + 20 }, t).textContent = names;
+                if (names !== it.names) svgEl("title", {}, t).textContent = it.emoji + " " + it.names;
+            });
+        });
+
+        var pos = {};
+        rows.forEach(function (r, i) {
+            pos[r.key] = { x: 10 + r.depth * 14, y: TOP + i * ROW + ROW / 2, row: i };
+        });
+
+        // Superior edges, inside each unfolded project: an elbow from the superior's dot to the subordinate's.
+        (all.projects || []).forEach(function (g) {
+            if (graphCollapsed.has(g.projectId)) return;
+            (g.superiorEdges || []).forEach(function (e) {
+                var a = pos[g.projectId + "/" + e.from], b = pos[g.projectId + "/" + e.to];
+                if (!a || !b) return;
+                svgEl("path", { d: "M" + a.x + " " + (a.y + 6) + " V" + b.y + " H" + (b.x - 6), "class": "cg-sup",
+                    "data-project": g.projectId, "data-from": e.from, "data-to": e.to }, svg)
+                    .appendChild(svgEl("title", {})).textContent = "chat-" + e.from + " is the superior of chat-" + e.to;
+            });
+        });
+
+        rows.forEach(function (r) {
+            var p = pos[r.key];
+            if (r.kind === "project") {
+                // The project's row: a fold mark, its name, and its id lighter beside it (the id alone when unnamed).
+                var folded = graphCollapsed.has(r.project);
+                var pg = svgEl("g", { "class": "cg-project" + (folded ? " cg-folded" : ""), "data-project": r.project,
+                    "aria-expanded": folded ? "false" : "true" }, svg);
+                svgEl("text", { x: p.x - 4, y: p.y + 4, "class": "cg-fold" }, pg).textContent = folded ? "▸" : "▾";
+                var pl = svgEl("text", { x: p.x + 10, y: p.y + 4 }, pg);
+                var name = r.g.name;
+                svgEl("tspan", { "class": "cg-project-name" }, pl).textContent = name || r.project;
+                if (name) svgEl("tspan", { "class": "cg-project-id" }, pl).textContent = "  " + r.project;
+                svgEl("title", {}, pg).textContent = (name ? name + " (" + r.project + ")" : r.project)
+                    + " — " + (r.g.nodes || []).length + " conversation(s); click to " + (folded ? "unfold" : "fold");
+                pg.addEventListener("click", function () { toggleGraphProject(r.project); });
+                return;
+            }
+            var played = roles[r.key] || [];
+            var cls = "cg-node" + (r.node && r.node.liaison ? " cg-liaison" : "") + (r.external ? " cg-external" : " cg-link")
+                + (r.remoteNode ? " cg-remote" : "");
+            var gEl = svgEl("g", { "class": cls, "data-chat": r.key,
+                "data-roles": played.map(function (x) { return x.role + ":" + x.forChat; }).join(",") }, svg);
+            svgEl("circle", { cx: p.x, cy: p.y, r: 5 }, gEl);
+            var label = svgEl("text", { x: p.x + 10, y: p.y + 4 }, gEl);
+            var prefixLen = 0, idX = null;
+            if (played.length) {
+                var emojis = [];
+                played.forEach(function (x) {
+                    var em = roleEmoji(x.role);
+                    if (emojis.indexOf(em) < 0) emojis.push(em);
+                });
+                var shown = emojis.slice(0, ROLE_EMOJI_LIMIT).join("") + (emojis.length > ROLE_EMOJI_LIMIT ? "…" : "");
+                svgEl("tspan", { "class": "cg-roles" }, label).textContent = shown;
+                // The id is placed after the emoji by position, not by the emoji's own advance width, which
+                // differs between emoji fonts and left a gap of several spaces.
+                var nShown = Math.min(emojis.length, ROLE_EMOJI_LIMIT);
+                var prefixPx = nShown * 15 + (emojis.length > ROLE_EMOJI_LIMIT ? 14 : 0) + 4;
+                idX = p.x + 10 + prefixPx;
+                prefixLen = Math.ceil(prefixPx / 7.2);
+            }
+            var idText = r.external ? r.project + "/chat-" + r.id + (r.remoteNode ? " @" + r.remoteNode : "") : "chat-" + r.id;
+            var idAttrs = { "class": "cg-id" };
+            if (idX !== null) idAttrs.x = idX;
+            svgEl("tspan", idAttrs, label).textContent = idText;
+            var room = Math.floor((W - 8 - (p.x + 10)) / 7.2) - idText.length - prefixLen;
+            var extra = r.external ? (r.remoteNode ? "" : " (not on this instance)") : ((r.node && r.node.name) ? " " + r.node.name : "");
+            if (extra && room > 2) {
+                svgEl("tspan", { "class": "cg-name" }, label).textContent =
+                    extra.length > room ? extra.substring(0, room - 1) + "…" : extra;
+            }
+            if (r.node && r.node.liaison) {
+                svgEl("text", { x: p.x + 10, y: p.y - 7, "class": "cg-tag" }, gEl).textContent = "liaison";
+            }
+            var tip = (r.external ? idText : r.project + "/" + idText) + (r.node && r.node.name ? " — " + r.node.name : "")
+                + (r.node && r.node.liaison ? " (liaison)" : "")
+                + (r.external ? (r.remoteNode ? "\non node " + r.remoteNode + " (another chat-ui instance)" : " (not on this instance)") : "");
+            // What it runs on, as the server read it from the conversation for this refresh. A conversation not on
+            // this instance, or one whose provider could not be read, is not looked up: "model unknown".
+            tip += "\n" + (r.node && r.node.provider
+                ? r.node.provider + ": " + (r.node.model || "(no model chosen yet)")
+                : "model unknown");
+            if (played.length) {
+                tip += "\n" + played.map(function (x) { return roleEmoji(x.role) + " " + x.role + " for " + x.forChat; }).join("\n");
+            }
+            gEl.setAttribute("data-tip", tip);
+            gEl.addEventListener("mouseenter", function (ev) { showGraphTip(tip, ev); });
+            gEl.addEventListener("mousemove", function (ev) { showGraphTip(tip, ev); });
+            gEl.addEventListener("mouseleave", hideGraphTip);
+            if (!r.external) {
+                gEl.addEventListener("click", function () { showConversation(r.project, r.id); });
+            }
+        });
+    }
+
+    var graphRefreshing = false;
+    function refreshGraph(force) {
+        var box = document.getElementById("conv-graph");
+        if (!box || graphRefreshing) return Promise.resolve();
+        var status = document.getElementById("actors-status");
+        graphRefreshing = true;
+        return fetch("api/graph")
+            .then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.text();
+            })
+            .then(function (text) {
+                var all = JSON.parse(text);
+                if (status) {
+                    var np = (all.projects || []).length;
+                    var nc = (all.projects || []).reduce(function (s, g) { return s + (g.nodes || []).length; }, 0);
+                    status.textContent = np + (np === 1 ? " project, " : " projects, ") + nc + (nc === 1 ? " conversation" : " conversations");
+                }
+                var sig = box.clientWidth + "|" + text;
+                if (!force && sig === graphLastSig) return;
+                graphLastSig = sig;
+                graphLastData = all;
+                renderGraph(all, box);
+            })
+            .catch(function (err) { if (status) status.textContent = "error: " + err.message; })
+            .then(function () { graphRefreshing = false; });
+    }
+
+    // Shows the tree or the graph, and remembers the choice like the theme.
+    function applyLeftView() {
+        var tree = document.getElementById("actors-tree");
+        var graph = document.getElementById("conv-graph");
+        var view = document.getElementById("left-view-select");
+        var isGraph = leftView === "graph";
+        if (tree) tree.hidden = isGraph;
+        if (graph) graph.hidden = !isGraph;
+        if (view) view.value = leftView;
+        // The count under the menu belongs to the view; cleared until the view's own refresh writes it.
+        var status = document.getElementById("actors-status");
+        if (status) status.textContent = "";
+        localStorage.setItem(LEFT_VIEW_KEY, leftView);
+    }
+
+    // What Refresh and Auto refresh: the view shown.
+    function refreshLeftDock() {
+        return leftView === "graph" ? refreshGraph(false) : refreshActors();
+    }
+
+    function initLeftViews() {
+        var view = document.getElementById("left-view-select");
+        if (view) view.addEventListener("change", function () {
+            leftView = view.value === "graph" ? "graph" : "tree";
+            applyLeftView();
+            graphLastSig = null;
+            refreshLeftDock();
+        });
+        applyLeftView();
+        if (leftView === "graph") refreshLeftDock();
     }
 
     function initActors() {
-        var btn = document.getElementById('actors-refresh');
-        var auto = document.getElementById('actors-auto');
-        if (btn) btn.addEventListener('click', refreshActors);
+        var btn = document.getElementById("actors-refresh");
+        var auto = document.getElementById("actors-auto");
+        var newProjectBtn = document.getElementById("new-project-btn");
+        if (btn) btn.addEventListener("click", function () { graphLastSig = null; refreshLeftDock(); });
+        if (newProjectBtn) newProjectBtn.addEventListener("click", createProject);
+        initLeftViews();
 
         var timer = null;
         function applyAuto() {
             if (auto && auto.checked) {
-                if (!timer) timer = setInterval(function () {
-                    var tab = document.getElementById('tab-actors');
-                    if (tab && tab.classList.contains('active')) refreshActors();
-                }, 3000);
+                if (!timer) {
+                    timer = setInterval(function () {
+                        var dock = document.getElementById("left-dock");
+                        if (dock && !dock.classList.contains("collapsed")) refreshLeftDock();
+                    }, 3000);
+                }
             } else if (timer) {
                 clearInterval(timer);
                 timer = null;
             }
         }
-        if (auto) auto.addEventListener('change', applyAuto);
+        if (auto) auto.addEventListener("change", applyAuto);
         applyAuto();
     }
 
-    // ── Sessions tab (list conversations; read each inline; clean up) ──
-    // Each session is a collapsible row: expanding it loads that conversation's turn-by-turn trace
-    // (request <-> response <-> tool I/O) inline. Arbitrary queries are SQL's job — no raw-log browser.
+    // ── Sessions tab (list conversations; expand one to read its turn-by-turn trace inline) ──
+    // Ported from quarkus-chat-ui3's console.js — the REST shape (IoLogView.TraceTurn/TraceStep)
+    // and CSS classes (.sess/.tr-turn/.trm/.tr-sec) are already identical, so this is a direct port.
     var ioSessionsLoaded = false;
-    var ioCurrentSession = null;   // vestigial; the inline trace threads its own session id
 
-    function ioSetStatus(t) { var s = document.getElementById('io-status'); if (s) s.textContent = t; }
+    function ioSetStatus(t) { var s = document.getElementById("io-status"); if (s) s.textContent = t; }
 
     function ioDeleteSession(id) {
-        if (!confirm('Delete session #' + id + ' and all its logs?')) return;
-        ioSetStatus('deleting…');
-        fetch('api/sessions/' + encodeURIComponent(id), { method: 'DELETE' })
+        if (!confirm("Delete session #" + id + " and all its logs?")) return;
+        ioSetStatus("deleting…");
+        fetch("api/sessions/" + encodeURIComponent(id), { method: "DELETE" })
             .then(function (r) { return r.json(); })
             .then(function (j) {
-                ioSetStatus(j.deleted ? ('deleted session #' + id)
-                                      : (j.error || 'not deleted (active session is kept)'));
+                ioSetStatus(j.deleted ? ("deleted session #" + id)
+                                      : (j.error || "not deleted (active session is kept)"));
                 ioSessionsLoaded = false; ioLoadSessions();
             })
-            .catch(function (e) { ioSetStatus('error: ' + e); });
+            .catch(function (e) { ioSetStatus("error: " + e); });
+    }
+
+    // Opens the Sessions tab and lists every external caller's session (workflowName
+    // "chat-ui-job-externalProxy:<callerId>", ChatUiActorSystem.EXTERNAL_PROXY_SESSION_PREFIX),
+    // auto-expanded — a one-shot view from the Actors tab's externalProxy.log node, not a mode:
+    // switching tabs away and back runs the normal per-conversation load afterward, same as always
+    // (ArtexProxyLogging_261017_oo01).
+    var EXTERNAL_PROXY_WORKFLOW_PREFIX = "chat-ui-job-externalProxy:";
+    function openExternalProxySessions() {
+        // Sessions belongs to the chat perspective; from the project one it would not be shown.
+        switchPerspective("chat");
+        showRightTab("logdb");
+        var el = document.getElementById("io-sessions");
+        if (!el) return;
+        fetch("api/sessions")
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+            .then(function (list) {
+                var matches = (list || []).filter(function (s) {
+                    return s.workflowName && s.workflowName.indexOf(EXTERNAL_PROXY_WORKFLOW_PREFIX) === 0;
+                });
+                el.textContent = "";
+                if (!matches.length) {
+                    var e = document.createElement("div"); e.className = "io-empty";
+                    e.textContent = "No calls relayed through POST /v1/chat/completions yet.";
+                    el.appendChild(e);
+                    ioSetStatus("0 external sessions");
+                    return;
+                }
+                matches.forEach(function (s) {
+                    var row = ioSessionEl(s);
+                    el.appendChild(row);
+                    row.open = true; // triggers its own trace fetch, same as re-opening on refresh
+                });
+                ioSetStatus(matches.length + " external session(s)");
+            })
+            .catch(function (err) { ioSetStatus("error: " + err.message); });
     }
 
     function ioLoadSessions() {
-        return fetch('api/sessions').then(function (r) { return r.json(); }).then(function (list) {
-            var el = document.getElementById('io-sessions');
+        var el = document.getElementById("io-sessions");
+        // Remember which sessions were expanded so a refresh re-fetches their trace (picking up
+        // any new turns) instead of silently collapsing whatever the user had open to inspect.
+        var openIds = {};
+        if (el) {
+            el.querySelectorAll("details.sess[open]").forEach(function (d) {
+                if (d.dataset.sessionId) openIds[d.dataset.sessionId] = true;
+            });
+        }
+        var c = (typeof window.chatUiGetActiveChat === "function") ? window.chatUiGetActiveChat() : null;
+        var url = c ? ("api/sessions?conversationSquadId=" + encodeURIComponent(c.projectId + "/chat-" + c.chatId))
+                    : "api/sessions";
+        return fetch(url).then(function (r) { return r.json(); }).then(function (list) {
             if (!el) return;
-            el.textContent = '';
+            el.textContent = "";
             list = list || [];
             if (!list.length) {
-                var e = document.createElement('div'); e.className = 'io-empty'; e.textContent = 'No sessions.';
-                el.appendChild(e); ioSetStatus('0 sessions'); ioSessionsLoaded = true; return;
+                var e = document.createElement("div"); e.className = "io-empty"; e.textContent = "No sessions.";
+                el.appendChild(e); ioSetStatus("0 sessions"); ioSessionsLoaded = true; return;
             }
-            list.forEach(function (s) { el.appendChild(ioSessionEl(s)); });
+            list.forEach(function (s) {
+                var row = ioSessionEl(s);
+                el.appendChild(row);
+                if (openIds[String(s.sessionId)]) row.open = true;   // re-triggers its trace fetch
+            });
             ioSessionsLoaded = true;
-            ioSetStatus(list.length + ' session(s)');
-        }).catch(function (err) { ioSetStatus('error: ' + err.message); });
+            ioSetStatus(list.length + " session(s)");
+        }).catch(function (err) { ioSetStatus("error: " + err.message); });
     }
 
-    // One session as a collapsible row: the header shows its meta + a delete button; expanding it lazily
-    // loads and renders that session's turn-by-turn trace inline.
     function ioSessionEl(s) {
-        var det = document.createElement('details'); det.className = 'sess';
-        var sum = document.createElement('summary'); sum.className = 'sess-head';
-        var meta = document.createElement('span'); meta.className = 'sess-meta';
-        meta.textContent = '#' + s.sessionId + '  ·  ' + (s.startedAt || '') + '  ·  '
-                         + (s.workflowName || '') + '  ·  '
-                         + (s.totalLogEntries != null ? s.totalLogEntries + ' entries' : '');
-        var del = document.createElement('button'); del.type = 'button'; del.className = 'io-del';
-        del.title = 'Delete this session and all its logs'; del.textContent = '🗑';
-        del.addEventListener('click', function (ev) { ev.preventDefault(); ev.stopPropagation(); ioDeleteSession(s.sessionId); });
+        var det = document.createElement("details"); det.className = "sess";
+        det.dataset.sessionId = String(s.sessionId);
+        var sum = document.createElement("summary"); sum.className = "sess-head";
+        var meta = document.createElement("span"); meta.className = "sess-meta";
+        meta.textContent = "#" + s.sessionId + "  ·  " + (s.startedAt || "") + "  ·  "
+                         + (s.workflowName || "") + "  ·  "
+                         + (s.totalLogEntries != null ? s.totalLogEntries + " entries" : "");
+        var del = document.createElement("button"); del.type = "button"; del.className = "io-del";
+        del.title = "Delete this session and all its logs"; del.textContent = "🗑";
+        del.addEventListener("click", function (ev) { ev.preventDefault(); ev.stopPropagation(); ioDeleteSession(s.sessionId); });
         sum.appendChild(meta); sum.appendChild(del);
         det.appendChild(sum);
-        var body = document.createElement('div'); body.className = 'sess-body'; body.textContent = 'loading…';
+        var body = document.createElement("div"); body.className = "sess-body"; body.textContent = "loading…";
         det.appendChild(body);
         var loaded = false;
-        det.addEventListener('toggle', function () {
+        det.addEventListener("toggle", function () {
             if (!det.open || loaded) return;
             loaded = true;
-            fetch('api/sessions/' + s.sessionId + '/trace')
-                .then(function (r) { return r.json(); })
-                .then(function (turns) { ioRenderTraceInto(body, turns || [], s.sessionId); })
-                .catch(function (err) { body.textContent = 'error: ' + err.message; loaded = false; });
+            ioLoadTurnWindow(body, s.sessionId, 0, false)
+                .then(function () { return ioLoadSettings(body, s.sessionId); })
+                .catch(function (err) { body.textContent = "error: " + err.message; loaded = false; });
         });
         return det;
     }
 
-    // ── Trace rendering (per-turn directional messages), shown inline inside a Sessions row ──
-    function ioRenderTraceInto(el, turns, sessionId) {
-        el.textContent = '';
-        if (!turns.length) {
-            var none = document.createElement('div'); none.className = 'io-empty';
-            none.textContent = 'No agent-loop trace in this session.'; el.appendChild(none); return;
-        }
-        turns.forEach(function (t) {
-            var box = document.createElement('details'); box.className = 'tr-turn'; box.open = true;
-            var head = document.createElement('summary'); head.className = 'tr-turn-head';
-            head.textContent = 'Turn ' + t.turn;
-            box.appendChild(head);
-            ioTurnMessages(t).forEach(function (m) { box.appendChild(ioMsgEl(m, sessionId)); });
-            el.appendChild(box);
-        });
+    /**
+     * Puts the conversation's settings history above its turns: each time the provider, tool set
+     * or model was set, with the values (ConversationSettingsRecord_260913_oo01). Nothing is
+     * drawn for a session that never changed them.
+     */
+    function ioLoadSettings(el, sessionId) {
+        return fetch("api/sessions/" + sessionId + "/settings")
+            .then(function (r) { return r.json(); })
+            .then(function (records) {
+                if (!records || !records.length) return;
+                var box = document.createElement("div"); box.className = "sess-settings";
+                var head = document.createElement("div"); head.className = "sess-settings-head";
+                head.textContent = "Settings (" + records.length + ")";
+                box.appendChild(head);
+                records.forEach(function (rec) {
+                    var line = document.createElement("div"); line.className = "sess-settings-line";
+                    line.textContent = (rec.time || "").replace("T", " ").slice(0, 19) + "  ·  provider "
+                            + (rec.provider || "?") + "  ·  tools " + (rec.tools || "?")
+                            + "  ·  model " + (rec.model || "?");
+                    box.appendChild(line);
+                });
+                el.insertBefore(box, el.firstChild);
+            })
+            .catch(function () { /* the turns are already there; settings are extra */ });
     }
 
-    // Flattens a turn into an ordered list of one-direction MESSAGES (the basic unit). Each log entry
-    // splits into its two directions: an llm entry -> (loop→LLM request) + (LLM→loop reply); a tool
-    // entry -> (loop→tool input) + (tool→loop observation). The user prompt opens the turn.
-    function ioTurnMessages(t) {
-        var out = [];
-        var firstLlm = (t.steps || []).filter(function (s) { return s.kind === 'llm'; })[0];
-        out.push({ dir: 'user → loop', cls: 'user',
-                   summary: '🗣 ' + (t.userPrompt || '(user prompt not found)'),
-                   id: firstLlm ? firstLlm.id : -1, part: 'USER' });
-        (t.steps || []).forEach(function (s) {
-            if (s.kind === 'tool') {
-                out.push({ dir: 'loop → tool', cls: 'to-tool',
-                           summary: '↳ ' + s.toolName + '(' + s.toolInput + ')', id: s.id, part: 'INPUT' });
-                out.push({ dir: 'tool → loop', cls: 'from-tool',
-                           summary: '→ ' + s.observation + ' …  [' + s.obsChars + ' chars]', id: s.id, part: 'OBSERVATION' });
+    // How many turns a session shows at a time. A session in this archive runs to 1,417 of them;
+    // drawing every turn with its messages open put all of that in the page at once.
+    var IO_TURN_WINDOW = 20;
+
+    /**
+     * Draws a window of a session's turns into `el`, newest first. `before` is the turn to read
+     * back from (0 = the newest); `append` keeps what is already there and adds older ones below.
+     */
+    function ioLoadTurnWindow(el, sessionId, before, append) {
+        if (!append) el.textContent = "loading…";
+        return fetch("api/sessions/" + sessionId + "/turns?before=" + before
+                     + "&limit=" + IO_TURN_WINDOW)
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                var turns = (d && d.turns) || [];
+                if (!append) el.textContent = "";
+                var more = el.querySelector(".tr-more");
+                if (more) more.remove();
+                if (!turns.length && !append) {
+                    var none = document.createElement("div"); none.className = "io-empty";
+                    none.textContent = "No agent-loop trace in this session.";
+                    el.appendChild(none);
+                    return;
+                }
+                turns.forEach(function (h) { el.appendChild(ioTurnEl(h, sessionId)); });
+                var oldest = turns.length ? turns[turns.length - 1].turn : 0;
+                if (oldest > 1) {
+                    var btn = document.createElement("button");
+                    btn.type = "button"; btn.className = "tr-more";
+                    btn.textContent = "older turns (" + (oldest - 1) + " before this)";
+                    btn.addEventListener("click", function () {
+                        btn.disabled = true;
+                        ioLoadTurnWindow(el, sessionId, oldest, true);
+                    });
+                    el.appendChild(btn);
+                }
+            });
+    }
+
+    /**
+     * One turn as a row: its number and what was asked. Its messages are fetched and shown under
+     * it when it is opened, and only one turn is open at a time, so what is in the page does not
+     * depend on how many turns the session has.
+     */
+    function ioTurnEl(head, sessionId) {
+        var box = document.createElement("details"); box.className = "tr-turn";
+        var sum = document.createElement("summary"); sum.className = "tr-turn-head";
+        var num = document.createElement("span"); num.className = "tr-turn-num";
+        num.textContent = "Turn " + head.turn;
+        var q = document.createElement("span"); q.className = "tr-turn-q";
+        q.textContent = head.question || "(no question recorded)";
+        q.title = q.textContent;
+        sum.appendChild(num); sum.appendChild(q);
+        box.appendChild(sum);
+        var body = document.createElement("div"); box.appendChild(body);
+        var loaded = false;
+        box.addEventListener("toggle", function () {
+            if (!box.open) {
+                // Closed turns give their messages back. Kept, they pile up hidden — a tool row's
+                // line carries its whole input, and fifty read turns held fifty of those.
+                body.textContent = "";
+                loaded = false;
                 return;
             }
-            // llm entry → two messages: the request we sent, and the model's reply.
-            var tokIn = (typeof s.promptTokens === 'number' && s.promptTokens >= 0) ? (' · ' + s.promptTokens + ' tok in') : '';
-            out.push({ dir: 'loop → LLM', cls: 'to-llm',
-                       summary: 'request' + tokIn + '  (system + history + user + tools offered)', id: s.id, part: 'REQUEST' });
+            // One turn open at a time: two turns of messages is already more than the pane holds,
+            // and the point of the window is that the page does not grow with the session.
+            box.parentNode.querySelectorAll("details.tr-turn[open]").forEach(function (other) {
+                if (other !== box) other.open = false;
+            });
+            if (loaded) return;
+            loaded = true;
+            body.textContent = "loading…";
+            fetch("api/sessions/" + sessionId + "/trace/" + head.turn)
+                .then(function (r) { return r.json(); })
+                .then(function (t) {
+                    body.textContent = "";
+                    // The ids the chat pane shows under this turn's bubbles, so the two can be
+                    // matched (TurnAndRequestIds_261107_oo01).
+                    if (t.turnId || t.requestId) {
+                        var ids = document.createElement("div"); ids.className = "tr-turn-ids";
+                        ids.textContent = [t.turnId ? "Turn: " + t.turnId : "",
+                                           t.requestId ? "Request: " + t.requestId : ""]
+                            .filter(Boolean).join("    ");
+                        body.appendChild(ids);
+                    }
+                    ioTurnMessages(t).forEach(function (m) {
+                        body.appendChild(ioMsgEl(m, sessionId));
+                    });
+                })
+                .catch(function (err) { body.textContent = "error: " + err.message; loaded = false; });
+        });
+        return box;
+    }
+
+    // Flattens a turn into an ordered list of one-direction messages: an llm step -> (loop→LLM
+    // request) + (LLM→loop reply); a tool step -> (loop→tool input) + (tool→loop observation).
+    // One line of a summary: the whole text is read by picking the message, so its row carries a
+    // bounded slice. tail() rather than a head for what the person sent — this program folds the
+    // system prompt in front of the question, so the head is the same in every turn.
+    function ioTrim(s, n) { s = s || ""; return s.length > n ? s.slice(0, n) + "…" : s; }
+    function ioTail(s, n) { s = s || ""; return s.length > n ? "…" + s.slice(-n) : s; }
+
+    function ioTurnMessages(t) {
+        var out = [];
+        var firstLlm = (t.steps || []).filter(function (s) { return s.kind === "llm"; })[0];
+        out.push({ dir: "user → loop", cls: "user",
+                   summary: "🗣 " + (ioTail(t.userPrompt, 200) || "(user prompt not found)"),
+                   id: firstLlm ? firstLlm.id : -1, part: "USER" });
+        (t.steps || []).forEach(function (s) {
+            if (s.kind === "tool") {
+                out.push({ dir: "loop → tool", cls: "to-tool",
+                           summary: "↳ " + s.toolName + "(" + ioTrim(s.toolInput, 200) + ")",
+                           id: s.id, part: "INPUT" });
+                out.push({ dir: "tool → loop", cls: "from-tool",
+                           summary: "→ " + s.observation + " …  [" + s.obsChars + " chars]", id: s.id, part: "OBSERVATION" });
+                return;
+            }
+            var tokIn = (typeof s.promptTokens === "number" && s.promptTokens >= 0) ? (" · " + s.promptTokens + " tok in") : "";
+            out.push({ dir: "loop → LLM", cls: "to-llm",
+                       summary: "request" + tokIn + "  (system + history + user + tools offered)", id: s.id, part: "REQUEST" });
             var reply;
             if (s.toolCalls) {
-                reply = '🔧 ' + s.toolCalls.replace(/\s+/g, ' ').trim();
-                if (s.reason) reply += '   💡 ' + s.reason;
+                reply = "🔧 " + s.toolCalls.replace(/\s+/g, " ").trim();
+                if (s.reason) reply += "   💡 " + s.reason;
             } else {
-                reply = '💬 ' + (s.thought || '(empty)');
+                reply = "💬 " + (s.thought || "(empty)");
             }
-            var tokOut = (typeof s.completionTokens === 'number' && s.completionTokens >= 0) ? ('  ·  ' + s.completionTokens + ' tok out') : '';
-            out.push({ dir: 'LLM → loop', cls: 'from-llm', summary: reply + tokOut, id: s.id, part: 'RESPONSE' });
+            var tokOut = (typeof s.completionTokens === "number" && s.completionTokens >= 0) ? ("  ·  " + s.completionTokens + " tok out") : "";
+            out.push({ dir: "LLM → loop", cls: "from-llm", summary: reply + tokOut, id: s.id, part: "RESPONSE" });
         });
         return out;
     }
 
-    // One directional message: a summary line (with its "who → whom" tag + color) that expands to show
-    // ONLY that direction's full text, fetched lazily from the source log entry.
-    function ioMsgEl(m, sessionId) {
-        var det = document.createElement('details'); det.className = 'trm ' + m.cls;
-        var sum = document.createElement('summary'); sum.className = 'trm-sum';
-        var dir = document.createElement('span'); dir.className = 'trm-dir'; dir.textContent = m.dir;
-        var txt = document.createElement('span'); txt.className = 'trm-txt'; txt.textContent = m.summary;
+    // One message is a row that is picked, not a block that opens where it sits. Opened in place,
+    // each one pushed everything below it further down and the session and turn it belongs to off
+    // the top — five of them made this list six screens tall. The one picked is shown below, in
+    // #io-reading, so only ever one is open and the structure above it never moves.
+    // Which pair of regions a message list belongs to: the list it is in, and the head and body
+    // of the pane the message picked out of it is read in. The Sessions tab and the Log Search tab
+    // each have their own pair, so a message read in one does not clear the other's selection.
+    var IO_PANE_SESSIONS = { list: "#io-sessions", head: "io-reading-head", body: "io-reading-body" };
+    var IO_PANE_SEARCH = { list: "#lsearch-hits", head: "lsearch-reading-head", body: "lsearch-reading-body" };
+
+    function ioMsgEl(m, sessionId, pane) {
+        pane = pane || IO_PANE_SESSIONS;
+        var row = document.createElement("div"); row.className = "trm " + m.cls;
+        var sum = document.createElement("div"); sum.className = "trm-sum";
+        var dir = document.createElement("span"); dir.className = "trm-dir"; dir.textContent = m.dir;
+        var txt = document.createElement("span"); txt.className = "trm-txt"; txt.textContent = m.summary;
         sum.appendChild(dir); sum.appendChild(txt);
-        det.appendChild(sum);
-        var body = document.createElement('div'); body.className = 'trm-body'; body.textContent = 'loading…';
-        det.appendChild(body);
-        var loaded = false;
-        det.addEventListener('toggle', function () {
-            if (!det.open || loaded) return;
-            loaded = true;
-            if (m.id < 0) { body.textContent = '(no source entry)'; return; }
-            fetch('api/sessions/' + sessionId + '/entry/' + m.id)
-                .then(function (r) { return r.json(); })
-                .then(function (d) { ioRenderPart(body, d.message || '', m.part); })
-                .catch(function (err) { body.textContent = 'error: ' + err.message; loaded = false; });
-        });
-        return det;
+        row.appendChild(sum);
+        sum.addEventListener("click", function () { ioReadMessage(row, m, sessionId, pane); });
+        return row;
     }
 
-    // Renders ONLY the sections belonging to one direction (part) of a source entry into `holder`.
+    // Shows one message in the reading pane below the list.
+    function ioReadMessage(row, m, sessionId, pane) {
+        pane = pane || IO_PANE_SESSIONS;
+        document.querySelectorAll(pane.list + " .trm.selected").forEach(function (el) {
+            el.classList.remove("selected");
+        });
+        row.classList.add("selected");
+        var head = document.getElementById(pane.head);
+        var body = document.getElementById(pane.body);
+        head.textContent = m.dir + "  ·  " + m.part;
+        head.title = head.textContent;
+        body.textContent = "";
+        if (m.id < 0) {
+            body.textContent = "(no source entry)";
+            return;
+        }
+        var pending = document.createElement("div"); pending.textContent = "loading…";
+        body.appendChild(pending);
+        fetch("api/sessions/" + sessionId + "/entry/" + m.id)
+            .then(function (r) { return r.json(); })
+            .then(function (d) { ioRenderPart(body, d.message || "", m.part); body.scrollTop = 0; })
+            .catch(function (err) { body.textContent = "error: " + err.message; });
+    }
+
     function ioRenderPart(holder, message, part) {
-        holder.textContent = '';
+        holder.textContent = "";
         var sections;
-        if (part === 'USER') {
-            sections = [{ spec: { t: 'user message', cls: 'user' }, body: ioUserMessageOf(message) }];
+        if (part === "RAW") {
+            // A row the agent loop did not write: a search can land on one, and it has none of the
+            // markers the split below looks for. Shown as it was recorded.
+            sections = [{ spec: { t: "entry", cls: "meta" }, body: message }];
+        } else if (part === "USER") {
+            sections = [{ spec: { t: "user message", cls: "user" }, body: ioUserMessageOf(message) }];
         } else {
-            var kind = (part === 'INPUT' || part === 'OBSERVATION') ? 'tool' : 'llm';
-            var want = { REQUEST: ['REQUEST'], RESPONSE: ['RESPONSE', 'REASONING', 'TOOL_CALLS'],
-                         INPUT: ['TOOL', 'INPUT'], OBSERVATION: ['OBSERVATION'] }[part] || [];
+            var kind = (part === "INPUT" || part === "OBSERVATION") ? "tool" : "llm";
+            var want = { REQUEST: ["REQUEST"], RESPONSE: ["RESPONSE", "REASONING", "TOOL_CALLS"],
+                         INPUT: ["TOOL", "INPUT"], OBSERVATION: ["OBSERVATION"] }[part] || [];
             sections = ioSplitEntry(message, kind).filter(function (sec) {
                 return want.indexOf(sec.spec.k.slice(0, -1)) >= 0;
             });
         }
         if (!sections.length) {
-            var pre0 = document.createElement('pre'); pre0.className = 'tr-full-body'; pre0.textContent = '(empty)';
+            var pre0 = document.createElement("pre"); pre0.className = "tr-full-body"; pre0.textContent = "(empty)";
             holder.appendChild(pre0); return;
         }
         sections.forEach(function (sec) {
-            var block = document.createElement('div'); block.className = 'tr-sec ' + (sec.spec.cls || '');
-            var h = document.createElement('div'); h.className = 'tr-sec-head';
-            var tt = document.createElement('span'); tt.className = 'tr-sec-title'; tt.textContent = sec.spec.t;
+            var block = document.createElement("div"); block.className = "tr-sec " + (sec.spec.cls || "");
+            var h = document.createElement("div"); h.className = "tr-sec-head";
+            var tt = document.createElement("span"); tt.className = "tr-sec-title"; tt.textContent = sec.spec.t;
             h.appendChild(tt);
-            var pre = document.createElement('pre'); pre.className = 'tr-full-body';
+            var pre = document.createElement("pre"); pre.className = "tr-full-body";
             var b = sec.body;
             if (sec.spec.json) { try { b = JSON.stringify(JSON.parse(b), null, 2); } catch (e) { /* keep raw */ } }
-            pre.textContent = b ? b : '(empty)';
+            pre.textContent = b ? b : "(empty)";
             block.appendChild(h); block.appendChild(pre);
             holder.appendChild(block);
         });
     }
 
-    // Pulls the current user question (the last user message) out of an entry's REQUEST json.
     function ioUserMessageOf(message) {
-        var req = ioSplitEntry(message, 'llm').filter(function (s) { return s.spec.k === 'REQUEST:'; })[0];
-        if (!req) return '';
+        var req = ioSplitEntry(message, "llm").filter(function (s) { return s.spec.k === "REQUEST:"; })[0];
+        if (!req) return "";
         try {
             var msgs = (JSON.parse(req.body).messages) || [];
-            var last = '';
-            msgs.forEach(function (mm) { if (mm.role === 'user') last = mm.content || ''; });
+            var last = "";
+            msgs.forEach(function (mm) { if (mm.role === "user") last = mm.content || ""; });
             return last;
-        } catch (e) { return ''; }
+        } catch (e) { return ""; }
     }
 
-    // The labeled sections of a stored entry, in order, each tagged with its direction (who -> whom)
-    // so a single round-trip is NOT shown as one undifferentiated blob.
     function ioEntrySections(kind) {
-        if (kind === 'tool') return [
-            { k: 'TOOL:',        t: 'TOOL (name)',          d: 'agent loop → tool (Java)', cls: 'to-tool' },
-            { k: 'INPUT:',       t: 'INPUT (arguments)',    d: 'agent loop → tool (Java)', cls: 'to-tool' },
-            { k: 'OBSERVATION:', t: 'OBSERVATION (result)', d: 'tool (Java) → agent loop', cls: 'from-tool' }
+        if (kind === "tool") return [
+            { k: "TOOL:",        t: "TOOL (name)",          cls: "to-tool" },
+            { k: "INPUT:",       t: "INPUT (arguments)",    cls: "to-tool" },
+            { k: "OBSERVATION:", t: "OBSERVATION (result)", cls: "from-tool" }
         ];
         return [
-            { k: 'REQUEST:',     t: 'REQUEST (system + history + user + tools offered)', d: 'agent loop → LLM', cls: 'to-llm', json: true },
-            { k: 'RESPONSE:',    t: 'RESPONSE (assistant text)', d: 'LLM → agent loop', cls: 'from-llm' },
-            { k: 'REASONING:',   t: 'REASONING (chain of thought)', d: 'LLM → agent loop', cls: 'from-llm' },
-            { k: 'TOOL_CALLS:',  t: 'TOOL_CALLS (functions the model asked to run)', d: 'LLM → agent loop', cls: 'from-llm' },
-            { k: 'USAGE:',       t: 'USAGE (token counts)', d: 'LLM server · metadata', cls: 'meta' }
+            { k: "REQUEST:",     t: "REQUEST (system + history + user + tools offered)", cls: "to-llm", json: true },
+            { k: "RESPONSE:",    t: "RESPONSE (assistant text)", cls: "from-llm" },
+            { k: "REASONING:",   t: "REASONING (chain of thought)", cls: "from-llm" },
+            { k: "TOOL_CALLS:",  t: "TOOL_CALLS (functions the model asked to run)", cls: "from-llm" },
+            { k: "USAGE:",       t: "USAGE (token counts)", cls: "meta" }
         ];
     }
 
-    // Splits a stored entry message into its directional sections (markers appear once, in order).
     function ioSplitEntry(message, kind) {
         var specs = ioEntrySections(kind);
         var found = [], cursor = 0;
@@ -516,375 +3061,337 @@
         });
     }
 
-    function ioRenderEntries(page) {
-        var el = document.getElementById('io-entries');
-        el.textContent = '';
-        var entries = (page && page.entries) || [];
-        if (!entries.length) {
-            var e = document.createElement('div'); e.className = 'io-empty'; e.textContent = 'No entries.'; el.appendChild(e);
-            ioSetStatus('0 entries'); return;
-        }
-        entries.forEach(function (en) { el.appendChild(ioEntryEl(en)); });
-        ioSetStatus(page.returned + ' entries' + (page.limited ? ' (limited — narrow the filter)' : ''));
-    }
-
-    // Finds the end index of a JSON object/array starting at `start` (brace-balanced, string-aware).
-    function ioMatchJsonEnd(s, start) {
-        var depth = 0, inStr = false, esc = false;
-        for (var i = start; i < s.length; i++) {
-            var c = s[i];
-            if (inStr) {
-                if (esc) esc = false;
-                else if (c === '\\') esc = true;
-                else if (c === '"') inStr = false;
-            } else if (c === '"') { inStr = true; }
-            else if (c === '{' || c === '[') { depth++; }
-            else if (c === '}' || c === ']') { depth--; if (depth === 0) return i; }
-        }
-        return -1;
-    }
-
-    // Pretty-prints any embedded JSON object/array in the text (2-space indent), leaving the rest
-    // (REQUEST:/RESPONSE:/USAGE: labels, plain text) as-is. Truncated/invalid JSON is left untouched.
-    function ioPrettyJson(text) {
-        if (!text) return text || '';
-        var out = '', i = 0;
-        while (i < text.length) {
-            var ch = text[i];
-            if (ch === '{' || ch === '[') {
-                var end = ioMatchJsonEnd(text, i);
-                if (end > i) {
-                    var slice = text.slice(i, end + 1);
-                    try {
-                        out += JSON.stringify(JSON.parse(slice), null, 2);
-                        i = end + 1;
-                        continue;
-                    } catch (e) { /* not valid JSON (e.g. truncated preview): leave as-is */ }
-                }
-            }
-            out += ch;
-            i++;
-        }
-        return out;
-    }
-
-    function ioEntryEl(en) {
-        var wrap = document.createElement('details'); wrap.className = 'io-entry';
-        var sum = document.createElement('summary'); sum.className = 'io-entry-head';
-        var head = (en.label || '') + '  ·  ' + (en.agent || '') + '  ·  ' + (en.level || '') + '  ·  ' + (en.chars || 0) + ' chars';
-        // Real vLLM token counts (prompt -> completion), parsed server-side from the USAGE line.
-        // -1 means the entry has no USAGE line (e.g. tool calls), so the chip is omitted there.
-        if (typeof en.promptTokens === 'number' && en.promptTokens >= 0) {
-            head += '  ·  ' + en.promptTokens + '→' + (en.completionTokens >= 0 ? en.completionTokens : 0) + ' tok';
-        }
-        sum.textContent = head;
-        wrap.appendChild(sum);
-        var body = document.createElement('pre'); body.className = 'io-entry-body';
-        body.textContent = ioPrettyJson(en.message || '');
-        wrap.appendChild(body);
-        if (en.truncated) {
-            var more = document.createElement('button');
-            more.type = 'button'; more.className = 'io-more';
-            more.textContent = 'Load full (' + en.chars + ' chars)';
-            more.addEventListener('click', function (ev) {
-                ev.preventDefault();
-                fetch('api/sessions/' + ioCurrentSession + '/entry/' + en.id)
-                    .then(function (r) { return r.json(); })
-                    .then(function (d) { body.textContent = ioPrettyJson(d.message || ''); more.remove(); });
-            });
-            wrap.appendChild(more);
-        }
-        return wrap;
-    }
-
     function ioOnShow() {
         if (!ioSessionsLoaded) ioLoadSessions();
     }
 
     function initIo() {
-        var refresh = document.getElementById('io-refresh');
-        if (refresh) refresh.addEventListener('click', function () { ioSessionsLoaded = false; ioLoadSessions(); });
-        var delOld = document.getElementById('io-del-old');
-        if (delOld) delOld.addEventListener('click', function () {
-            var d = document.getElementById('io-del-days');
+        var refresh = document.getElementById("io-refresh");
+        if (refresh) refresh.addEventListener("click", function () { ioSessionsLoaded = false; ioLoadSessions(); });
+        var delOld = document.getElementById("io-del-old");
+        if (delOld) delOld.addEventListener("click", function () {
+            var d = document.getElementById("io-del-days");
             var days = d ? parseInt(d.value, 10) : 30;
-            if (isNaN(days) || days < 0) { ioSetStatus('enter a valid day count'); return; }
-            if (!confirm('Delete ALL sessions older than ' + days + ' day(s)? (the active conversation is kept)')) return;
-            ioSetStatus('deleting…');
-            fetch('api/sessions/old?days=' + days, { method: 'DELETE' })
+            if (isNaN(days) || days < 0) { ioSetStatus("enter a valid day count"); return; }
+            if (!confirm("Delete ALL sessions older than " + days + " day(s)? (the active conversation is kept)")) return;
+            ioSetStatus("deleting…");
+            fetch("api/sessions/old?days=" + days, { method: "DELETE" })
                 .then(function (r) { return r.json(); })
                 .then(function (j) {
-                    ioSetStatus('deleted ' + (j.deleted || 0) + ' session(s) older than ' + days + 'd');
+                    ioSetStatus("deleted " + (j.deleted || 0) + " session(s) older than " + days + "d");
                     ioSessionsLoaded = false; ioLoadSessions();
                 })
-                .catch(function (e) { ioSetStatus('error: ' + e); });
+                .catch(function (e) { ioSetStatus("error: " + e); });
         });
+        // The lazy load on showing this section is wired once, in showRightTab().
     }
 
-    // ── Right-pane config bar (live LLM settings via /api/config) ─────────────
-    function cfgStatus(t) {
-        var s = document.getElementById('cfg-status');
-        if (!s) return;
-        s.textContent = t;
-        setTimeout(function () { if (s.textContent === t) s.textContent = ''; }, 2000);
+
+    // ── Log Search tab (CrossConversationLogSearch_260913_oo01) ──────────────
+    // The Sessions tab answers about the conversation that is open. This one asks the whole I/O
+    // log database at once, so a conversation whose actor was removed (loader.removeChild leaves
+    // the log where it is) is found on the same terms as one still on the screen.
+    var lsearchOverviewLoaded = false;
+
+    function lsearchSetStatus(t) {
+        var el = document.getElementById("lsearch-status");
+        if (el) el.textContent = t;
     }
 
-    function cfgLoad() {
-        return fetch('api/config').then(function (r) { return r.json(); }).then(function (c) {
-            var t = document.getElementById('cfg-temp'); if (t) t.value = c.temperature;
-            var mt = document.getElementById('cfg-maxtokens'); if (mt) mt.value = c.maxTokens;
-            return fetch('api/models')
-                .then(function (r) { return r.ok ? r.json() : []; })
-                .then(function (models) {
-                    var sel = document.getElementById('cfg-model'); if (!sel) return;
-                    sel.textContent = '';
-                    var def = document.createElement('option');
-                    def.value = ''; def.textContent = '(vLLM default)'; sel.appendChild(def);
-                    (models || []).forEach(function (m) {
-                        var o = document.createElement('option'); o.value = m.name; o.textContent = m.name; sel.appendChild(o);
-                    });
-                    sel.value = c.modelId || '';
-                })
-                .catch(function () {});
-        }).catch(function () {});
-    }
-
-    function cfgPatch(field, value) {
-        var body = {}; body[field] = value;
-        fetch('api/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        }).then(function (r) {
-            cfgStatus(r.ok ? (field + ' = ' + value) : ('error ' + r.status));
-        }).catch(function (e) { cfgStatus('error: ' + e.message); });
-    }
-
-    // ── Workflow tab (read-only system workflow viewer; Phase 1) ──────────────
-    function wfStatus(msg) {
-        var s = document.getElementById('wf-status');
-        if (s) s.textContent = msg || '';
-    }
-
-    // Splits a workflow YAML into a preamble (everything before the first step) and the top-level
-    // step items (lines beginning with exactly "  - "). Display only — no reassembly in Phase 1.
-    function wfSplitSteps(yaml) {
-        var lines = (yaml || '').split('\n');
-        var preamble = [], steps = [], cur = null;
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            if (/^  - /.test(line)) {            // a top-level step list item under steps:
-                if (cur) steps.push(cur.join('\n'));
-                cur = [line];
-            } else if (cur) {
-                cur.push(line);
-            } else {
-                preamble.push(line);
-            }
-        }
-        if (cur) steps.push(cur.join('\n'));
-        return { preamble: preamble.join('\n').replace(/\s+$/, ''), steps: steps };
-    }
-
-    // Box heading: the step's transition direction (the states array) plus its 0-based step number,
-    // e.g. states ["0", "1"] -> '["0", "1"]   # step 0'. The label still appears in the YAML body.
-    function wfStepTitle(text, idx) {
-        // states: sits on the step's first line "  - states: [...]"; allow the leading "- ".
-        var m = text.match(/(^|\n)\s*-?\s*states:\s*(.+)/);
-        var states = m ? m[2].trim() : '';
-        return (states ? states + '   ' : '') + '# step ' + idx;
-    }
-
-    function wfRenderBox(parent, title, body, kind) {
-        var box = document.createElement('div');
-        box.className = 'wf-box' + (kind ? ' wf-' + kind : '');
-        var h = document.createElement('div');
-        h.className = 'wf-box-title';
-        h.textContent = title;
-        var pre = document.createElement('pre');
-        pre.className = 'wf-box-yaml';
-        pre.textContent = body;          // read-only; textContent => no HTML injection
-        box.appendChild(h);
-        box.appendChild(pre);
-        parent.appendChild(box);
-    }
-
-    // Renders the system steps read-only; after each insertion-point step (label ext-pre/ext-mid/
-    // ext-post) renders that point's editable user-extension box inline.
-    function wfRender(yaml) {
-        var list = document.getElementById('wf-list');
-        if (!list) return;
-        list.textContent = '';
-        var parts = wfSplitSteps(yaml);
-        if (parts.preamble) wfRenderBox(list, 'workflow header', parts.preamble, 'head');
-        parts.steps.forEach(function (s, i) {
-            wfRenderBox(list, wfStepTitle(s, i), s, 'step');
-        });
-        wfStatus(parts.steps.length + ' step(s) — read-only');
-    }
-
-    // Param descriptors of the selected workflow, or null when the workflow declares no params
-    // (then the raw JSON input box is used instead).
-    var wfCurrentParams = null;
-
-    // Renders an input form from a workflow's declared params. When there are no params, hides the
-    // form and shows the raw JSON box (backward compatible). See spec WorkflowInputParams_260701_oo01.
-    function wfRenderForm(params) {
-        var form = document.getElementById('wf-form');
-        var jsonBox = document.getElementById('wf-run-input');
-        if (!form) return;
-        form.textContent = '';
-        if (!params || !params.length) {
-            wfCurrentParams = null;
-            form.style.display = 'none';
-            if (jsonBox) jsonBox.style.display = '';
-            return;
-        }
-        wfCurrentParams = params;
-        if (jsonBox) jsonBox.style.display = 'none';
-        form.style.display = '';
-        params.forEach(function (p) {
-            var row = document.createElement('div');
-            row.className = 'wf-field';
-            var lab = document.createElement('label');
-            lab.textContent = (p.label || p.name) + (p.required ? ' *' : '');
-            var type = p.type || 'text';
-            var input;
-            if (type === 'textarea') { input = document.createElement('textarea'); input.rows = 3; }
-            else if (type === 'select') {
-                input = document.createElement('select');
-                (p.options || []).forEach(function (o) {
-                    var opt = document.createElement('option');
-                    opt.value = o; opt.textContent = o; input.appendChild(opt);
-                });
-            }
-            else if (type === 'bool') { input = document.createElement('input'); input.type = 'checkbox'; }
-            else if (type === 'int') { input = document.createElement('input'); input.type = 'number'; }
-            else { input = document.createElement('input'); input.type = 'text'; }
-            input.setAttribute('data-wf-name', p.name);
-            input.setAttribute('data-wf-type', type);
-            if (p.description) input.placeholder = p.description;
-            if (p['default'] !== undefined && p['default'] !== null && p['default'] !== '') {
-                if (type === 'bool') input.checked = (String(p['default']) === 'true');
-                else input.value = p['default'];
-            }
-            row.appendChild(lab);
-            row.appendChild(input);
-            form.appendChild(row);
-        });
-    }
-
-    // Builds the JSON body for /run from the form (or the raw JSON box). Returns null and sets a
-    // status message if a required field is empty.
-    function wfCollectInput() {
-        if (!wfCurrentParams) {
-            var box = document.getElementById('wf-run-input');
-            return box ? (box.value.trim() || '{}') : '{}';
-        }
-        var obj = {};
-        var els = document.querySelectorAll('#wf-form [data-wf-name]');
-        for (var i = 0; i < els.length; i++) {
-            var el = els[i];
-            var name = el.getAttribute('data-wf-name');
-            var type = el.getAttribute('data-wf-type');
-            var meta = null;
-            for (var k = 0; k < wfCurrentParams.length; k++) {
-                if (wfCurrentParams[k].name === name) { meta = wfCurrentParams[k]; break; }
-            }
-            if (type === 'bool') { obj[name] = el.checked; continue; }
-            var val = (el.value == null) ? '' : String(el.value).trim();
-            if (val === '') {
-                if (meta && meta.required) { wfStatus('必須項目です: ' + (meta.label || name)); return null; }
-                continue;   // omit empty optional fields
-            }
-            obj[name] = (type === 'int') ? parseInt(val, 10) : val;
-        }
-        return JSON.stringify(obj);
-    }
-
-    function wfLoad(name) {
-        if (!name) return;
-        wfStatus('loading…');
-        fetch('/api/workflows/' + encodeURIComponent(name))
+    function lsearchOverview() {
+        return fetch("api/iolog/search/overview")
             .then(function (r) { return r.json(); })
-            .then(function (d) {
-                if (!d || !d.yaml) { wfStatus('not found'); return; }
-                wfRenderForm(d.params);
-                wfRender(d.yaml);
+            .then(function (o) {
+                lsearchOverviewLoaded = true;
+                if (o.error) { lsearchSetStatus("error: " + o.error); return; }
+                lsearchSetStatus(o.conversations + " conversation(s) · " + o.entries + " entries"
+                        + (o.newest ? " · newest " + o.newest : ""));
             })
-            .catch(function (e) { wfStatus('error: ' + e.message); });
+            .catch(function (err) { lsearchSetStatus("error: " + err.message); });
     }
 
-    function wfPopulate(then) {
-        var sel = document.getElementById('wf-select');
-        if (!sel) return;
-        fetch('/api/workflows').then(function (r) { return r.json(); })
-            .then(function (arr) {
-                sel.textContent = '';
-                (arr || []).forEach(function (w) {
-                    var o = document.createElement('option');
-                    o.value = w.name;
-                    o.textContent = w.title || w.name;
-                    sel.appendChild(o);
-                });
-                if (then) then();
+    function lsearchRun() {
+        var input = document.getElementById("lsearch-q");
+        var list = document.getElementById("lsearch-hits");
+        if (!input || !list) return;
+        var q = input.value.trim();
+        list.textContent = "";
+        if (!q) { lsearchOverview(); return; }
+        lsearchSetStatus("searching…");
+        fetch("api/iolog/search?q=" + encodeURIComponent(q))
+            .then(function (r) { return r.json(); })
+            .then(function (res) {
+                if (res.error) { lsearchSetStatus("error: " + res.error); return; }
+                var hits = res.hits || [];
+                if (!hits.length) {
+                    var empty = document.createElement("div");
+                    empty.className = "io-empty";
+                    empty.textContent = "Nothing in any conversation contains " + q + ".";
+                    list.appendChild(empty);
+                    lsearchSetStatus("0 hits");
+                    return;
+                }
+                hits.forEach(function (h) { list.appendChild(lsearchHitEl(h, q)); });
+                lsearchSetStatus(hits.length + " hit(s)" + (res.limited ? " (more were found)" : ""));
             })
-            .catch(function (e) { wfStatus('error: ' + e.message); });
+            .catch(function (err) { lsearchSetStatus("error: " + err.message); });
     }
 
-    function wfOnShow() {
-        var sel = document.getElementById('wf-select');
-        if (sel && sel.options.length === 0) {
-            wfPopulate(function () { wfLoad(sel.value); });
-        } else if (sel) {
-            wfLoad(sel.value);
-        }
+    // One hit: where it was said, and the text around the match. Opened, it shows the whole turn
+    // that entry was part of — the same rows the Sessions tab shows, fetched from the same
+    // endpoint, so a hit is read in its conversation rather than as a fragment.
+    function lsearchHitEl(hit, query) {
+        var box = document.createElement("details"); box.className = "lshit";
+        var sum = document.createElement("summary"); sum.className = "lshit-head";
+        var where = document.createElement("div"); where.className = "lshit-where";
+        var conv = document.createElement("span"); conv.className = "lshit-conv";
+        conv.textContent = hit.conversation + (hit.turn >= 0 ? "  ·  turn " + hit.turn : "  ·  " + hit.label);
+        conv.title = hit.conversation + "  ·  " + hit.label + "  ·  " + hit.agent;
+        var when = document.createElement("span"); when.className = "lshit-when";
+        when.textContent = hit.when;
+        where.appendChild(conv); where.appendChild(when);
+        var snippet = document.createElement("div"); snippet.className = "lshit-snippet";
+        snippet.textContent = hit.snippet;
+        sum.appendChild(where); sum.appendChild(snippet);
+        box.appendChild(sum);
+        var body = document.createElement("div"); body.className = "lshit-body";
+        box.appendChild(body);
+        var loaded = false;
+        box.addEventListener("toggle", function () {
+            if (!box.open) { body.textContent = ""; loaded = false; return; }
+            // One hit open at a time, for the reason the Sessions tab opens one turn at a time:
+            // a turn of messages is already more than the pane holds.
+            box.parentNode.querySelectorAll("details.lshit[open]").forEach(function (other) {
+                if (other !== box) other.open = false;
+            });
+            if (loaded) return;
+            loaded = true;
+            body.textContent = "loading…";
+            if (hit.turn < 0) {
+                // Not part of a turn, so there is no turn to show: the entry itself is the answer.
+                body.textContent = "";
+                body.appendChild(ioMsgEl({ dir: hit.agent || "entry", cls: "meta",
+                                           summary: hit.label, id: hit.logId, part: "RAW" },
+                                         hit.sessionId, IO_PANE_SEARCH));
+                return;
+            }
+            fetch("api/sessions/" + hit.sessionId + "/trace/" + hit.turn)
+                .then(function (r) { return r.json(); })
+                .then(function (t) {
+                    body.textContent = "";
+                    ioTurnMessages(t).forEach(function (m) {
+                        var row = ioMsgEl(m, hit.sessionId, IO_PANE_SEARCH);
+                        // The entry the search matched, among the turn's others.
+                        if (m.id === hit.logId) row.classList.add("selected");
+                        body.appendChild(row);
+                    });
+                })
+                .catch(function (err) { body.textContent = "error: " + err.message; loaded = false; });
+        });
+        return box;
     }
 
-    function initWorkflow() {
-        var sel = document.getElementById('wf-select');
-        if (sel) sel.addEventListener('change', function () { wfLoad(sel.value); });
-        var btn = document.getElementById('wf-refresh');
-        if (btn) btn.addEventListener('click', function () { wfLoad(sel ? sel.value : ''); });
-        var run = document.getElementById('wf-run');
-        if (run) run.addEventListener('click', function () {
-            var name = sel ? sel.value : '';
-            if (!name) { wfStatus('select a workflow first'); return; }
-            var body = wfCollectInput();
-            if (body === null) return;   // a required field is empty
-            wfStatus('starting ' + name + '…');
-            fetch('/api/workflows/' + encodeURIComponent(name) + '/run', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: body || '{}'
-            }).then(function (r) { return r.json(); })
-              .then(function (j) {
-                  wfStatus(j.type === 'accepted'
-                      ? ('running ' + name + ' — watch the chat (left pane)')
-                      : ('error: ' + (j.error || 'failed')));
-              })
-              .catch(function (e) { wfStatus('error: ' + e.message); });
+    function lsearchOnShow() {
+        if (!lsearchOverviewLoaded) lsearchOverview();
+        var input = document.getElementById("lsearch-q");
+        if (input) input.focus();
+    }
+
+    // Opens the tab from somewhere else on the page — clicking outputMultiplexer in the actor tree,
+    // which is where the conversations of every tab, present or removed, end up.
+    function lsearchOpen() {
+        switchPerspective("chat");
+        showRightTab("logsearch");
+    }
+
+    function initLsearch() {
+        var go = document.getElementById("lsearch-go");
+        if (go) go.addEventListener("click", lsearchRun);
+        var input = document.getElementById("lsearch-q");
+        if (input) input.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") { e.preventDefault(); lsearchRun(); }
         });
     }
 
-    function initConfig() {
-        cfgLoad();
-        var t = document.getElementById('cfg-temp');
-        if (t) t.addEventListener('change', function () { cfgPatch('temperature', parseFloat(t.value)); });
-        var mt = document.getElementById('cfg-maxtokens');
-        if (mt) mt.addEventListener('change', function () { cfgPatch('maxTokens', parseInt(mt.value, 10)); });
-        var md = document.getElementById('cfg-model');
-        if (md) md.addEventListener('change', function () { cfgPatch('modelId', md.value); });
+    // ── Extensions panel (SkillAndAgentsFile_260830_oo01) ─────────────────────
+    // Two tabs, each backed by an endpoint that exists: Skills lists what
+    // GET /api/skills indexed, Project sets the working directory whose AGENTS.md
+    // (or CLAUDE.md) every conversation in that project receives.
+    function extSetContent(node) {
+        var content = document.getElementById("ext-content");
+        if (!content) return;
+        content.textContent = "";
+        content.appendChild(node);
     }
 
-    document.addEventListener('DOMContentLoaded', function () {
-        initSplitter();
+    function extMessage(text, cls) {
+        var d = document.createElement("div");
+        d.className = cls || "ext-loading";
+        d.textContent = text;
+        return d;
+    }
+
+    function extShowDialog(title, body) {
+        var overlay = document.getElementById("ext-dialog-overlay");
+        var t = document.getElementById("ext-dialog-title");
+        var b = document.getElementById("ext-dialog-body");
+        if (!overlay || !t || !b) return;
+        t.textContent = title;
+        b.textContent = body;
+        overlay.style.display = "flex";
+    }
+
+    function extRenderSkills() {
+        extSetContent(extMessage("Loading…"));
+        fetch("api/skills")
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+                var wrap = document.createElement("div");
+                var roots = document.createElement("div");
+                roots.className = "ext-roots";
+                roots.textContent = "roots: " + (j.roots || []).join(", ");
+                wrap.appendChild(roots);
+                if (!j.skills || j.skills.length === 0) {
+                    wrap.appendChild(extMessage("No skill was indexed.", "ext-loading"));
+                }
+                (j.skills || []).forEach(function (s) {
+                    var row = document.createElement("div");
+                    row.className = "ext-item";
+                    var name = document.createElement("div");
+                    name.className = "ext-item-name";
+                    name.textContent = s.name;
+                    var desc = document.createElement("div");
+                    desc.className = "ext-item-desc";
+                    desc.textContent = s.description;
+                    var dir = document.createElement("div");
+                    dir.className = "ext-item-dir";
+                    dir.textContent = s.directory;
+                    row.appendChild(name);
+                    row.appendChild(desc);
+                    row.appendChild(dir);
+                    row.addEventListener("click", function () {
+                        fetch("api/skills/" + encodeURIComponent(s.name))
+                            .then(function (r) { return r.text(); })
+                            .then(function (text) { extShowDialog(s.name, text); })
+                            .catch(function (e) { extShowDialog(s.name, "error: " + e); });
+                    });
+                    wrap.appendChild(row);
+                });
+                (j.problems || []).forEach(function (p) {
+                    wrap.appendChild(extMessage(p, "ext-problem"));
+                });
+                var rescan = document.createElement("button");
+                rescan.className = "ext-action";
+                rescan.textContent = "Rescan";
+                rescan.addEventListener("click", function () {
+                    fetch("api/skills/rescan", { method: "POST" }).then(extRenderSkills);
+                });
+                wrap.appendChild(rescan);
+                extSetContent(wrap);
+            })
+            .catch(function (e) { extSetContent(extMessage("error: " + e, "ext-problem")); });
+    }
+
+    function extRenderProject() {
+        var c = (typeof window.chatUiGetActiveChat === "function") ? window.chatUiGetActiveChat() : null;
+        if (!c) { extSetContent(extMessage("No conversation is active.")); return; }
+        var wrap = document.createElement("div");
+        var label = document.createElement("div");
+        label.className = "ext-roots";
+        label.textContent = "Working directory of " + c.projectId
+            + " — its AGENTS.md (or CLAUDE.md) is given to every conversation here.";
+        var input = document.createElement("input");
+        input.type = "text";
+        input.className = "ext-input";
+        input.placeholder = "/home/devteam/works/<repository>";
+        var apply = document.createElement("button");
+        apply.className = "ext-action";
+        apply.textContent = "Apply";
+        var result = document.createElement("div");
+        result.className = "ext-roots";
+        apply.addEventListener("click", function () {
+            result.textContent = "applying…";
+            fetch("api/projects/" + encodeURIComponent(c.projectId) + "/working-dir", {
+                method: "POST",
+                headers: { "Content-Type": "text/plain" },
+                body: input.value
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (j) { result.textContent = j.message || JSON.stringify(j); })
+                .catch(function (e) { result.textContent = "error: " + e; });
+        });
+        wrap.appendChild(label);
+        wrap.appendChild(input);
+        wrap.appendChild(apply);
+        wrap.appendChild(result);
+        extSetContent(wrap);
+    }
+
+    function extRender(tab) {
+        if (tab === "project") extRenderProject();
+        else extRenderSkills();
+    }
+
+    function initExtensions() {
+        var btn = document.getElementById("extensions-btn");
+        var panel = document.getElementById("extensions-panel");
+        var tabs = document.querySelector("#extensions-panel .ext-tabs");
+        if (!btn || !panel) return;
+        btn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var showing = panel.style.display === "none" || panel.style.display === "";
+            panel.style.display = showing ? "block" : "none";
+            if (showing) {
+                var active = panel.querySelector(".ext-tab.active");
+                extRender(active ? active.getAttribute("data-tab") : "skills");
+            }
+        });
+        // A click anywhere else closes the panel — except inside the skill dialog, which is a
+        // sibling of the panel in the DOM, so dismissing the dialog would otherwise take the panel
+        // with it and leave the reader back at the chat with no list to return to.
+        document.addEventListener("click", function (e) {
+            if (panel.style.display !== "block") return;
+            if (panel.contains(e.target) || e.target === btn) return;
+            if (e.target.closest && e.target.closest("#ext-dialog-overlay")) return;
+            panel.style.display = "none";
+        });
+        if (tabs) tabs.addEventListener("click", function (e) {
+            var t = e.target.closest(".ext-tab");
+            if (!t) return;
+            tabs.querySelectorAll(".ext-tab").forEach(function (b) { b.classList.toggle("active", b === t); });
+            extRender(t.getAttribute("data-tab"));
+        });
+        var close = document.getElementById("ext-dialog-close");
+        var overlay = document.getElementById("ext-dialog-overlay");
+        if (close && overlay) {
+            close.addEventListener("click", function () { overlay.style.display = "none"; });
+            overlay.addEventListener("click", function (e) {
+                if (e.target === overlay) overlay.style.display = "none";
+            });
+        }
+    }
+
+    document.addEventListener("DOMContentLoaded", function () {
         initTabs();
-        initLogs();
+        initActions();
         initActors();
+        initDock();
+        initLeftDockResize();
+        initSplitter();
+        initProjectWorkflowsResize();
         initIo();
-        initConfig();
+        initLogs();
         initWorkflow();
-        ioOnShow();   // Sessions is the default active tab; load it on startup.
+        initLsearch();
+        initExtensions();
+        initProjectWorkflows();
+        initProjectWorkflowEditor();
+        initJobs();
+        initProjectProp();
+        initMethodSearch();
+        initTimekeeperPane();
+        restorePerspective(); // before the tree renders, so its highlight matches
+        refreshActors();   // the actor dock is visible by default
+        ioOnShow();         // Sessions is the default-active right-pane tab
     });
 })();

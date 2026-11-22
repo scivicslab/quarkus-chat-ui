@@ -1,0 +1,164 @@
+package com.scivicslab.chatui.audittrail;
+
+import com.scivicslab.chatui.core.iolog.IoLogStore;
+import com.scivicslab.chatui.core.iolog.IoLogView;
+import com.scivicslab.turingworkflow.plugins.logdb.DistributedLogStore;
+import com.scivicslab.turingworkflow.plugins.logdb.SessionSummary;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.DefaultValue;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Serves the Sessions tab (the complete LLM I/O log — request/response, including the full
+ * system prompt, per LLM/tool call within the agent loop). Thin wrapper over {@link IoLogView},
+ * which already does the shaping (ported unchanged from {@code quarkus-chat-ui3}).
+ */
+@Path("/api/sessions")
+public class SessionsResource {
+
+    @Inject
+    IoLogStore ioLog;
+
+    @Inject
+    IoLogView ioLogView;
+
+    /**
+     * Lists sessions (most recent first), optionally restricted to one ConversationSquad.
+     *
+     * @param conversationSquadId when given, only sessions belonging to this ConversationSquad are returned (matched via the
+     *              {@code workflowName} each session was tagged with in {@link IoLogStore#ensureSession})
+     * @return session summaries, shaped as {@code {sessionId, workflowName, startedAt, endedAt, status, totalLogEntries}}
+     */
+    @GET
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<Map<String, Object>> sessions(@QueryParam("conversationSquadId") String conversationSquadId) {
+        DistributedLogStore store = ioLog.store();
+        if (store == null) return List.of();
+        List<SessionSummary> all = store.listSessions(200);
+        if (conversationSquadId != null) {
+            String want = "chat-ui-conversation-" + conversationSquadId;
+            all = all.stream().filter(s -> want.equals(s.getWorkflowName())).toList();
+        }
+        return all.stream().map(SessionsResource::toMap).toList();
+    }
+
+    /**
+     * A window of a session's turns, newest first — what the Sessions tab lists.
+     *
+     * <p>A window rather than all of them: the archive holds a session of 1,417 turns, and
+     * answering with every step of every turn came to 3.3 MB for a list of questions.</p>
+     *
+     * @param id     the session id
+     * @param before return only turns numbered below this; {@code 0} starts at the newest
+     * @param limit  how many to return, capped at 200
+     * @return {@code {turns: [{turn, question}], lastTurn}}
+     */
+    /**
+     * The conversation's settings history: each time its provider, tool set or model was set,
+     * with the values ({@code ConversationSettingsRecord_260913_oo01}). Oldest first.
+     *
+     * @param id the session id
+     * @return {@code [{time, provider, tools, model}]}
+     */
+    @GET
+    @Path("/{id}/settings")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IoLogView.SettingsRecord> settings(@PathParam("id") long id) {
+        return ioLogView.settingsHistory(id);
+    }
+
+    @GET
+    @Path("/{id}/turns")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Map<String, Object> turns(@PathParam("id") long id,
+                                     @QueryParam("before") @DefaultValue("0") int before,
+                                     @QueryParam("limit") @DefaultValue("20") int limit) {
+        return Map.of("turns", ioLogView.turnHeads(id, before, Math.min(Math.max(limit, 1), 200)),
+                      "lastTurn", ioLogView.lastTurnNumber(id));
+    }
+
+    /**
+     * One turn's steps.
+     *
+     * @param id   the session
+     * @param turn the turn number, as {@link #turns} listed it
+     * @return that turn, or 404 when the session holds no such turn
+     */
+    @GET
+    @Path("/{id}/trace/{turn}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response traceTurn(@PathParam("id") long id, @PathParam("turn") int turn) {
+        IoLogView.TraceTurn one = ioLogView.traceTurn(id, turn);
+        return one == null ? Response.status(404).entity(Map.of("error", "no such turn")).build()
+                           : Response.ok(one).build();
+    }
+
+    /**
+     * Deletes one session and all of its logs. Refuses to delete the active conversation session.
+     *
+     * @param id the session id
+     * @return {@code {"deleted": 1 or 0}}, or 500 on error
+     */
+    @DELETE
+    @Path("/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteSession(@PathParam("id") long id) {
+        int n = ioLog.deleteSession(id);
+        if (n < 0) return Response.status(500).entity(Map.of("error", "delete failed")).build();
+        return Response.ok(Map.of("deleted", n)).build();
+    }
+
+    /**
+     * Bulk-deletes sessions started more than {@code days} days ago (active session excluded).
+     *
+     * @param days age threshold in days
+     * @return {@code {"deleted": N, "olderThanDays": days}}, or 500 on error
+     */
+    @DELETE
+    @Path("/old")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteOldSessions(@QueryParam("days") @DefaultValue("30") int days) {
+        int n = ioLog.deleteSessionsOlderThan(days);
+        if (n < 0) return Response.status(500).entity(Map.of("error", "delete failed")).build();
+        return Response.ok(Map.of("deleted", n, "olderThanDays", days)).build();
+    }
+
+    /**
+     * Returns one log entry's full, untruncated text — lazily fetched when a trace message is
+     * expanded in the browser (the trace itself only carries digests/previews).
+     *
+     * @param id    the session id
+     * @param logId the log entry id
+     * @return {@code {"message": "..."}}
+     */
+    @GET
+    @Path("/{id}/entry/{logId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Map<String, String> entry(@PathParam("id") long id, @PathParam("logId") long logId) {
+        Map<String, String> out = new LinkedHashMap<>();
+        out.put("message", ioLogView.fullMessage(id, logId));
+        return out;
+    }
+
+    private static Map<String, Object> toMap(SessionSummary s) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("sessionId", s.getSessionId());
+        m.put("workflowName", s.getWorkflowName());
+        m.put("startedAt", String.valueOf(s.getStartedAt()));
+        m.put("endedAt", s.getEndedAt() == null ? null : String.valueOf(s.getEndedAt()));
+        m.put("status", String.valueOf(s.getStatus()));
+        m.put("totalLogEntries", s.getTotalLogEntries());
+        return m;
+    }
+}

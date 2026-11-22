@@ -1,0 +1,760 @@
+package com.scivicslab.chatui.core.actor;
+
+import com.scivicslab.chatui.logging.ForwardingAccumulator;
+import com.scivicslab.chatui.logging.RecentEntriesAccumulator;
+import com.scivicslab.pojoactor.core.ActorRef;
+import com.scivicslab.pojoactor.core.scheduler.Scheduler;
+import com.scivicslab.turingworkflow.plugins.logoutput.MultiplexerAccumulator;
+import com.scivicslab.turingworkflow.plugins.logoutput.MultiplexerAccumulatorActor;
+import com.scivicslab.turingworkflow.workflow.IIActorRef;
+import com.scivicslab.turingworkflow.workflow.IIActorSystem;
+
+import org.json.JSONObject;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * Top-level grouping actor for one project — a {@code createChild} parent that additionally carries the project's
+ * working directory and the instructions found there.
+ *
+ * <p>Everything one project's execution needs lives as a descendant of one {@code Project} instance: its
+ * ConversationSquads ({@code chat-...}), its organization ({@code <project>/organization}) and its role table
+ * ({@code <project>/roles}, {@code EachActorRecordsItsOwnState_261118_oo01}). {@code outputMultiplexer} and
+ * {@code callWatchdog} deliberately stay outside this tree — see {@code ProjectScopedActorTree_260829_oo01}.</p>
+ *
+ * <p>The working directory is what gives a conversation a position in the file tree, which
+ * {@code AGENTS.md} needs and this system otherwise lacks: an agent editing a file resolves
+ * "the nearest {@code AGENTS.md}" from the file it is editing, and a conversation has no such
+ * file. The project's directory stands in for it, so every conversation in one project receives
+ * that directory's instructions ({@code SkillAndAgentsFile_260830_oo01}).</p>
+ *
+ * <p>The project also runs its workflows as batch jobs ({@code ProjectPerspective_260911_oo01}).
+ * One job is one workflow run as one {@link PlanRunner} that is this project's child, named
+ * {@code <projectId>/job-NN}; the jobs that exist are the project's job list. They are the
+ * project's rather than a conversation's because a plan drives conversations — {@code addWorker}
+ * hands slots to {@code chat-02}, {@code chat-03} — and a thing that spans conversations belongs
+ * to what contains them. Jobs are the only way a workflow of this kind is run.</p>
+ *
+ * <p>A plain object held by one actor: the job table is an ordinary map, changed only through
+ * that actor's mailbox. A job's end arrives as a message ({@link #jobFinished}), and a
+ * {@link Scheduler} tick against the actor itself ({@link #tick}) notices a runner that died
+ * without saying so, the way {@code ActivityWatcher} renews its answer.</p>
+ */
+public class Project {
+
+    /** The standard file name, per the AGENTS.md open format. */
+    public static final String AGENTS_FILE = "AGENTS.md";
+    /** Read only when there is no {@code AGENTS.md}; every repository here still carries this one. */
+    public static final String CLAUDE_FILE = "CLAUDE.md";
+
+    private Path workingDir;
+    private Path instructionsFile;
+    private String instructions;
+    private String name;
+    /** The project's own session, where its name and working directory are recorded; {@code null} records nothing. */
+    private com.scivicslab.chatui.core.iolog.SessionEntries entries;
+
+    /** Label of the project's entry that lists its conversations ({@code EachActorRecordsItsOwnState_261118_oo01}). */
+    public static final String CONVERSATIONS_LABEL = "conversations";
+
+    /**
+     * One conversation of the project, as its list holds it.
+     *
+     * @param chatId       its bare id, e.g. {@code "03"}
+     * @param parentChatId the bare id of the conversation it is nested under, or {@code null} when it is directly under
+     *                     the project ({@code NestedConversationTree_260830_oo01})
+     */
+    public record Member(String chatId, String parentChatId) {}
+
+    /** The project's conversations, in the order they were made, so a parent comes before those nested under it. */
+    private final java.util.List<Member> members = new java.util.ArrayList<>();
+
+    /** Adds a conversation just made to the project's list, and records the list. One already listed is left as it is. */
+    public void conversationAdded(String chatId, String parentChatId) {
+        for (Member m : members) if (m.chatId().equals(chatId)) return;
+        members.add(new Member(chatId, parentChatId == null || parentChatId.isBlank() ? null : parentChatId));
+        recordConversations();
+    }
+
+    /**
+     * Takes a conversation out of the project's list, records the list, and ends the conversation's session in the
+     * I/O log, which keeps everything it wrote and keeps its name taken ({@code ConversationDeletion_261011_oo01}).
+     */
+    public void conversationRemoved(String chatId) {
+        if (members.removeIf(m -> m.chatId().equals(chatId))) recordConversations();
+        endSession(chatId);
+    }
+
+    /** Ends the session of every conversation of the project and records an empty list: the project is being deleted. */
+    public void endEveryConversation() {
+        for (Member m : members) endSession(m.chatId());
+        members.clear();
+        recordConversations();
+    }
+
+    private void endSession(String chatId) {
+        if (ioLogStore != null && projectId != null) ioLogStore.resetSession(projectId + "/chat-" + chatId);
+    }
+
+    /** @return the project's conversations, in the order they were made */
+    public java.util.List<Member> conversations() {
+        return java.util.List.copyOf(members);
+    }
+
+    /** Set while a restore is between {@link #conversationsToBuild} and {@link #conversationsBuilt}: the list came from the running sessions. */
+    private boolean listFromRunningSessions;
+
+    /**
+     * Says which conversations to build again at start-up, in the order the project's list holds them, so a parent
+     * comes before those nested under it ({@code EachActorRecordsItsOwnState_261118_oo01}). The project decides which
+     * and where; the caller builds them, as the project's children, on its own thread, because building one asks this
+     * project for its working directory and instructions, which it could not answer while it was busy building.
+     *
+     * <p>A log written before the list was kept has no {@code conversations} entry. Then the conversations whose
+     * sessions are still running are built, directly under the project, as the earlier code did, and
+     * {@link #conversationsBuilt} records them as this project's own list, so the running sessions are read only
+     * once.</p>
+     *
+     * @param running the bare ids of this project's conversations with a running session, oldest first
+     * @return what to build, in order
+     */
+    public java.util.List<Member> conversationsToBuild(java.util.List<String> running) {
+        java.util.List<Member> listed = readConversations();
+        listFromRunningSessions = listed == null;
+        if (listed == null) listed = running.stream().map(id -> new Member(id, null)).toList();
+        members.clear();
+        members.addAll(listed);
+        return java.util.List.copyOf(listed);
+    }
+
+    /**
+     * Ends a restore: the conversations that could not be built are left out of the list, and that is recorded, as
+     * is a list that came from the running sessions.
+     *
+     * @param built the bare ids of the conversations that were built
+     */
+    public void conversationsBuilt(java.util.Collection<String> built) {
+        boolean dropped = members.removeIf(m -> !built.contains(m.chatId()));
+        if (listFromRunningSessions || dropped) recordConversations();
+        listFromRunningSessions = false;
+    }
+
+    private java.util.List<Member> readConversations() {
+        if (entries == null) return null;
+        org.json.JSONObject saved = entries.latestWithKey(CONVERSATIONS_LABEL, CONVERSATIONS_LABEL);
+        if (saved == null) return null;
+        java.util.List<Member> out = new java.util.ArrayList<>();
+        org.json.JSONArray list = saved.optJSONArray(CONVERSATIONS_LABEL);
+        for (int i = 0; list != null && i < list.length(); i++) {
+            org.json.JSONObject o = list.optJSONObject(i);
+            String id = o == null ? null : o.optString("id", null);
+            if (id == null || id.isBlank()) continue;
+            String parent = o.isNull("parent") ? null : o.optString("parent", null);
+            out.add(new Member(id, parent == null || parent.isBlank() ? null : parent));
+        }
+        return out;
+    }
+
+    /** Writes the whole list as one entry: the last one is the list. */
+    private void recordConversations() {
+        if (entries == null) return;
+        org.json.JSONArray list = new org.json.JSONArray();
+        for (Member m : members) {
+            org.json.JSONObject o = new org.json.JSONObject().put("id", m.chatId());
+            if (m.parentChatId() != null) o.put("parent", m.parentChatId());
+            list.put(o);
+        }
+        entries.write(CONVERSATIONS_LABEL, new org.json.JSONObject().put(CONVERSATIONS_LABEL, list).toString());
+    }
+
+    /**
+     * Records this project's name and working directory, from now on, to {@code entries}, the project's own session
+     * ({@code EachActorRecordsItsOwnState_261118_oo01}).
+     */
+    public void recordsTo(com.scivicslab.chatui.core.iolog.SessionEntries entries) {
+        this.entries = entries;
+    }
+
+    /**
+     * Puts back the name and the working directory the last {@code settings} entry holds, reading the directory's
+     * instructions again, and writes nothing. An entry the earlier code wrote has the same label and keys, and the
+     * organization and role edges it also carried are read by their own actors. Nothing recorded leaves the project
+     * as it is.
+     */
+    public void restore() {
+        if (entries == null) return;
+        String json = entries.latest(com.scivicslab.chatui.core.iolog.IoLogView.SETTINGS_LABEL);
+        if (json == null || json.isBlank()) return;
+        org.json.JSONObject o;
+        try {
+            o = new org.json.JSONObject(json);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "The settings entry of " + projectId + " is not JSON; left as it is", e);
+            return;
+        }
+        name = cleaned(o.isNull("name") ? null : o.optString("name", null));
+        String dir = o.isNull("workingDir") ? null : o.optString("workingDir", null);
+        if (dir != null && !dir.isBlank()) {
+            String outcome = readWorkingDir(Path.of(dir));
+            if (outcome.startsWith("error:")) LOG.warning("Restoring the working directory of " + projectId + ": " + outcome);
+        }
+    }
+
+    /**
+     * Sets the name a person reads, or clears it when {@code newName} is null or blank, and records it when it changed.
+     *
+     * <p>Separate from the actor's own name ({@code project1}), which stays as it is: the REST
+     * paths and every conversation's name are built from it, while this one is meant to change
+     * whenever the work does ({@code ProjectProperty_260929_oo01}).</p>
+     */
+    public void setName(String newName) {
+        String before = name;
+        name = cleaned(newName);
+        if (!java.util.Objects.equals(before, name)) record();
+    }
+
+    private static String cleaned(String newName) {
+        return newName == null || newName.isBlank() ? null : newName.strip();
+    }
+
+    /**
+     * Writes the name and the working directory as one {@code settings} entry: both in one, because the last entry is
+     * the current value, so an entry with only one of them would read back as the other cleared
+     * ({@code ProjectProperty_260929_oo01}).
+     */
+    private void record() {
+        if (entries == null) return;
+        org.json.JSONObject o = new org.json.JSONObject();
+        o.put("name", name == null ? org.json.JSONObject.NULL : name);
+        o.put("workingDir", workingDir == null ? org.json.JSONObject.NULL : workingDir.toString());
+        entries.write(com.scivicslab.chatui.core.iolog.IoLogView.SETTINGS_LABEL, o.toString());
+    }
+
+    /** @return the name a person reads, or {@code null} when none has been set */
+    public String getName() {
+        return name;
+    }
+
+    /**
+     * Points this project at a directory and reads that directory's instructions, preferring
+     * {@code AGENTS.md} and falling back to {@code CLAUDE.md}. A project with no working directory,
+     * or a directory with neither file, simply has no instructions — that is the normal state, not
+     * an error.
+     *
+     * <p>Recorded when the directory changed; reading the same directory again records nothing.</p>
+     *
+     * @param dir the project's working directory, or {@code null} to clear it
+     * @return a one-line account of what was loaded, or an {@code error: ...} string
+     */
+    public String setWorkingDir(Path dir) {
+        Path before = workingDir;
+        String outcome = readWorkingDir(dir);
+        if (!java.util.Objects.equals(before, workingDir)) record();
+        return outcome;
+    }
+
+    private String readWorkingDir(Path dir) {
+        workingDir = dir;
+        instructionsFile = null;
+        instructions = null;
+        if (dir == null) return "ok: working directory cleared";
+        if (!Files.isDirectory(dir)) return "error: not a directory: " + dir;
+        Path candidate = dir.resolve(AGENTS_FILE);
+        if (!Files.isRegularFile(candidate)) {
+            candidate = dir.resolve(CLAUDE_FILE);
+            if (!Files.isRegularFile(candidate)) {
+                return "ok: working directory set to " + dir + " (no " + AGENTS_FILE
+                        + " and no " + CLAUDE_FILE + " there)";
+            }
+        }
+        try {
+            instructions = Files.readString(candidate).strip();
+            instructionsFile = candidate;
+        } catch (IOException e) {
+            return "error: cannot read " + candidate + ": " + e.getMessage();
+        }
+        return "ok: working directory set to " + dir + ", instructions read from "
+                + candidate.getFileName() + " (" + instructions.length() + " characters)";
+    }
+
+    /** Re-reads the instructions from the current working directory. @return the same account as
+     *  {@link #setWorkingDir(Path)} */
+    public String reloadInstructions() {
+        return setWorkingDir(workingDir);
+    }
+
+    /** @return this project's working directory, or {@code null} if it has none */
+    public Path getWorkingDir() {
+        return workingDir;
+    }
+
+    /** @return the file the instructions were read from, or {@code null} if there are none */
+    public Path getInstructionsFile() {
+        return instructionsFile;
+    }
+
+    /** @return this project's instructions, or {@code null} if it has none */
+    public String getInstructions() {
+        return instructions;
+    }
+
+    // ── Batch jobs (ProjectPerspective_260911_oo01) ──────────────────────────────────────────
+
+    private static final Logger LOG = Logger.getLogger(Project.class.getName());
+
+    /** A job's state: submitted, waiting in the project's job queue for the running job to end. */
+    public static final String QUEUED = "QUEUED";
+    /** A job's state. */
+    public static final String RUNNING = "RUNNING";
+    /** A job's state: the workflow reached its end. */
+    public static final String FINISHED = "FINISHED";
+    /** A job's state: the workflow did not reach its end, or its runner died. */
+    public static final String FAILED = "FAILED";
+    /** A job's state: stopped by request, while running or while still waiting. */
+    public static final String STOPPED = "STOPPED";
+
+    /** How often {@link #tick} looks at the running jobs. Cheap: a lookup per job, no I/O. */
+    private static final Duration TICK = Duration.ofSeconds(5);
+    /** How many of a job's log lines are kept. */
+    private static final int JOB_LOG_CAPACITY = 500;
+
+    /**
+     * One job as it stands.
+     *
+     * @param jobId      {@code job-NN}, unique within this project
+     * @param actorName  the runner's actor name, {@code <projectId>/job-NN}
+     * @param workflow   the workflow's name, as the catalog lists it
+     * @param state      one of {@link #QUEUED}, {@link #RUNNING}, {@link #FINISHED}, {@link #FAILED},
+     *                   {@link #STOPPED}
+     * @param queuedAt   when it was submitted
+     * @param startedAt  when it began to run, or {@code null} while it waits (and for a job stopped
+     *                   before it began)
+     * @param finishedAt when it ended, or {@code null} while waiting or running
+     * @param result     what the run reported, or {@code null} while waiting or running
+     * @param position   its place in the line while {@link #QUEUED}, 1 for the next to run; 0 otherwise
+     */
+    public record JobView(String jobId, String actorName, String workflow, String state,
+                          Instant queuedAt, Instant startedAt, Instant finishedAt, String result,
+                          int position) {
+        JobView started() {
+            return new JobView(jobId, actorName, workflow, RUNNING, queuedAt, Instant.now(), null, null, 0);
+        }
+
+        JobView ended(String state, String result) {
+            return new JobView(jobId, actorName, workflow, state, queuedAt, startedAt, Instant.now(), result, 0);
+        }
+
+        JobView at(int position) {
+            return new JobView(jobId, actorName, workflow, state, queuedAt, startedAt, finishedAt, result, position);
+        }
+    }
+
+    private String projectId;
+    private IIActorSystem system;
+    private ActorRef<Project> self;
+    private String systemLogActorName;
+    /**
+     * The label on an ordinary line of a job's record: one transition, as it was left.
+     *
+     * <p>A label is what a later search filters on, which is how a run is read once it is over
+     * ({@code JobRunsInTheLog_260915_oo01}).</p>
+     */
+    public static final String JOB_STEP_LABEL = "job/step";
+
+    /**
+     * The label on a line saying the two roles did not agree about a criterion.
+     *
+     * <p>These are the ones a person has to look at: nothing was changed there, and the run says
+     * so rather than leaving it to be noticed ({@code WhenTheTwoRolesDoNotAgree_260915_oo01}).</p>
+     */
+    public static final String NO_AGREEMENT_LABEL = "job/no-agreement";
+
+    /** Where a job's lines are kept so that they outlive this process; null when there is no log. */
+    private com.scivicslab.chatui.core.iolog.IoLogStore ioLogStore;
+    private Scheduler scheduler;
+    private final Map<String, JobView> jobs = new LinkedHashMap<>();
+    private final Map<String, RecentEntriesAccumulator> jobLogs = new HashMap<>();
+    private int jobCounter;
+    /** The name of this project's {@link JobQueue} child, {@code <projectId>/job-queue}. */
+    private String jobQueueName;
+
+    /** What the job queue child is called, after the project's id. */
+    public static final String JOB_QUEUE_SUFFIX = "/job-queue";
+
+    /**
+     * Binds what starting a job needs. Must run before {@link #submitJob} and {@link #startWatching}.
+     *
+     * @param projectId          this project's id, the prefix of its jobs' names
+     * @param system             the actor system the runners are registered in
+     * @param self               this actor's own reference, the runners' parent
+     * @param systemLogActorName the system-wide log actor a job's log forwards to
+     */
+    public void bind(String projectId, IIActorSystem system, ActorRef<Project> self, String systemLogActorName) {
+        bind(projectId, system, self, systemLogActorName, null);
+    }
+
+    /**
+     * The same, with the log a job's lines are written to
+     * ({@code JobRunsInTheLog_260915_oo01}). A project bound without one runs jobs whose lines
+     * live only in the Job Log tab's ring buffer, as they did before.
+     *
+     * @param ioLogStore where a job opens a session of its own
+     */
+    public void bind(String projectId, IIActorSystem system, ActorRef<Project> self, String systemLogActorName,
+                     com.scivicslab.chatui.core.iolog.IoLogStore ioLogStore) {
+        this.ioLogStore = ioLogStore;
+        this.projectId = projectId;
+        this.system = system;
+        this.self = self;
+        this.systemLogActorName = systemLogActorName;
+        // The order of the jobs is kept by a child of its own (ProjectJobQueue_261014_oo01); this
+        // actor asks it which job runs next and starts that one.
+        this.jobQueueName = projectId + JOB_QUEUE_SUFFIX;
+        if (self != null && system.getActor(jobQueueName) == null) {
+            self.createChild(jobQueueName, new JobQueue());
+        }
+    }
+
+    private ActorRef<JobQueue> jobQueue() {
+        return system.getActor(jobQueueName);
+    }
+
+    /** Starts the periodic look at running jobs, scheduled against this actor's own mailbox. */
+    public void startWatching() {
+        scheduler = new Scheduler(1);
+        scheduler.scheduleWithFixedDelay("jobs", self, Project::tick,
+                TICK.toSeconds(), TICK.toSeconds(), TimeUnit.SECONDS);
+    }
+
+    /** Stops the schedule. Called when the actor system is torn down. */
+    public void stopWatching() {
+        if (scheduler != null) scheduler.close();
+    }
+
+    /**
+     * Submits a workflow as a new job of this project, with no values for its <code>${key}</code>.
+     *
+     * @see #submitJob(String, String, Map)
+     */
+    public JobView submitJob(String workflow, String yaml) {
+        return submitJob(workflow, yaml, Map.of());
+    }
+
+    /**
+     * Submits one workflow as a job, with the values its <code>${key}</code> stand for
+     * ({@code ProjectJobQueue_261014_oo01}).
+     *
+     * <p>The job gets its id now, in the order of submission, and is recorded as {@link #QUEUED}.
+     * The project's {@link JobQueue} child is asked to take it; when no job of this project is
+     * running, the queue hands it straight back and it starts ({@link #launch}). Otherwise it waits
+     * until the running job ends ({@link #jobFinished}).</p>
+     *
+     * @param workflow   the name the catalog lists it under
+     * @param yaml       its text
+     * @param parameters the values, keyed by the name the workflow refers to; may be empty
+     * @return the job: {@link #RUNNING} when it started at once, {@link #QUEUED} when it waits
+     * @throws IllegalStateException when {@link #bind} has not run
+     */
+    public JobView submitJob(String workflow, String yaml, Map<String, String> parameters) {
+        if (self == null || system == null) {
+            throw new IllegalStateException("project " + projectId + " is not bound to an actor system");
+        }
+        String jobId = String.format("job-%02d", ++jobCounter);
+        String name = projectId + "/" + jobId;
+        jobs.put(jobId, new JobView(jobId, name, workflow, QUEUED, Instant.now(), null, null, null, 0));
+        jobLogs.put(jobId, new RecentEntriesAccumulator(JOB_LOG_CAPACITY));
+        Map<String, String> values = parameters == null ? Map.of() : new LinkedHashMap<>(parameters);
+        JobQueue.Entry entry = new JobQueue.Entry(jobId, workflow, yaml, values);
+        jobQueue().ask(q -> q.offer(entry)).join().ifPresent(this::launch);
+        if (QUEUED.equals(jobs.get(jobId).state())) {
+            log(name, "INFO", "queued workflow " + workflow + describe(values));
+        }
+        return job(jobId);
+    }
+
+    /**
+     * Starts a job the queue has handed out.
+     *
+     * <p>Creates the runner as this project's child, {@code <projectId>/job-NN}, gives it a log
+     * actor of its own wired like a conversation's ({@code <job>.log}, forwarding to the
+     * system-wide log), puts the run's values where <code>${key}</code> is read from — the
+     * runner's own JSON state, the same thing {@code RunCLI} does with {@code -P}
+     * ({@code JobParameterForm_260913_oo01}) — and launches the run ({@link #run}). The run's end
+     * comes back as a message to this actor ({@link #jobFinished}).</p>
+     *
+     * <p>A job that cannot even be started is recorded as {@link #FAILED}, and the next one is
+     * asked for, so a broken job does not hold up the line.</p>
+     */
+    private void launch(JobQueue.Entry entry) {
+        String jobId = entry.jobId();
+        JobView queued = jobs.get(jobId);
+        String name = queued.actorName();
+        try {
+            PlanRunner runner = new PlanRunner(name, system);
+            PlanRunnerIIAR runnerRef = new PlanRunnerIIAR(name, runner, system);
+            runnerRef.setParentName(projectId);
+            self.getNamesOfChildren().add(name);
+            system.addIIActor(runnerRef);
+
+            RecentEntriesAccumulator buffer = jobLogs.get(jobId);
+            MultiplexerAccumulator mux = new MultiplexerAccumulator();
+            mux.addTarget(buffer);
+            if (systemLogActorName != null) {
+                mux.addTarget(new ForwardingAccumulator(system, systemLogActorName, name));
+            }
+            MultiplexerAccumulatorActor logActor = new MultiplexerAccumulatorActor(name + ".log", mux, system);
+            logActor.setParentName(name);
+            runnerRef.getNamesOfChildren().add(logActor.getName());
+            system.addIIActor(logActor);
+
+            // Every transition the runner leaves is one line in the job's log. A line from the
+            // transition that records a disagreement carries its own label, so that a search over the
+            // log finds the criteria a run could not settle without reading every line of it
+            // (JobRunsInTheLog_260915_oo01).
+            runner.setStepListener(line -> log(name, "INFO", line,
+                    line.contains("no-agreement") || line.contains("give-up")
+                            ? NO_AGREEMENT_LABEL : JOB_STEP_LABEL));
+
+            seedParameters(runnerRef, entry.parameters());
+
+            jobs.put(jobId, queued.started());
+            log(name, "INFO", "started workflow " + entry.workflow() + describe(entry.parameters()));
+
+            ActorRef<Project> me = self;
+            CompletableFuture<String> done = run(runnerRef, name, entry.yaml());
+            // `done` is completed from inside the last transition (finish), before that transition's
+            // own log line is written. Queue an empty message behind the run on the runner's mailbox
+            // and record the end only once that has been processed, so the job's log reads in order:
+            // start, every step, then the end.
+            done.whenComplete((result, error) ->
+                    runnerRef.tell(interp -> { })
+                             .whenComplete((v, ignored) -> me.tell(p -> p.jobFinished(jobId, result, error))));
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Could not start " + name, e);
+            jobs.put(jobId, queued.ended(FAILED, "(job could not start: " + e + ")"));
+            log(name, "WARNING", "failed: could not start: " + e);
+            startNext(jobId);
+        }
+    }
+
+    /** Tells the queue that {@code jobId} has ended and starts whichever job it hands out next. */
+    private void startNext(String jobId) {
+        jobQueue().ask(q -> q.finished(jobId)).join().ifPresent(this::launch);
+    }
+
+    /**
+     * Resets the runner, loads {@code yaml} into it and runs it, all as one ordinary {@code tell}
+     * ({@code PlanRunnerLifecycleManagement_260829_oo01}).
+     *
+     * @return a future completed with the run's outcome
+     */
+    private static CompletableFuture<String> run(PlanRunnerIIAR runnerRef, String name, String yaml) {
+        CompletableFuture<String> done = new CompletableFuture<>();
+        runnerRef.tell(interp -> {
+            PlanRunner runner = (PlanRunner) interp;
+            runner.setDone(done);
+            try {
+                runner.clearStop();
+                runner.reset();
+                runner.readYaml(new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8)));
+                var result = runner.runUntilEnd();
+                // Reaching "end" through finish/reportFailure already completed `done`; this covers
+                // a run that stopped some other way, so nobody is left waiting on a runner that is
+                // no longer running.
+                String outcome;
+                if (runner.isStopRequested()) {
+                    // runUntilEnd's loop condition includes !stopRequested, so a stop falls out of
+                    // the loop and returns "Maximum iterations exceeded" — the wrong thing to report.
+                    outcome = "(plan stopped by request after " + runner.getCurrentState() + ")";
+                } else if (result.isSuccess()) {
+                    outcome = runner.lastResult() != null ? runner.lastResult() : "(plan finished with no result)";
+                } else {
+                    outcome = "(plan did not finish: " + result.getResult() + ")";
+                }
+                runner.complete(outcome);
+            } catch (Throwable t) {
+                // The actor's message loop only catches Exception, so an Error thrown here would kill
+                // this runner's thread silently and the job would stay RUNNING until tick noticed.
+                LOG.log(Level.WARNING, "job " + name + " failed", t);
+                runner.complete("(plan failed: " + t + ")");
+            }
+        });
+        return done;
+    }
+
+    /**
+     * Puts the run's values where <code>${key}</code> is read from: the runner's own JSON state,
+     * through the {@code putJson} action every {@code IIActorRef} answers. Called before the run
+     * is queued, so nothing else is on that mailbox yet.
+     */
+    private static void seedParameters(PlanRunnerIIAR runner, Map<String, String> parameters) {
+        if (parameters == null) return;
+        for (Map.Entry<String, String> e : parameters.entrySet()) {
+            if (e.getKey() == null || e.getKey().isBlank() || e.getValue() == null) continue;
+            String args = new JSONObject()
+                    .put("path", e.getKey())
+                    .put("value", e.getValue())
+                    .toString();
+            runner.callByActionName("putJson", args);
+        }
+    }
+
+    /** @return {@code " with query=…, perPage=…"}, or {@code ""} when the run was given nothing */
+    private static String describe(Map<String, String> parameters) {
+        if (parameters == null || parameters.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder(" with ");
+        boolean first = true;
+        for (Map.Entry<String, String> e : parameters.entrySet()) {
+            if (!first) sb.append(", ");
+            sb.append(e.getKey()).append('=').append(e.getValue());
+            first = false;
+        }
+        return sb.toString();
+    }
+
+    /**
+     * On the mailbox: records how a job ended.
+     *
+     * @param jobId  the job
+     * @param result what the run reported, or {@code null} when it threw
+     * @param error  what it threw, or {@code null}
+     */
+    void jobFinished(String jobId, String result, Throwable error) {
+        JobView job = jobs.get(jobId);
+        if (job == null || !RUNNING.equals(job.state())) return;
+        String state;
+        String outcome;
+        if (error != null) {
+            state = FAILED;
+            outcome = "(job failed: " + error + ")";
+        } else {
+            outcome = result == null ? "" : result;
+            if (outcome.startsWith("(plan stopped")) state = STOPPED;
+            else if (outcome.startsWith("(plan failed") || outcome.startsWith("(plan did not finish")) state = FAILED;
+            else state = FINISHED;
+        }
+        jobs.put(jobId, job.ended(state, outcome));
+        log(job.actorName(), FAILED.equals(state) ? "WARNING" : "INFO", state.toLowerCase() + ": " + outcome);
+        startNext(jobId);
+    }
+
+    /**
+     * Stops a job. A running job is asked to stop between transitions; its end then arrives through
+     * {@link #jobFinished} like any other, and the next job starts. A waiting job is taken out of
+     * the line and recorded as {@link #STOPPED} without ever running.
+     *
+     * @param jobId the job
+     * @return whether there was such a job and it was waiting or running
+     */
+    public boolean stopJob(String jobId) {
+        JobView job = jobs.get(jobId);
+        if (job == null) return false;
+        if (QUEUED.equals(job.state())) {
+            if (!jobQueue().ask(q -> q.cancel(jobId)).join()) return false;
+            jobs.put(jobId, job.ended(STOPPED, "(stopped before it started)"));
+            log(job.actorName(), "INFO", "stopped before it started");
+            return true;
+        }
+        if (!RUNNING.equals(job.state())) return false;
+        IIActorRef<?> ref = system.getIIActor(job.actorName());
+        if (!(ref instanceof PlanRunnerIIAR runnerRef)) return false;
+        // tellNow: the runner's thread is inside runUntilEnd,
+        // so a queued message would arrive only after the run it was meant to stop.
+        runnerRef.tellNow(interp -> interp.requestStop());
+        log(job.actorName(), "INFO", "stop requested");
+        return true;
+    }
+
+    /**
+     * On the mailbox, on a schedule: a running job whose runner is gone is recorded as failed.
+     * A runner that ends normally says so through {@link #jobFinished}; this covers the one that
+     * died without saying so.
+     */
+    void tick() {
+        for (JobView job : new ArrayList<>(jobs.values())) {
+            if (!RUNNING.equals(job.state())) continue;
+            IIActorRef<?> ref = system.getIIActor(job.actorName());
+            if (ref == null || !ref.isAlive()) {
+                jobs.put(job.jobId(), job.ended(FAILED, "(runner is gone)"));
+                log(job.actorName(), "WARNING", "failed: runner is gone");
+                startNext(job.jobId());
+            }
+        }
+    }
+
+    /** @return this project's jobs, newest first; a waiting job carries its place in the line */
+    public List<JobView> jobs() {
+        List<String> waiting = waiting();
+        List<JobView> out = new ArrayList<>();
+        for (JobView j : jobs.values()) out.add(withPosition(j, waiting));
+        Collections.reverse(out);
+        return List.copyOf(out);
+    }
+
+    /** @return one job, with its place in the line while it waits, or {@code null} */
+    public JobView job(String jobId) {
+        JobView j = jobs.get(jobId);
+        return j == null ? null : withPosition(j, waiting());
+    }
+
+    private List<String> waiting() {
+        if (jobQueueName == null) return List.of();
+        ActorRef<JobQueue> q = jobQueue();
+        return q == null ? List.of() : q.ask(JobQueue::waiting).join();
+    }
+
+    private static JobView withPosition(JobView j, List<String> waiting) {
+        return QUEUED.equals(j.state()) ? j.at(waiting.indexOf(j.jobId()) + 1) : j;
+    }
+
+    /** @return a job's log lines, oldest first, or {@code null} when there is no such job */
+    public List<RecentEntriesAccumulator.Entry> jobLog(String jobId) {
+        RecentEntriesAccumulator buffer = jobLogs.get(jobId);
+        return buffer == null ? null : buffer.recent();
+    }
+
+    /** Writes one line to a job's log actor, through its mailbox. */
+    private void log(String jobActorName, String type, String data) {
+        log(jobActorName, type, data, JOB_STEP_LABEL);
+    }
+
+    /**
+     * One line of a job's record, to the pane and to the log.
+     *
+     * @param label what a later search filters on; {@link #JOB_STEP_LABEL} for an ordinary
+     *              transition, {@link #NO_AGREEMENT_LABEL} for one worth looking up again
+     */
+    private void log(String jobActorName, String type, String data, String label) {
+        if (ioLogStore != null) {
+            long sessionId = ioLogStore.ensureJobSession(jobActorName);
+            ioLogStore.record(sessionId, jobActorName, label, data);
+        }
+        IIActorRef<?> logRef = system.getIIActor(jobActorName + ".log");
+        if (logRef == null) return;
+        try {
+            org.json.JSONObject args = new org.json.JSONObject();
+            args.put("source", "job");
+            args.put("type", type);
+            args.put("data", data);
+            logRef.callByActionName("add", args.toString());
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not log for " + jobActorName, e);
+        }
+    }
+}

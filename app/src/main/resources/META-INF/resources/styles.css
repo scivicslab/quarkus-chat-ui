@@ -1,3 +1,5 @@
+/* Hallmark · genre: modern-minimal · macrostructure: Workbench · theme: Cobalt · designed-as-app
+ * Single-page app reskin: structure, element IDs, and copy preserved; visual layer replaced. */
 /* quarkus-llm-console styles */
 
 /* Vi normal mode indicator */
@@ -9,22 +11,60 @@
     color: #f9e2af;
 }
 
-/* Theme: Dark Catppuccin (default) */
-:root, [data-theme="dark-catppuccin"] {
-    --bg-primary: #1e1e2e;
-    --bg-secondary: #313244;
-    --bg-tertiary: #45475a;
-    --text-primary: #cdd6f4;
-    --text-secondary: #a6adc8;
-    --accent-blue: #89b4fa;
-    --accent-green: #a6e3a1;
-    --accent-red: #f38ba8;
-    --accent-yellow: #f9e2af;
-    --accent-mauve: #cba6f7;
-    --border-color: #585b70;
-    --user-bg: #313244;
-    --assistant-bg: #1e1e2e;
-    --code-bg: #181825;
+/* Hallmark redesign — modern-minimal · Cobalt (light, single accent).
+   Cool engineered near-white paper, one electric cobalt signal accent, hairline rules.
+   The other [data-theme=...] blocks below are inert in this static mock. */
+:root {
+    --bg-primary:     oklch(99% 0.004 250);
+    --bg-secondary:   oklch(97% 0.006 252);
+    --bg-tertiary:    oklch(94.5% 0.008 254);
+    --text-primary:   oklch(30% 0.03 260);
+    --text-secondary: oklch(52% 0.03 258);
+    --accent-blue:    oklch(52% 0.19 262);   /* electric cobalt — the single signal accent */
+    --accent-green:   oklch(56% 0.13 155);
+    --accent-red:     oklch(55% 0.20 25);
+    --accent-yellow:  oklch(62% 0.13 75);
+    --accent-mauve:   oklch(52% 0.16 292);
+    --border-color:   oklch(91% 0.01 255);   /* hairline rule */
+    --user-bg:        oklch(96% 0.03 262);    /* faint cobalt tint on the user's turn */
+    --assistant-bg:   oklch(99% 0.004 250);
+    --code-bg:        oklch(96.5% 0.008 255);
+
+    /* Type system (Cobalt): geometric-grotesk display, Inter body, mono for code/logs/traces */
+    --font-display: "Space Grotesk", system-ui, sans-serif;
+    --font-body:    "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
+    --font-mono:    "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    --tracking-tight: -0.02em;
+
+    /* Tight radii + hairline (Cobalt: 6px controls, 8px surfaces) */
+    --radius-sm:   4px;
+    --radius:      6px;
+    --radius-lg:   8px;
+    --radius-pill: 999px;
+
+    /* Motion tokens (named easing + duration) */
+    --dur-fast: 120ms;
+    --dur-base: 200ms;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* z-index scale */
+    --z-popup: 100;
+    --z-suggest: 500;
+    --z-overlay: 1000;
+    --z-dialog: 2000;
+    --z-modal: 3000;
+
+    /* Right-pane direction + log-level colours, cool-tuned for the Cobalt paper */
+    --dir-user:      oklch(52% 0.16 292);
+    --dir-to-llm:    oklch(50% 0.18 262);
+    --dir-from-llm:  oklch(52% 0.13 155);
+    --dir-to-tool:   oklch(55% 0.14 65);
+    --dir-from-tool: oklch(54% 0.10 195);
+    --dir-meta:      oklch(52% 0.02 258);
+    --log-info:  oklch(52% 0.18 262);
+    --log-warn:  oklch(58% 0.14 65);
+    --log-error: oklch(55% 0.20 25);
+    --log-debug: oklch(60% 0.02 258);
 }
 
 /* Theme: Dark Nord */
@@ -195,6 +235,22 @@
     box-sizing: border-box;
 }
 
+/* Hallmark: visible keyboard focus. Several component rules below set `outline: none`
+   with ID specificity, so restore a ring on :focus-visible at matching specificity. */
+#prompt-input:focus-visible,
+#model-select:focus-visible,
+#theme-select:focus-visible,
+.prompt-text-input:focus-visible,
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid var(--accent-blue);
+    outline-offset: 2px;
+}
+
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
     background: var(--bg-primary);
@@ -229,7 +285,7 @@ header h1 {
 header h1[contenteditable] {
     cursor: text;
     border-bottom: 1px dashed transparent;
-    transition: border-color 0.2s;
+    transition: border-color var(--dur-base) var(--ease-out);
     outline: none;
     min-width: 60px;
 }
@@ -300,7 +356,7 @@ header h1[contenteditable]:focus {
     white-space: nowrap;
 }
 
-#save-chat-btn, #clear-chat-btn {
+#save-chat-btn, #clear-chat-btn, #view-mode-btn {
     background: var(--bg-tertiary);
     color: var(--text-secondary);
     border: 1px solid var(--border-color);
@@ -311,9 +367,20 @@ header h1[contenteditable]:focus {
     font-family: inherit;
 }
 
-#save-chat-btn:hover, #clear-chat-btn:hover {
+#save-chat-btn:hover, #clear-chat-btn:hover, #view-mode-btn:hover {
     color: var(--text-primary);
     border-color: var(--accent-blue);
+}
+
+/* The display toggle (ChatDisplayToggle_261110_oo01): in "Show person-facing messages only" the chat area hides the input and
+   steps of every turn the person did not start, and keeps its final answer (turn-answer). Nothing is removed;
+   taking the class off shows them again. */
+#view-mode-btn[aria-pressed="true"] {
+    color: var(--text-primary);
+    border-color: var(--accent-blue);
+}
+#chat-area.person-only .turn-other:not(.turn-answer) {
+    display: none;
 }
 
 #connection-status {
@@ -334,7 +401,11 @@ header h1[contenteditable]:focus {
 
 /* Chat area */
 #chat-area {
-    flex: 1;
+    /* An explicit 0px basis, not the 0% that "flex: 1" means. With a percentage basis the browser measures
+       the whole conversation again every time the box below it changes (at every key typed in the prompt):
+       about 55 ms per key at 400 messages and 220 ms at 1,500, against 1 to 4 ms with 0px. The size of the
+       area is the same. */
+    flex: 1 1 0px;
     overflow-y: auto;
     padding: 16px;
     display: flex;
@@ -385,17 +456,17 @@ header h1[contenteditable]:focus {
     background: var(--user-bg);
     border: 1px solid var(--accent-green);
     align-self: flex-end;
-    font-size: 15px;
+    font-size: 12px;
     color: var(--accent-green);
     font-style: italic;
     white-space: pre-wrap;
     opacity: 0.85;
 }
 
-/* Bold the "Natural:" / "Faithful:" line labels, upright to contrast the italic body. */
-.message.translation strong {
+.message.translation::before {
+    content: "EN: ";
     font-style: normal;
-    font-weight: 700;
+    font-weight: 600;
 }
 
 .message-footer {
@@ -405,9 +476,21 @@ header h1[contenteditable]:focus {
     font-size: 12px;
     color: var(--text-secondary);
     display: flex;
-    gap: 16px;
+    flex-wrap: wrap;
+    gap: 4px 16px;
     align-items: center;
 }
+
+/* The turn and request ids take a line of their own at the bottom of the footer. */
+.footer-ids {
+    order: 1;
+    flex-basis: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 16px;
+    font-size: 11px;
+}
+.footer-ids span { overflow-wrap: anywhere; }
 
 .copy-md-btn {
     background: var(--bg-tertiary);
@@ -424,6 +507,30 @@ header h1[contenteditable]:focus {
     color: var(--text-primary);
     border-color: var(--accent-blue);
 }
+
+/* Translate one message (MessageTranslation_261011_oo01): the list in the footer, and the
+   translation drawn inside the message above the footer. */
+.translate-select {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 1px 4px;
+    font-size: 11px;
+    cursor: pointer;
+}
+.translate-select:hover { color: var(--text-primary); border-color: var(--accent-blue); }
+.translated {
+    margin-top: 8px;
+    padding: 6px 10px;
+    border-left: 3px solid var(--accent-blue);
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    white-space: pre-wrap;
+}
+.message.assistant .translated { white-space: normal; }
+.translated-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+.translated-error { border-left-color: var(--accent-red, #f38ba8); color: var(--text-secondary); }
 
 /* Markdown content styles */
 .message.assistant h1,
@@ -457,6 +564,37 @@ header h1[contenteditable]:focus {
 .message.assistant pre code {
     background: none;
     padding: 0;
+}
+
+/* Code blocks: wrap toggle and copy (CodeBlockWrapAndCopy_261011_oo01). The wrapper holds the
+   buttons outside the <pre>, so they stay at the top right while the code scrolls sideways. */
+.code-block { position: relative; }
+/* Room for the buttons above the first line. As specific as `.message.assistant pre`, which sets
+   the padding, and after it, so this one wins. */
+.message .code-block > pre { padding-top: 30px; }
+.code-tools {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: flex;
+    gap: 4px;
+    opacity: 0.55;
+}
+.code-block:hover .code-tools { opacity: 1; }
+.code-tool-btn {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    cursor: pointer;
+}
+.code-tool-btn:hover { color: var(--text-primary); border-color: var(--accent-blue); }
+.message pre.wrapped,
+.message pre.wrapped code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .message.assistant ul, .message.assistant ol {
@@ -630,6 +768,13 @@ header h1[contenteditable]:focus {
     white-space: pre-wrap;
     word-break: break-word;
     color: var(--text-primary);
+    /* Show at most 3 lines, as quarkus-chat-ui does; the title attribute carries the whole
+       prompt on hover. */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 .queue-item .queue-auto {
@@ -713,13 +858,21 @@ header h1[contenteditable]:focus {
     padding-left: 5px;
 }
 
+.queue-urgent {
+    flex: none;
+    margin-right: 6px;
+    padding: 0 5px;
+    border: 1px solid var(--accent-red);
+    border-radius: 3px;
+    color: var(--accent-red);
+    font-size: 0.8em;
+}
+
 .queue-item.waiting {
     background: rgba(249, 226, 175, 0.1);
     border: 1px solid rgba(249, 226, 175, 0.3);
     border-left: 3px solid var(--accent-yellow);
     padding-left: 5px;
-}
-
 }
 
 /* Input area */
@@ -737,10 +890,10 @@ footer {
 }
 
 #prompt-input {
-    /* Not flex:1: #input-area is now a column flex container (its main axis is height), and a
+    /* Not flex:1: #input-area is a column flex container (its main axis is height), and a
        flex-basis of 0% wins over any explicit height for main-axis sizing — with flex:1 here,
-       every height the resize handle and autoResize() set via JS was silently overridden back to
-       whatever the flex algorithm computed. flex:1 dates from when #input-area was a row
+       #input-resize-handle's drag (below) would set a height only to have it silently overridden
+       back to whatever the flex algorithm computed. flex:1 dates from when #input-area was a row
        container, where flex:1 distributed width and height was the (unaffected) cross axis. */
     flex: none;
     background: var(--bg-tertiary);
@@ -784,7 +937,7 @@ footer {
     font-size: 15px;
     background: var(--bg-tertiary);
     color: var(--text-primary);
-    transition: background 0.2s;
+    transition: background var(--dur-base) var(--ease-out);
 }
 
 .icon-btn:hover {
@@ -794,9 +947,9 @@ footer {
 /* Send and Cancel sit side by side, both always on screen. They used to share one
    cell and swap by visibility, and the swap read as a trap: mid-turn, a click aimed
    at Send landed on the Cancel occupying its place and stopped the running turn.
-   Send stays pressable while busy — a prompt sent then is queued, and the client
-   says so. Cancel keeps its disabled state for idle, greyed rather than hidden,
-   so the pair never changes shape under the pointer. */
+   Send stays pressable while busy — a prompt sent then is queued, and the server
+   already says so. Cancel keeps its disabled state for idle, greyed rather than
+   hidden, so the pair never changes shape under the pointer. */
 #send-cancel-slot {
     display: flex;
     gap: 4px;
@@ -813,7 +966,7 @@ footer {
     cursor: pointer;
     font-size: 14px;
     font-weight: 500;
-    transition: background 0.2s;
+    transition: background var(--dur-base) var(--ease-out);
 }
 
 #send-btn {
@@ -921,7 +1074,7 @@ footer {
     cursor: pointer;
     font-size: 13px;
     font-family: inherit;
-    transition: background 0.2s;
+    transition: background var(--dur-base) var(--ease-out);
 }
 
 .prompt-option-btn:hover:not(:disabled) {
@@ -978,29 +1131,6 @@ footer {
     border-radius: 3px;
 }
 
-/* .log-line and its level-color modifiers are shared with the right pane's System Log tab
-   (console.js) — the left-pane "Server Logs" panel that used to be their only other consumer has
-   been removed as a duplicate of that tab. */
-.log-line {
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-    word-break: break-all;
-}
-
-.log-line.log-warning {
-    color: var(--accent-yellow);
-}
-
-.log-line.log-severe {
-    color: var(--accent-red);
-}
-
-.log-line.log-fine,
-.log-line.log-finer,
-.log-line.log-finest {
-    color: var(--bg-tertiary);
-}
-
 /* Prediction popup */
 #predict-popup {
     position: absolute;
@@ -1013,7 +1143,7 @@ footer {
     border-radius: 6px;
     max-height: 240px;
     overflow-y: auto;
-    z-index: 100;
+    z-index: var(--z-popup);
     box-shadow: 0 -4px 12px rgba(0,0,0,0.3);
 }
 
@@ -1069,7 +1199,7 @@ footer {
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 9999;
+    z-index: var(--z-modal);
 }
 #auth-dialog {
     background: var(--bg-secondary);
@@ -1151,7 +1281,7 @@ footer {
     box-shadow: 0 4px 20px rgba(0,0,0,0.4);
     display: flex;
     flex-direction: column;
-    z-index: 1000;
+    z-index: var(--z-overlay);
     overflow: hidden;
 }
 #btw-header {
@@ -1233,7 +1363,7 @@ footer {
     border: 1px solid var(--border-color);
     border-radius: 6px;
     box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-    z-index: 1000;
+    z-index: var(--z-overlay);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -1293,7 +1423,7 @@ footer {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: 6px;
-    z-index: 500;
+    z-index: var(--z-suggest);
     box-shadow: 0 -4px 16px rgba(0,0,0,0.35);
 }
 .skill-suggest-item {
@@ -1333,7 +1463,7 @@ footer {
     position: fixed;
     inset: 0;
     background: rgba(0,0,0,0.6);
-    z-index: 2000;
+    z-index: var(--z-dialog);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1416,3 +1546,66 @@ footer {
     padding: 4px 12px;
     color: var(--text-secondary);
 }
+
+/* ============================================================================
+   Hallmark redesign layer — modern-minimal · Cobalt
+   The token block above already re-skins every var()-driven rule. This layer
+   applies the non-tokenised Cobalt voice: type roles, tight radii, hairline
+   surfaces, and a filled-primary / outlined-secondary CTA pair.
+   ============================================================================ */
+
+/* Type roles: body = Inter, display = Space Grotesk, code = JetBrains Mono */
+body { font-family: var(--font-body); }
+#app-title, header h1, #login-title, #auth-dialog h2 {
+    font-family: var(--font-display);
+    letter-spacing: var(--tracking-tight);
+    font-weight: 600;
+}
+.message.assistant h1, .message.assistant h2, .message.assistant h3 {
+    font-family: var(--font-display);
+    letter-spacing: var(--tracking-tight);
+}
+.message.assistant code, .message.assistant pre code,
+#ext-dialog-body code, #ext-dialog-body pre {
+    font-family: var(--font-mono);
+}
+
+/* Controls: 6px radius, hairline borders */
+#prompt-input, .prompt-text-input, #api-key-input,
+#model-select, #theme-select, #logs-level {
+    border-radius: var(--radius);
+}
+
+/* CTA pair: filled cobalt primary, outlined secondary (Send / Cancel) */
+#send-btn, #cancel-btn, #auth-submit-btn, .prompt-option-btn {
+    border-radius: var(--radius-pill);
+    font-family: var(--font-body);
+    font-weight: 500;
+}
+#send-btn { color: #fff; }
+#cancel-btn { color: #fff; }
+
+/* Surfaces: 8px cards, hairline rules */
+#auth-dialog, .ext-panel, #ext-dialog, #btw-overlay {
+    border-radius: var(--radius-lg);
+    border-color: var(--border-color);
+}
+
+/* Header + status: hairline separation, tracked small labels */
+#app-header { border-bottom: 1px solid var(--border-color); }
+#connection-status { font-weight: 500; }
+
+/* Where a prompt came from (PromptOriginOnScreen_260915_oo01). A person's own prompt at this
+   screen needs no label; the other three are marked, and the bubble is tinted, so that a
+   conversation being driven on someone's behalf reads as such at a glance. */
+.origin-badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 9px; white-space: nowrap;
+    border: 1px solid var(--border-color, #444); color: var(--text-secondary, #9a9a9a);
+}
+.origin-badge.origin-workflow { color: var(--accent-blue, #a5b4fc); border-color: var(--accent-blue, #a5b4fc); }
+.origin-badge.origin-chat { color: var(--accent-green, #86efac); border-color: var(--accent-green, #86efac); }
+.origin-badge.origin-api { color: var(--accent-amber, #fbbf24); border-color: var(--accent-amber, #fbbf24); }
+.origin-badge.origin-timekeeper { color: var(--accent-mauve, #c4b5fd); border-color: var(--accent-mauve, #c4b5fd); }
+.message.user.from-workflow { border-left: 3px solid var(--accent-blue, #a5b4fc); }
+.message.user.from-chat { border-left: 3px solid var(--accent-green, #86efac); }
+.message.user.from-api { border-left: 3px solid var(--accent-amber, #fbbf24); }

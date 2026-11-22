@@ -1,0 +1,1304 @@
+package com.scivicslab.chatui.audittrail;
+
+import com.scivicslab.chatui.agent.ToolSet;
+import com.scivicslab.chatui.core.actor.ChatSession;
+import com.scivicslab.chatui.core.actor.ChatSessionIIAR;
+import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
+import com.scivicslab.chatui.core.actor.Timekeeper;
+import com.scivicslab.chatui.core.actor.TurnReply;
+import com.scivicslab.chatui.core.actor.PromptQueue;
+import com.scivicslab.chatui.core.actor.SseConnection;
+import com.scivicslab.chatui.core.provider.LlmProvider;
+import com.scivicslab.chatui.core.rest.ChatEvent;
+import com.scivicslab.chatui.logging.RecentEntriesAccumulator;
+import com.scivicslab.pojoactor.core.ActorRef;
+import io.smallrye.mutiny.Multi;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import org.jboss.resteasy.reactive.RestSseElementType;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
+
+/**
+ * Bridges the browser and the {@code ActorSystem} — see {@code ChatResourceDesign_260823_oo01}.
+ *
+ * <p>Holds no {@code ActorRef} fields; every endpoint takes {@code chatId} and resolves the
+ * relevant actor through {@link ChatUiActorSystem} on each call, the same shape the reference
+ * {@code ChatResource} (quarkus-chat-ui/core) uses for its single global conversation.</p>
+ */
+@Path("/api/projects")
+public class ChatResource {
+
+    private static final Logger LOG = Logger.getLogger(ChatResource.class.getName());
+
+    @Inject
+    ChatUiActorSystem actorSystem;
+
+    /**
+     * Takes a thread dump when a conversation that is not answering stops answering questions
+     * ({@link #noteTimeout}); see {@link StallDiagnostics}.
+     */
+    private final StallDiagnostics stallDiagnostics = StallDiagnostics.atDefaultLocation();
+
+    /**
+     * Called when a question asked of a conversation's actor timed out. A timeout while a turn is
+     * running is expected, since the turn occupies the actor's thread; a timeout while the
+     * conversation is idle is a stall, and is recorded with a thread dump taken now, while the
+     * stall lasts.
+     */
+    private void noteTimeout(String projectId, String chatId, ChatSessionIIAR chatSessionIIAR) {
+        if (chatSessionIIAR.isBusyDirect()) return;
+        stallDiagnostics.dumpIfDue(projectId + "/chat-" + chatId);
+    }
+
+    // ── Projects ──────────────────────────────────────────────────────────────
+
+    /**
+     * Creates a new project and its first conversation
+     * ({@code ProjectScopedActorTree_260829_oo01}).
+     *
+     * @return {@code {"projectId": "project<N>"}}; its first conversation's id is {@code "01"}
+     */
+    @POST
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response createProject() {
+        return Response.ok(Map.of("projectId", actorSystem.createProject())).build();
+    }
+
+    /**
+     * The project's own properties, for the Project Property tab
+     * ({@code ProjectProperty_260929_oo01}).
+     *
+     * @param projectId the project to describe
+     * @return {@code {"projectId":..., "name":..., "workingDir":..., "chatNames":{"02":...}}};
+     *         {@code name} and {@code workingDir} are null when unset, and {@code chatNames} holds
+     *         only the conversations that have a name
+     */
+    @GET
+    @Path("/{projectId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response project(@PathParam("projectId") String projectId) {
+        var projectRef = actorSystem.getProject(projectId);
+        if (projectRef == null) {
+            return Response.status(404).entity(Map.of("type", "error",
+                    "message", "unknown project: " + projectId)).build();
+        }
+        Map<String, Object> body = new java.util.HashMap<>();
+        body.put("projectId", projectId);
+        body.put("name", actorSystem.getProjectName(projectId));
+        java.nio.file.Path dir = null;
+        try {
+            dir = projectRef.ask(com.scivicslab.chatui.core.actor.Project::getWorkingDir)
+                    .get(5, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Exception e) {
+            // Left null: the tab shows an empty field rather than failing the whole request.
+        }
+        body.put("workingDir", dir == null ? null : dir.toString());
+        Map<String, String> chatNames = new java.util.TreeMap<>();
+        for (String chatId : chats(projectId)) {
+            String chatName = actorSystem.getChatName(projectId, chatId);
+            if (chatName != null) chatNames.put(chatId, chatName);
+        }
+        body.put("chatNames", chatNames);
+        // The reporting lines, the liaison and the subordinate limit (ConversationReportingLines_261108_oo01).
+        body.put("organization", actorSystem.organizationJson(projectId).toMap());
+        return Response.ok(body).build();
+    }
+
+    /**
+     * The project's conversations and the edges between them, for the left pane's graph
+     * ({@code ConversationGraphInTheLeftPane_261117_oo01}): superior to subordinate from the project's organization,
+     * and the role edges {@code set_collaborator} made. Read from those two actors on each call; read-only.
+     *
+     * @return the {@link com.scivicslab.chatui.core.actor.ConversationGraph} as JSON, or 404 for an unknown project
+     */
+    @GET
+    @Path("/{projectId}/graph")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response graph(@PathParam("projectId") String projectId) {
+        com.scivicslab.chatui.core.actor.ConversationGraph graph = actorSystem.conversationGraph(projectId);
+        if (graph == null) {
+            return Response.status(404).entity(Map.of("type", "error", "message", "unknown project: " + projectId)).build();
+        }
+        return Response.ok(graph).build();
+    }
+
+    /**
+     * Sets the project's liaison, the conversation that talks with the person, and how many subordinates one
+     * superior may have ({@code ConversationReportingLines_261108_oo01}).
+     *
+     * @param body {@code {"liaison": "01", "maxSubordinates": 5}}; a field left out keeps its value
+     * @return {@code {"type":"ok"}}, or 400 with the reason and nothing changed
+     */
+    @POST
+    @Path("/{projectId}/organization")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response setOrganization(@PathParam("projectId") String projectId, Map<String, Object> body) {
+        Object liaison = body == null ? null : body.get("liaison");
+        Object max = body == null ? null : body.get("maxSubordinates");
+        Integer maxSubordinates;
+        try {
+            maxSubordinates = max == null || String.valueOf(max).isBlank() ? null : Integer.valueOf(String.valueOf(max).strip());
+        } catch (NumberFormatException e) {
+            return Response.status(400).entity(Map.of("type", "error", "message", "maxSubordinates must be a whole number")).build();
+        }
+        String outcome = actorSystem.setOrganizationSettings(projectId,
+                liaison == null || String.valueOf(liaison).isBlank() ? null : String.valueOf(liaison).strip(), maxSubordinates);
+        if (outcome.startsWith("error:")) {
+            return Response.status(400).entity(Map.of("type", "error", "message", outcome)).build();
+        }
+        return Response.ok(Map.of("type", "ok")).build();
+    }
+
+    /**
+     * Deletes a project and its conversations ({@code ProjectDeletion_261011_oo01}). The
+     * conversations' sessions stay in the I/O log; the project does not come back on restart.
+     *
+     * @param projectId the project to delete
+     * @return {@code {"deleted": projectId, "conversations": n}}; 400 for {@code project1}, 404 for
+     *         an unknown project, 409 when a conversation is answering or holds queued prompts or a
+     *         job is running — with the reason, and nothing changed
+     */
+    @DELETE
+    @Path("/{projectId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteProject(@PathParam("projectId") String projectId) {
+        ChatUiActorSystem.ProjectDeletion outcome = actorSystem.deleteProject(projectId);
+        int status = switch (outcome.kind()) {
+            case DELETED -> 200;
+            case DEFAULT_PROJECT -> 400;
+            case UNKNOWN -> 404;
+            case BUSY -> 409;
+        };
+        if (status == 200) {
+            return Response.ok(Map.of("deleted", projectId, "conversations", outcome.conversations())).build();
+        }
+        return Response.status(status).entity(Map.of("type", "error", "message", outcome.reason())).build();
+    }
+
+    /**
+     * Translates one message of this conversation ({@code MessageTranslation_261011_oo01}). The
+     * translation is not added to the conversation.
+     *
+     * @param body {@code {"text": ..., "language": a code from GET /api/translation-languages}}
+     * @return {@code {"translation", "language", "model"}}; 400 for no text or an unknown language,
+     *         404 for no such conversation, 502 when the model gave no translation
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/translate")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response translate(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
+                              Map<String, Object> body) {
+        Object textVal = body != null ? body.get("text") : null;
+        Object langVal = body != null ? body.get("language") : null;
+        String text = textVal == null ? "" : String.valueOf(textVal);
+        if (text.isBlank()) {
+            return Response.status(400).entity(Map.of("type", "error", "message", "text is required")).build();
+        }
+        String language = langVal == null ? "" : String.valueOf(langVal);
+        ChatUiActorSystem.Translation t = actorSystem.translate(projectId, chatId, text, language);
+        int status = switch (t.kind()) {
+            case DONE -> 200;
+            case UNKNOWN_LANGUAGE -> 400;
+            case UNKNOWN_CHAT -> 404;
+            case NO_ANSWER -> 502;
+        };
+        if (status != 200) {
+            return Response.status(status).entity(Map.of("type", "error", "message", t.reason())).build();
+        }
+        return Response.ok(Map.of("translation", t.text(), "language", language,
+                "model", t.model() == null ? "" : t.model())).build();
+    }
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper EVENT_JSON =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
+    private static String translationEvent(Map<String, Object> fields) {
+        try {
+            return EVENT_JSON.writeValueAsString(fields);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * Translates one message as {@link #translate} does, sending the translation as the model
+     * writes it. Each element of the stream is a JSON object: {@code {"type":"delta","content"}}
+     * for a piece of the translation, then one {@code {"type":"done","translation","model"}} with
+     * the whole text, or one {@code {"type":"error","message"}}. A request that is refused for the
+     * reasons {@link #translate} gives a 400, 404 or 502 for ends in an error element, because the
+     * status line is sent before the translation starts.
+     *
+     * @param body {@code {"text": ..., "language": a code from GET /api/translation-languages}}
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/translate/stream")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.SERVER_SENT_EVENTS)
+    @RestSseElementType(MediaType.TEXT_PLAIN)
+    public Multi<String> translateStream(@PathParam("projectId") String projectId,
+                                         @PathParam("chatId") String chatId, Map<String, Object> body) {
+        Object textVal = body != null ? body.get("text") : null;
+        Object langVal = body != null ? body.get("language") : null;
+        String text = textVal == null ? "" : String.valueOf(textVal);
+        String language = langVal == null ? "" : String.valueOf(langVal);
+        if (text.isBlank()) {
+            return Multi.createFrom().item(translationEvent(Map.of("type", "error", "message", "text is required")));
+        }
+        return Multi.createFrom().<String>emitter(emitter -> Thread.ofVirtual().start(() -> {
+            try {
+                ChatUiActorSystem.Translation t = actorSystem.translate(projectId, chatId, text, language,
+                        piece -> emitter.emit(translationEvent(Map.of("type", "delta", "content", piece))));
+                if (t.kind() == ChatUiActorSystem.Translation.Kind.DONE) {
+                    emitter.emit(translationEvent(Map.of("type", "done", "translation", t.text(),
+                            "model", t.model() == null ? "" : t.model())));
+                } else {
+                    emitter.emit(translationEvent(Map.of("type", "error", "message", t.reason())));
+                }
+            } catch (RuntimeException e) {
+                LOG.warning("Streaming translation failed: " + e.getMessage());
+                emitter.emit(translationEvent(Map.of("type", "error", "message", String.valueOf(e.getMessage()))));
+            } finally {
+                emitter.complete();
+            }
+        }));
+    }
+
+    /**
+     * Sets the name a person reads for a project ({@code ProjectProperty_260929_oo01}).
+     *
+     * @param projectId the project to name
+     * @param name      the name; an empty body clears it
+     * @return {@code {"type":"ok","message":...}}, or 400 with the reason
+     */
+    @POST
+    @Path("/{projectId}/name")
+    @Consumes(MediaType.TEXT_PLAIN)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response setProjectName(@PathParam("projectId") String projectId, String name) {
+        String outcome = actorSystem.setProjectName(projectId, name == null ? null : name.strip());
+        if (outcome.startsWith("error:")) {
+            return Response.status(400).entity(Map.of("type", "error", "message", outcome)).build();
+        }
+        return Response.ok(Map.of("type", "ok", "message", outcome)).build();
+    }
+
+    /**
+     * Sets the name a person reads for one conversation, as {@link #setProjectName} does for a
+     * project. The id ({@code chat-02}) stays as it is.
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @param name      the name; an empty body clears it
+     * @return {@code {"type":"ok","message":...}}, or 404 when there is no such conversation
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/name")
+    @Consumes(MediaType.TEXT_PLAIN)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response setChatName(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
+                                String name) {
+        String outcome = actorSystem.setChatName(projectId, chatId, name == null ? null : name.strip());
+        if (outcome.startsWith("error:")) {
+            return Response.status(404).entity(Map.of("type", "error", "message", outcome)).build();
+        }
+        return Response.ok(Map.of("type", "ok", "message", outcome)).build();
+    }
+
+    /**
+     * Adds a conversation to the project, letting the actor system allocate its id
+     * ({@code ProjectProperty_260929_oo01}). The sibling that takes an id in its path is for a
+     * caller that already knows which conversation it means.
+     *
+     * @param projectId the project to add a conversation to
+     * @return {@code {"chatId": "02"}}, or 400 with the reason
+     */
+    @POST
+    @Path("/{projectId}/chats")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response addChat(@PathParam("projectId") String projectId) {
+        try {
+            return Response.ok(Map.of("chatId", actorSystem.createChat(projectId))).build();
+        } catch (IllegalArgumentException e) {
+            return Response.status(400).entity(Map.of("type", "error", "message", e.getMessage())).build();
+        }
+    }
+
+    /**
+     * Points a project at a working directory and loads that directory's {@code AGENTS.md} — or
+     * {@code CLAUDE.md} when there is no {@code AGENTS.md} — as instructions for every conversation
+     * in that project ({@code SkillAndAgentsFile_260830_oo01}).
+     *
+     * @param projectId  the project to point
+     * @param workingDir the directory's path; an empty body clears it
+     * @return {@code {"type":"ok","message":...}}, or 400 with the reason
+     */
+    @POST
+    @Path("/{projectId}/working-dir")
+    @Consumes(MediaType.TEXT_PLAIN)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response setWorkingDir(@PathParam("projectId") String projectId, String workingDir) {
+        String trimmed = workingDir == null ? "" : workingDir.strip();
+        String outcome = actorSystem.setProjectWorkingDir(projectId,
+                trimmed.isEmpty() ? null : java.nio.file.Path.of(trimmed).toAbsolutePath());
+        if (outcome.startsWith("error:")) {
+            return Response.status(400).entity(Map.of("type", "error", "message", outcome)).build();
+        }
+        return Response.ok(Map.of("type", "ok", "message", outcome)).build();
+    }
+
+    /**
+     * Replaces this conversation's agent loop with another workflow — the state machine it runs for
+     * one turn.
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @param file      classpath file name under {@code /workflows/}, e.g.
+     *                  {@code plain-text-loop.yaml}
+     * @return {@code {"type":"ok","agentLoop":...}}, or 400/404 with the reason
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/agent-loop-workflow")
+    @Consumes(MediaType.TEXT_PLAIN)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response setAgentLoopWorkflow(@PathParam("projectId") String projectId,
+                                          @PathParam("chatId") String chatId, String file) {
+        ChatSessionIIAR session = actorSystem.getChatSession(projectId, chatId);
+        if (session == null) {
+            return Response.status(404).entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        String name = file == null ? "" : file.strip();
+        if (name.isEmpty()) {
+            return Response.status(400).entity(Map.of("type", "error", "message", "file name required")).build();
+        }
+        // Recorded too, so a restart puts the conversation back on this loop (ConversationRestoreOnRestart_260904_oo01).
+        String error = actorSystem.setAgentLoopFile(projectId, chatId, name);
+        if (error != null) {
+            return Response.status(400).entity(Map.of("type", "error", "message", error)).build();
+        }
+        return Response.ok(Map.of("type", "ok", "agentLoop", name)).build();
+    }
+
+    /**
+     * Cancels the LLM call this conversation is running, if any.
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return {@code {"type": "cancelled"}}, or 404 when the conversation does not exist
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/chat/cancel")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response cancel(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        if (!actorSystem.cancelPrompt(projectId, chatId)) {
+            return Response.status(404).entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        return Response.ok(Map.of("type", "cancelled")).build();
+    }
+
+    // ── SSE stream ────────────────────────────────────────────────────────────
+
+    /**
+     * Opens (or re-opens, on reconnect) the SSE stream for one ConversationSquad's conversation.
+     *
+     * @param chatId ConversationSquad identifier
+     * @return the event stream, each element a JSON-serialized {@link ChatEvent}
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/chat/stream")
+    @Produces(MediaType.SERVER_SENT_EVENTS)
+    @RestSseElementType(MediaType.TEXT_PLAIN)
+    public Multi<String> stream(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        ActorRef<SseConnection> sseRef = actorSystem.getSseConnection(projectId, chatId);
+        try {
+            return sseRef.ask(SseConnection::openStream).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.warning("Failed to open SSE stream for ConversationSquad " + chatId + ": " + e.getMessage());
+            return Multi.createFrom().empty();
+        }
+    }
+
+    // ── Chat ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Submits a prompt to one ConversationSquad's conversation. Always returns immediately with an
+     * acknowledgement; the actual content streams back over the already-open SSE connection
+     * ({@link #stream}) — see {@code ChatSessionAgentLoop_260823_oo01} "なぜ`sendPrompt`は同期的に
+     * 応答を返せないか" (the same reasoning applies here: the agent loop can run many LLM calls).
+     *
+     * @param chatId ConversationSquad identifier
+     * @param body  {@code {"text": "...", "model": "..." (optional), "hold": true (optional)}}.
+     *              With {@code hold}, the prompt is put in the queue and left there until a human
+     *              turns its Auto on or advances the queue — what the pane's Queue button sends.
+     * @return {@code {"type":"accepted"}}, or a 400 if {@code text} is missing/blank
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/chat")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response chat(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId, Map<String, Object> body) {
+        Object textVal = body != null ? body.get("text") : null;
+        Object modelVal = body != null ? body.get("model") : null;
+        Object noThinkVal = body != null ? body.get("noThink") : null;
+        Object holdVal = body != null ? body.get("hold") : null;
+        Object imagesVal = body != null ? body.get("images") : null;
+        String text = textVal != null ? String.valueOf(textVal) : null;
+        String model = modelVal != null && !String.valueOf(modelVal).isBlank() ? String.valueOf(modelVal) : null;
+        boolean noThink = Boolean.TRUE.equals(noThinkVal);
+        boolean hold = Boolean.TRUE.equals(holdVal);
+        List<String> images = imagesVal instanceof List<?> raw
+                ? raw.stream().map(String::valueOf).toList()
+                : List.of();
+        if (text == null || text.isBlank()) {
+            return Response.status(400).entity(Map.of("type", "error", "message", "text is required")).build();
+        }
+
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        ActorRef<PromptQueue> promptQueueRef = actorSystem.getPromptQueue(projectId, chatId);
+        ActorRef<SseConnection> sseRef = actorSystem.getSseConnection(projectId, chatId);
+
+        java.util.function.Consumer<ChatEvent> emitter = event -> sseRef.tell(a -> a.emit(event));
+
+        // A line beginning with a slash is answered here and never reaches the queue
+        // (SlashCommandsAndClearButton_260929_oo01). Queueing it would make "/session" report the
+        // state as it was when the line was typed rather than now, and would put a turn in the
+        // I/O log for something that is not one exchange of the conversation.
+        if (chatSessionIIAR.isCommandDirect(text)) {
+            // A command is carried out by the conversation itself, one at a time after the turn
+            // that is running, so while it answers there is nothing to run it with. Say so now
+            // rather than hold the request for the whole turn, or send the line to the model as if
+            // it were a prompt.
+            if (chatSessionIIAR.isBusyDirect()) {
+                emitter.accept(ChatEvent.info("The conversation is answering, so " + text.trim()
+                        + " was not run. Send it again when the answer has finished, or cancel the answer first."));
+                return Response.ok(Map.of("type", "accepted")).build();
+            }
+            for (ChatEvent event : runProviderCommand(chatSessionIIAR, text)) {
+                emitter.accept(event);
+            }
+            return Response.ok(Map.of("type", "accepted")).build();
+        }
+
+        // What the caller says it is. The screen sends "screen"; a program calling this endpoint
+        // usually sends nothing, and is shown as a program rather than as a person
+        // (PromptOriginOnScreen_260915_oo01).
+        Object saidSource = body != null ? body.get("source") : null;
+        String source = saidSource == null ? "human" : String.valueOf(saidSource);
+        promptQueueRef.tell(q -> enqueueTyped(q, text, model, emitter, chatSessionIIAR.asChatSessionRef(),
+                source, noThink, !hold, images));
+
+        return Response.ok(Map.of("type", "accepted")).build();
+    }
+
+    /**
+     * Queues a prompt typed into a conversation's pane, or sent to {@link #chat} by a program.
+     *
+     * @param auto {@code false} to hold it in the queue until the person turns its Auto on or advances the queue
+     */
+    static void enqueueTyped(PromptQueue queue, String text, String model, java.util.function.Consumer<ChatEvent> emitter,
+                             ActorRef<ChatSession> chatSessionRef, String source, boolean noThink, boolean auto,
+                             List<String> images) {
+        // The person's prompt is queued like any other: in arrival order, not in the urgent rank, so that
+        // a report from a subordinate that was waiting first is not held back. The person moves a prompt
+        // ahead by hand in the Queue panel. The urgent rank is left to ask_chat_urgent and to the messages
+        // that resume a paused turn (ConversationReportingLines_261108_oo01).
+        queue.enqueue(text, model, "queue", emitter, chatSessionRef, source, null, new CompletableFuture<TurnReply>(),
+                noThink, auto, images, null, false);
+    }
+
+    /** What the provider says should be shown for this command, or one error event. */
+    private List<ChatEvent> runProviderCommand(ChatSessionIIAR chatSessionIIAR, String text) {
+        try {
+            // A command of the CLI such as /compact is answered when the CLI has finished it, which
+            // takes as long as summarising the conversation does; this program's own commands
+            // answer at once.
+            return chatSessionIIAR.ask(a -> ((ChatSession) a).handleCommand(text)).get(10, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            LOG.log(java.util.logging.Level.WARNING, "Command '" + text + "' failed", e);
+            return List.of(ChatEvent.error("Command failed: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Returns one ConversationSquad's committed conversation history, for hydrating the left pane on load. Reads
+     * a safely-published snapshot directly ({@code BusyStateReadableSnapshot_260828_oo01}) instead
+     * of asking the ConversationSquad's actor — so this keeps working even while the ConversationSquad is busy (e.g. mid
+     * {@code ask_chat} wait), rather than queueing behind it and timing out.
+     *
+     * @param chatId ConversationSquad identifier
+     * @return up to the last 200 {@link ChatSession.HistoryEntry} records
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/conversation")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<ChatSession.HistoryEntry> conversation(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        return chatSessionIIAR.getHistorySnapshotDirect();
+    }
+
+    /**
+     * Starts this conversation over: the {@code ChatSession} drops the turns it would send as
+     * context, and its I/O-log session is ended so the next turn opens a new one
+     * ({@code SlashCommandsAndClearButton_260929_oo01}).
+     *
+     * <p>Nothing is deleted. The ended session stays in the log with all its turns and is read
+     * from the Sessions tab; only {@code Delete old} there removes one.</p>
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return {@code {"type":"cleared"}}
+     */
+    @DELETE
+    @Path("/{projectId}/chats/{chatId}/conversation")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response clearConversation(@PathParam("projectId") String projectId,
+                                      @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        try {
+            chatSessionIIAR.tell(a -> ((ChatSession) a).clearHistory()).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(java.util.logging.Level.WARNING, "Could not clear " + projectId + "/" + chatId, e);
+            return Response.status(500).entity(Map.of("type", "error", "message", e.getMessage())).build();
+        }
+        return Response.ok(Map.of("type", "cleared")).build();
+    }
+
+    /**
+     * The {@code messages} array this conversation's next request is built from, as a JSON array
+     * ({@code RequestMessagesControl_261018_oo01}). Not the screen's record: that is
+     * {@code /conversation}.
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/request-messages")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response requestMessages(@PathParam("projectId") String projectId,
+                                    @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        if (chatSessionIIAR.isBusyDirect()) {
+            return Response.status(409).entity(Map.of("type", "error",
+                    "message", "busy: the conversation is answering; try again when it has finished")).build();
+        }
+        try {
+            String json = chatSessionIIAR.ask(a -> ((ChatSession) a).requestMessagesJson())
+                    .get(10, TimeUnit.SECONDS);
+            if (json == null) {
+                return Response.status(409).entity(Map.of("type", "error",
+                        "message", "this conversation's provider keeps no request history")).build();
+            }
+            return Response.ok(json).build();
+        } catch (Exception e) {
+            LOG.log(java.util.logging.Level.WARNING, "Could not read request messages of " + projectId + "/" + chatId, e);
+            return Response.status(500).entity(Map.of("type", "error", "message", String.valueOf(e.getMessage()))).build();
+        }
+    }
+
+    /**
+     * Replaces the whole array this conversation's next request is built from. The body is a JSON
+     * array of {@code {"role","content"}}. Refused with 409 while the conversation is answering,
+     * and with 400 when the array is malformed or over the history budget.
+     */
+    @PUT
+    @Path("/{projectId}/chats/{chatId}/request-messages")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response replaceRequestMessages(@PathParam("projectId") String projectId,
+                                           @PathParam("chatId") String chatId, String body) {
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        if (chatSessionIIAR.isBusyDirect()) {
+            return Response.status(409).entity(Map.of("type", "error",
+                    "message", "busy: the conversation is answering; try again when it has finished")).build();
+        }
+        try {
+            String refused = chatSessionIIAR.ask(a -> ((ChatSession) a).replaceRequestMessages(body))
+                    .get(10, TimeUnit.SECONDS);
+            if (refused == null) return Response.ok(Map.of("type", "replaced")).build();
+            int status = refused.startsWith("busy:") ? 409 : 400;
+            return Response.status(status).entity(Map.of("type", "error", "message", refused)).build();
+        } catch (Exception e) {
+            LOG.log(java.util.logging.Level.WARNING, "Could not replace request messages of " + projectId + "/" + chatId, e);
+            return Response.status(500).entity(Map.of("type", "error", "message", String.valueOf(e.getMessage()))).build();
+        }
+    }
+
+    /**
+     * Calls the model once with exactly the given messages, outside this conversation
+     * ({@code RequestMessagesControl_261018_oo01}). The body is
+     * {@code {"messages":[{"role","content"}...], "model":"...", "noThink":true}}; {@code model}
+     * and {@code noThink} are optional. The conversation's history, settings and screen are not
+     * touched, and it is accepted while the conversation is answering.
+     *
+     * @return {@code {"reply":"...","model":"..."}}, 400 for a refused array, 502 when the model
+     *         call failed
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/complete-messages")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response completeMessages(@PathParam("projectId") String projectId,
+                                     @PathParam("chatId") String chatId, String body) {
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        org.json.JSONObject in;
+        try {
+            in = new org.json.JSONObject(body);
+        } catch (Exception e) {
+            return Response.status(400).entity(Map.of("type", "error", "message", "body is not a JSON object")).build();
+        }
+        if (!(in.opt("messages") instanceof org.json.JSONArray messages)) {
+            return Response.status(400).entity(Map.of("type", "error", "message", "messages must be an array")).build();
+        }
+        String model = in.has("model") && !in.isNull("model") ? in.getString("model") : null;
+        Boolean noThink = in.has("noThink") && !in.isNull("noThink") ? in.getBoolean("noThink") : null;
+        var reply = chatSessionIIAR.completeOneShotDirect(messages.toString(), model, noThink);
+        if (reply.error() == null) {
+            return Response.ok(Map.of("reply", reply.reply() == null ? "" : reply.reply(),
+                    "model", model == null ? String.valueOf(chatSessionIIAR.getModelDirect()) : model)).build();
+        }
+        int status = reply.requestBody() == null ? 400 : 502;
+        return Response.status(status).entity(Map.of("type", "error", "message", reply.error())).build();
+    }
+
+    /**
+     * Reports whether one ConversationSquad is currently busy processing a turn — read directly, so it works even
+     * while the ConversationSquad is busy ({@code BusyStateReadableSnapshot_260828_oo01}).
+     *
+     * <p>Also reports which model this ConversationSquad is on. The screen asks for both whenever it switches
+     * ConversationSquads, and one request answering both is why this is not an endpoint of its own
+     * ({@code ModelBelongsToTheConversation_260906_oo01}).</p>
+     *
+     * @param chatId ConversationSquad identifier
+     * @return {@code {"busy": true|false, "model": "..."}}; {@code model} is the empty string when
+     *         this ConversationSquad has not settled on one yet
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/status")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Map<String, Object> status(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        String model = chatSessionIIAR.getModelDirect();
+        Double temperature = actorSystem.getTemperature(projectId, chatId);
+        Map<String, Object> status = new java.util.LinkedHashMap<>();
+        status.put("busy", chatSessionIIAR.isBusyDirect());
+        status.put("model", model == null ? "" : model);
+        status.put("provider", chatSessionIIAR.getProviderIdDirect());
+        status.put("tools", chatSessionIIAR.getToolSetDirect());
+        status.put("noThink", chatSessionIIAR.isNoThinkDirect());
+        String effort = chatSessionIIAR.getEffortDirect();
+        if (effort != null) status.put("effort", effort);
+        // Absent rather than a made-up number when this conversation asks the server for nothing.
+        if (temperature != null) status.put("temperature", temperature);
+        return status;
+    }
+
+    /**
+     * What this conversation's timekeeper is watching now: its limits, the requests this conversation sent
+     * that have no reply yet, the promised reports waiting for their time, and whether an urgent item waits
+     * while a turn runs ({@code TimekeeperViewInTheActorTree_261115_oo01}). Read-only; it does not wait for a
+     * running turn.
+     *
+     * @param chatId ConversationSquad identifier
+     * @return the {@link Timekeeper.Watch} as JSON; 404 for no such conversation, 503 when the timekeeper did not answer
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/timekeeper")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response timekeeper(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        try {
+            Timekeeper.Watch watch = actorSystem.timekeeperWatch(projectId, chatId);
+            if (watch == null) {
+                return Response.status(404).entity(Map.of("type", "error", "message", "no timekeeper for "
+                        + ChatUiActorSystem.chatActorName(projectId, chatId))).build();
+            }
+            return Response.ok(watch).build();
+        } catch (IllegalStateException e) {
+            return Response.status(503).entity(Map.of("type", "error", "message", e.getMessage())).build();
+        }
+    }
+
+    /**
+     * Sets what this conversation asks the server to sample at
+     * ({@code ConversationTemperature_260914_oo01}). Like the model, it belongs to the conversation.
+     *
+     * @param projectId owning project's id
+     * @param chatId    ConversationSquad identifier
+     * @param body      {@code {"temperature": 0.2}}; {@code null} asks the server for nothing and
+     *                  leaves it on its own default
+     * @return {@code {"type": "accepted", "temperature": ...}}, or 400 when the value is not a
+     *         number between 0 and 2
+     */
+    /**
+     * Sets whether this conversation asks its model to skip the thinking phase
+     * ({@code ThinkingAndEffortAreConversationSettings_260917_oo01}). A setting of the conversation,
+     * as the model and the temperature are: a workflow's {@code ask_chat} carries a prompt and
+     * nothing else, so there is nowhere else to say it.
+     *
+     * @param body {@code {"noThink": true}}
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/no-think")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response noThink(@PathParam("projectId") String projectId,
+                            @PathParam("chatId") String chatId,
+                            Map<String, Object> body) {
+        Object given = body != null ? body.get("noThink") : null;
+        boolean value = Boolean.parseBoolean(String.valueOf(given));
+        if (!actorSystem.setNoThink(projectId, chatId, value)) {
+            return Response.status(404)
+                    .entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        return Response.ok(Map.of("type", "accepted", "noThink", value)).build();
+    }
+
+    /**
+     * Sets how hard this conversation's provider should work on one answer, where it has such a
+     * setting -- a harness passes it as {@code --effort}; a plain LLM ignores it
+     * ({@code ThinkingAndEffortAreConversationSettings_260917_oo01}).
+     *
+     * @param body {@code {"effort": "..."}}; an empty value leaves the harness's own default
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/effort")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response effort(@PathParam("projectId") String projectId,
+                           @PathParam("chatId") String chatId,
+                           Map<String, Object> body) {
+        Object given = body != null ? body.get("effort") : null;
+        String effort = given == null || String.valueOf(given).isBlank() ? null : String.valueOf(given);
+        if (!actorSystem.setEffort(projectId, chatId, effort)) {
+            return Response.status(404)
+                    .entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        Map<String, Object> answer = new java.util.LinkedHashMap<>();
+        answer.put("type", "accepted");
+        answer.put("effort", effort);
+        return Response.ok(answer).build();
+    }
+
+    @POST
+    @Path("/{projectId}/chats/{chatId}/temperature")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response temperature(@PathParam("projectId") String projectId,
+                                @PathParam("chatId") String chatId,
+                                Map<String, Object> body) {
+        Object given = body != null ? body.get("temperature") : null;
+        Double temperature = null;
+        if (given != null && !String.valueOf(given).isBlank()) {
+            try {
+                temperature = Double.valueOf(String.valueOf(given));
+            } catch (NumberFormatException e) {
+                return Response.status(400).entity(Map.of("type", "error",
+                        "message", "temperature must be a number: " + given)).build();
+            }
+            if (temperature < 0 || temperature > 2) {
+                return Response.status(400).entity(Map.of("type", "error",
+                        "message", "temperature must be between 0 and 2: " + temperature)).build();
+            }
+        }
+        if (!actorSystem.setTemperature(projectId, chatId, temperature)) {
+            return Response.status(404)
+                    .entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        Map<String, Object> answer = new java.util.LinkedHashMap<>();
+        answer.put("type", "accepted");
+        answer.put("temperature", temperature);
+        return Response.ok(answer).build();
+    }
+
+    /**
+     * Sets which provider kind this conversation talks to, and which tools it is given
+     * ({@code CliHarnessProvider_260912_oo01}). Like the model, the provider belongs to the
+     * conversation, and the server holds the value.
+     *
+     * @param projectId owning project's id
+     * @param chatId    ConversationSquad identifier
+     * @param body      {@code {"provider": "openai-compat"|"claude"|"codex", "tools": "full"|"harness"}};
+     *                  {@code tools} defaults to the kind's own default tool set
+     * @return {@code {"type": "accepted", "provider": ..., "tools": ...}}, or 400 when the kind or the
+     *         tool set is not one the server can give this conversation
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/provider")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response provider(@PathParam("projectId") String projectId,
+                             @PathParam("chatId") String chatId,
+                             Map<String, Object> body) {
+        Object kindVal = body != null ? body.get("provider") : null;
+        String kind = kindVal == null ? null : String.valueOf(kindVal).strip().toLowerCase();
+        if (kind == null || kind.isEmpty()) {
+            return Response.status(400)
+                    .entity(Map.of("type", "error", "message", "provider is required")).build();
+        }
+        requireChat(projectId, chatId);
+        Object toolsVal = body.get("tools");
+        // The kind's own default when none is named: the factory says which tool set its first
+        // dropdown entry carries (HarnessPrefaceAndToolSplit_260912_oo01).
+        String tools = toolsVal == null || String.valueOf(toolsVal).isBlank()
+                ? actorSystem.getPluginRegistry().factory(kind).map(f -> f.defaultToolSet().id()).orElse("full")
+                : String.valueOf(toolsVal);
+        try {
+            ToolSet toolSet = ToolSet.parse(tools);
+            actorSystem.setProvider(projectId, chatId, kind, toolSet);
+            return Response.ok(Map.of("type", "accepted", "provider", kind, "tools", toolSet.id())).build();
+        } catch (IllegalArgumentException e) {
+            return Response.status(400).entity(Map.of("type", "error", "message", e.getMessage())).build();
+        }
+    }
+
+    /**
+     * Sets which model this ConversationSquad runs on.
+     *
+     * <p>The model belongs to the conversation, not to the browser: two ConversationSquads open at once are two
+     * conversations that may be on different models, and switching between them must not carry one
+     * ConversationSquad's model into the other ({@code ModelBelongsToTheConversation_260906_oo01}).</p>
+     *
+     * <p>Delivered to the provider's own actor, so a change made while a turn is running lands
+     * after that turn rather than in the middle of it.</p>
+     *
+     * @param projectId owning project's id
+     * @param chatId    ConversationSquad identifier
+     * @param body      {@code {"model": "..."}}
+     * @return {@code {"type": "accepted"}}, or 400 when no model was named
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/model")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response model(@PathParam("projectId") String projectId,
+                          @PathParam("chatId") String chatId,
+                          Map<String, Object> body) {
+        Object modelVal = body != null ? body.get("model") : null;
+        String model = modelVal == null ? null : String.valueOf(modelVal).strip();
+        if (model == null || model.isEmpty()) {
+            return Response.status(400)
+                    .entity(Map.of("type", "error", "message", "model is required")).build();
+        }
+        // Recorded with the conversation's provider and tool set, so a restart puts the
+        // conversation back on this model (ConversationSettingsRecord_260913_oo01).
+        if (!actorSystem.setModel(projectId, chatId, model)) {
+            return Response.status(404)
+                    .entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        return Response.ok(Map.of("type", "accepted")).build();
+    }
+
+    /**
+     * Reports one ConversationSquad's {@link PromptQueue} state, for the left pane's Queue indicator — this
+     * project queues on the server (whenever {@code ChatSession} is busy), unlike
+     * {@code quarkus-chat-ui3}'s client-side-only draft queue.
+     *
+     * @param chatId ConversationSquad identifier
+     * @return {@code {"size": N, "hasPending": bool}}
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/queue")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Map<String, Object> queue(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        ActorRef<PromptQueue> promptQueueRef = actorSystem.getPromptQueue(projectId, chatId);
+        try {
+            List<PromptQueue.QueueEntry> items = promptQueueRef.ask(PromptQueue::snapshot).get(5, TimeUnit.SECONDS);
+            // The already-sent items and their count come with the pending ones, so the browser
+            // can draw the position-based checklist quarkus-chat-ui draws
+            // (QueueChecklistView_260913_oo01).
+            List<PromptQueue.QueueEntry> sent = promptQueueRef.ask(PromptQueue::sentSnapshot).get(5, TimeUnit.SECONDS);
+            return Map.of("size", items.size(), "hasPending", !items.isEmpty(), "items", items,
+                          "sent", sent, "pos", sent.size());
+        } catch (Exception e) {
+            LOG.warning("Failed to read queue state for ConversationSquad " + chatId + ": " + e.getMessage());
+            return Map.of("size", 0, "hasPending", false, "items", List.of(), "sent", List.of(), "pos", 0);
+        }
+    }
+
+    /**
+     * Returns one tab's recent log entries (the right-pane "System Log" tab, scoped to the
+     * currently active tab — {@code 150_TabScopedLogging_260826_oo01}).
+     *
+     * @param chatId ConversationSquad identifier
+     * @return recent entries from that ConversationSquad's log multiplexer, oldest first; empty if the ConversationSquad
+     *         doesn't exist yet (no messages sent, nothing logged)
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/log")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<RecentEntriesAccumulator.Entry> conversationSquadLog(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        List<RecentEntriesAccumulator.Entry> entries = actorSystem.getChatLogEntries(projectId, chatId);
+        return entries != null ? entries : List.of();
+    }
+
+    /**
+     * Removes the queued item at {@code index}, regardless of who queued it —
+     * {@code QueueContentsEditing_260826_oo01} applies deletion to every source, not just
+     * human-typed items.
+     *
+     * @param chatId ConversationSquad identifier
+     * @param index position in the queue (0 = next to send)
+     */
+    /**
+     * Strikes one already-sent item off the conversation's checklist
+     * ({@code QueueChecklistView_260913_oo01}). Only the list changes; what was sent was sent.
+     *
+     * @param index position in the {@code sent} list {@code GET .../queue} returned
+     */
+    @DELETE
+    @Path("/{projectId}/chats/{chatId}/queue/sent/{index}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response removeSentItem(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
+                                   @PathParam("index") int index) {
+        requireChat(projectId, chatId);
+        ActorRef<PromptQueue> promptQueueRef = actorSystem.getPromptQueue(projectId, chatId);
+        try {
+            boolean removed = promptQueueRef.ask(q -> q.removeSentAt(index)).get(5, TimeUnit.SECONDS);
+            return removed ? Response.ok(Map.of("type", "removed")).build() : Response.status(404).build();
+        } catch (Exception e) {
+            return Response.status(500).entity(Map.of("type", "error", "message", e.getMessage())).build();
+        }
+    }
+
+    @DELETE
+    @Path("/{projectId}/chats/{chatId}/queue/{index}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response removeQueueItem(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId, @PathParam("index") int index) {
+        ActorRef<PromptQueue> promptQueueRef = actorSystem.getPromptQueue(projectId, chatId);
+        if (promptQueueRef == null) return Response.status(404).build();
+        try {
+            boolean removed = promptQueueRef.ask(q -> q.removeAt(index)).get(5, TimeUnit.SECONDS);
+            return removed ? Response.ok(Map.of("type", "removed")).build() : Response.status(404).build();
+        } catch (Exception e) {
+            LOG.warning("Failed to remove queue item " + index + " for ConversationSquad " + chatId + ": " + e.getMessage());
+            return Response.status(500).build();
+        }
+    }
+
+    /**
+     * Swaps the queued item at {@code index} with its neighbor.
+     *
+     * @param chatId ConversationSquad identifier
+     * @param index position in the queue
+     * @param body  {@code {"direction": "up"|"down"|"top"}}; "top" moves the item to the front, to be sent next
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/queue/{index}/move")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response moveQueueItem(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId, @PathParam("index") int index,
+                                   Map<String, Object> body) {
+        ActorRef<PromptQueue> promptQueueRef = actorSystem.getPromptQueue(projectId, chatId);
+        if (promptQueueRef == null) return Response.status(404).build();
+        Object said = body != null ? body.get("direction") : null;
+        try {
+            boolean moved = "top".equals(said)
+                    ? promptQueueRef.ask(q -> q.moveToFront(index)).get(5, TimeUnit.SECONDS)
+                    : promptQueueRef.ask(q -> q.moveInQueue(index, "down".equals(said) ? 1 : -1)).get(5, TimeUnit.SECONDS);
+            return moved ? Response.ok(Map.of("type", "moved")).build() : Response.status(409).build();
+        } catch (Exception e) {
+            LOG.warning("Failed to move queue item " + index + " for ConversationSquad " + chatId + ": " + e.getMessage());
+            return Response.status(500).build();
+        }
+    }
+
+    /**
+     * Sets whether the queued item at {@code index} auto-dispatches once it's at the front and
+     * {@code ChatSession} is idle, or waits as a manual checkpoint until {@link #advanceQueue}.
+     *
+     * @param chatId ConversationSquad identifier
+     * @param index position in the queue
+     * @param body  {@code {"auto": true|false}}
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/queue/{index}/auto")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response setQueueItemAuto(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId, @PathParam("index") int index,
+                                      Map<String, Object> body) {
+        ActorRef<PromptQueue> promptQueueRef = actorSystem.getPromptQueue(projectId, chatId);
+        if (promptQueueRef == null) return Response.status(404).build();
+        boolean auto = !Boolean.FALSE.equals(body != null ? body.get("auto") : null);
+        try {
+            boolean set = promptQueueRef.ask(q -> q.setAuto(index, auto)).get(5, TimeUnit.SECONDS);
+            return set ? Response.ok(Map.of("type", "updated")).build() : Response.status(404).build();
+        } catch (Exception e) {
+            LOG.warning("Failed to set auto for queue item " + index + " for ConversationSquad " + chatId + ": " + e.getMessage());
+            return Response.status(500).build();
+        }
+    }
+
+    /**
+     * Dispatches the queue's front item immediately, ignoring its {@code auto} flag — the
+     * browser's manual "send the next one" action (empty-input Send), or the explicit resume
+     * after pausing an item via {@link #setQueueItemAuto}.
+     *
+     * @param chatId ConversationSquad identifier
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/queue/advance")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response advanceQueue(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        ActorRef<PromptQueue> promptQueueRef = actorSystem.getPromptQueue(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        if (promptQueueRef == null || chatSessionIIAR == null) return Response.status(404).build();
+        promptQueueRef.tell(q -> q.advance(chatSessionIIAR.asChatSessionRef()));
+        return Response.ok(Map.of("type", "accepted")).build();
+    }
+
+    /**
+     * Lists the models available from one ConversationSquad's provider.
+     *
+     * @param chatId ConversationSquad identifier
+     * @return the provider's {@link LlmProvider.ModelEntry} list
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/models")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<LlmProvider.ModelEntry> models(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        try {
+            return chatSessionIIAR.ask(interp -> ((ChatSession) interp).getAvailableModels()).get(5, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            LOG.warning("Failed to list models for ConversationSquad " + chatId + ": timed out after 5 s");
+            noteTimeout(projectId, chatId, chatSessionIIAR);
+            return List.of();
+        } catch (Exception e) {
+            LOG.warning("Failed to list models for ConversationSquad " + chatId + ": " + e.getMessage());
+            return List.of();
+        }
+    }
+
+    // ── Agent Loop tab (read-only workflow YAML viewer, tab-scoped) ─────────────
+
+    /** One entry in a ConversationSquad's workflow catalog. {@code name} is the classpath basename (no {@code .yaml}). */
+    public record WorkflowInfo(String name, String title) {}
+
+    /**
+     * Lists the workflow YAML files configured for one ConversationSquad: its agent-loop workflow ({@code
+     * ChatSessionIIAR.agentLoopWorkflowFile}) and its prompt-construction sub-workflow ({@code
+     * ChatSession.promptWorkflowFile}) — each ConversationSquad can be configured independently (today both
+     * default to the same file since only one of each exists on the classpath).
+     *
+     * @param chatId ConversationSquad identifier
+     * @return this ConversationSquad's workflow catalog, agent loop first
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/workflows")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<WorkflowInfo> workflows(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        String agentLoopFile = chatSessionIIAR.getAgentLoopWorkflowFile();
+        String promptFile;
+        try {
+            promptFile = chatSessionIIAR.ask(interp -> ((ChatSession) interp).getPromptWorkflowFile())
+                    .get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.warning("Failed to read prompt workflow file for ConversationSquad " + chatId + ": " + e.getMessage());
+            promptFile = null;
+        }
+        List<WorkflowInfo> catalog = new java.util.ArrayList<>();
+        catalog.add(new WorkflowInfo(stripYamlExt(agentLoopFile), "Agent Loop"));
+        if (promptFile != null) {
+            catalog.add(new WorkflowInfo(stripYamlExt(promptFile), "Prompt Construction"));
+        }
+        return catalog;
+    }
+
+    /**
+     * Lists the agent loops this conversation can be put on, and says which it is on now. Choosing
+     * one is {@code POST .../agent-loop-workflow}. Each loop names the prompt construction it uses
+     * ({@code AgentLoopDecidesThePrompt_261020_oo01}).
+     *
+     * @param chatId ConversationSquad identifier
+     * @return the loops, by file name, with {@code current} set on the one in use
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/agent-loops")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<AgentLoopCatalog.Loop> agentLoops(@PathParam("projectId") String projectId,
+                                                  @PathParam("chatId") String chatId) {
+        requireChat(projectId, chatId);
+        return AgentLoopCatalog.list(actorSystem.getChatSession(projectId, chatId).getAgentLoopWorkflowFile());
+    }
+
+    /**
+     * Returns one workflow's read-only YAML, read fresh from the classpath (so it always reflects
+     * the file actually bundled in this build — no per-ConversationSquad in-memory copy).
+     *
+     * @param chatId ConversationSquad identifier (unused beyond confirming the ConversationSquad exists — the YAML
+     *              itself is a classpath resource, not per-ConversationSquad state)
+     * @param name  the workflow's classpath basename, as returned by {@link #workflows}
+     * @return {@code {"name": ..., "yaml": ..., "editable": false}}, or 404 if not found
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/workflows/{name}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response workflowYaml(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId, @PathParam("name") String name) {
+        String resource = "/workflows/" + name + ".yaml";
+        try (java.io.InputStream in = getClass().getResourceAsStream(resource)) {
+            if (in == null) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity(Map.of("error", "unknown workflow: " + name)).build();
+            }
+            String yaml = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            return Response.ok(Map.of("name", name, "yaml", yaml, "editable", false)).build();
+        } catch (Exception e) {
+            LOG.warning("Failed to read workflow " + name + ": " + e.getMessage());
+            return Response.status(500).entity(Map.of("error", "read failed")).build();
+        }
+    }
+
+    private static String stripYamlExt(String fileName) {
+        return fileName.endsWith(".yaml") ? fileName.substring(0, fileName.length() - 5) : fileName;
+    }
+
+    // ── Tab list (browser tab switcher) ─────────────────────────────────────────
+
+    /**
+     * Lists the ids of one project's conversations, for the browser's switcher.
+     *
+     * @param projectId owning project's id
+     * @return conversation ids within that project, sorted for a stable display order
+     */
+    @GET
+    @Path("/{projectId}/chats")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<String> chats(@PathParam("projectId") String projectId) {
+        String prefix = projectId + "/chat-";
+        return actorSystem.getChatNames().stream()
+                .filter(name -> name.startsWith(prefix))
+                .map(name -> name.substring(prefix.length()))
+                .sorted()
+                .toList();
+    }
+
+    /**
+     * Deletes one conversation ({@code ConversationDeletion_261011_oo01}). Its session stays in the
+     * I/O log; the conversation does not come back on restart.
+     *
+     * @return {@code {"deleted": "<project>/chat-<id>"}}; 400 for project1's chat-01 or the project's
+     *         last conversation, 404 for no such conversation, 409 when it is answering, holds queued
+     *         prompts or has conversations under it — with the reason, and nothing changed
+     */
+    @DELETE
+    @Path("/{projectId}/chats/{chatId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteChat(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        ChatUiActorSystem.ChatDeletion outcome = actorSystem.deleteChat(projectId, chatId);
+        int status = switch (outcome.kind()) {
+            case DELETED -> 200;
+            case DEFAULT_CHAT, LAST_CHAT -> 400;
+            case UNKNOWN -> 404;
+            case BUSY, HAS_NESTED -> 409;
+        };
+        if (status == 200) {
+            return Response.ok(Map.of("deleted", ChatUiActorSystem.chatActorName(projectId, chatId))).build();
+        }
+        return Response.status(status).entity(Map.of("type", "error", "message", outcome.reason())).build();
+    }
+
+    /**
+     * Ends a request for a conversation that does not exist with 404. A conversation is made only
+     * by {@code POST .../chats} and {@code POST .../chats/{chatId}}: a request that merely names one
+     * must not create it, or a stale id kept by a browser, a script or a typo makes a new empty
+     * conversation and the caller never learns the one it meant is gone.
+     */
+    private void requireChat(String projectId, String chatId) {
+        if (!actorSystem.hasChat(projectId, chatId)) {
+            throw new WebApplicationException(Response.status(404).type(MediaType.APPLICATION_JSON)
+                    .entity(Map.of("type", "error", "message", "no such conversation: "
+                            + ChatUiActorSystem.chatActorName(projectId, chatId)
+                            + " (create one with POST /api/projects/" + projectId + "/chats)"))
+                    .build());
+        }
+    }
+
+    /**
+     * A conversation's external MCP servers ({@code ExternalMcpServersOfAConversation_261120_oo01}).
+     *
+     * @return {@code {"servers": {name: url, ...}}}, or 404 for no such conversation
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/mcp-servers")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response mcpServers(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        Map<String, String> servers = actorSystem.mcpServersOf(
+                com.scivicslab.chatui.core.actor.ChatUiActorSystem.chatActorName(projectId, chatId));
+        if (servers == null) {
+            return Response.status(404).entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        return Response.ok(Map.of("servers", servers)).build();
+    }
+
+    /**
+     * Replaces a conversation's external MCP servers with {@code servers} of the body, a JSON object from server name
+     * to URL; {@code {}} removes them all ({@code ExternalMcpServersOfAConversation_261120_oo01}).
+     *
+     * @return {@code {"type": "ok", "message": ...}}, or 400 with nothing changed
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/mcp-servers")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response setMcpServers(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
+                                  Map<String, Object> body) {
+        Object servers = body == null ? null : body.get("servers");
+        if (!(servers instanceof Map<?, ?> m)) {
+            return Response.status(400).entity(Map.of("type", "error",
+                    "message", "servers is required: a JSON object from server name to URL, {} for none")).build();
+        }
+        String json = new org.json.JSONObject(m).toString();
+        String result = actorSystem.setMcpServers(projectId, chatId, json);
+        if (result.startsWith("error: ")) {
+            return Response.status(400).entity(Map.of("type", "error", "message", result.substring(7))).build();
+        }
+        return Response.ok(Map.of("type", "ok", "message", result.substring(4))).build();
+    }
+
+    /**
+     * Creates the conversation with the id the caller names, or leaves it as it is when it exists.
+     * For a caller that needs a particular id; {@code POST .../chats} allocates one.
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return {@code {"type": "created"}}
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response createChat(@PathParam("projectId") String projectId,
+                               @PathParam("chatId") String chatId,
+                               @jakarta.ws.rs.QueryParam("under") String under) {
+        try {
+            actorSystem.createChat(projectId, chatId, under);
+        } catch (IllegalArgumentException e) {
+            return Response.status(400).entity(Map.of("type", "error", "message", e.getMessage())).build();
+        }
+        return Response.ok(Map.of("type", "created")).build();
+    }
+}

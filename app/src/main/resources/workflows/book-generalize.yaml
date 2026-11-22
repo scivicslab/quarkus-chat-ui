@@ -1,0 +1,130 @@
+name: book-generalize
+description: |
+  Makes the generalized frames, after book-frame-items.yaml (FrameOntology_261021_oo01), in a registry kept across books
+  and runs. Place: the registry starts empty (sections "reset" empties it); each concrete frame of the book, in the
+  book's order, is matched against the generalized frames already made, and put into the one that explains the same
+  kind of subject, or starts a new one with a new id. Each new id has the is-a tree looked at again around it: whether
+  the new frame is a kind of one already made, or ones already made are kinds of it. Relate: the relations the sections
+  found between their concepts (part-of, feature, operation, other) are given to the generalized frames, the network
+  beside the is-a tree. Name: a generalized frame with several concrete frames is named from all of them. Items: such a frame is asked the same question as a
+  concrete frame over their material put together. The Integrated frames tab shows the is-a tree, each frame's
+  relations, its frame and its material. The work is done by the books actor of plugin-rst-frame.
+params:
+  name:
+    label: "The book's name"
+    description: "The name book-toc.yaml stored the book under, e.g. core-java-14-vol1"
+    type: text
+    required: true
+  db:
+    label: "The database"
+    description: "Absolute path of the H2 database file, without .mv.db"
+    type: text
+    default: "/home/devteam/works/rst-on-lisp/db/books"
+  url:
+    label: "The chat endpoint"
+    description: "An OpenAI-compatible /v1/chat/completions; the GPU broker spreads the questions over its nodes"
+    type: text
+    default: "http://192.168.5.21:30805/v1/chat/completions"
+  model:
+    label: "The model"
+    description: "A model the endpoint serves (GET /v1/models on the broker lists them)"
+    type: text
+    default: "google/gemma-4-26B-A4B-it"
+  parallel:
+    description: "How many sections are asked at once"
+    type: int
+    default: 8
+steps:
+  - states: ["0", "1"]
+    label: build-actor-tree
+    note: The books actor (plugin-rst-frame) does the work; it is created here and removed at the end.
+    actions:
+      - actor: loader
+        method: createChild
+        arguments: ['jexl:self', "./books", "com.scivicslab.turingworkflow.plugins.rstframe.BookStructureIIAR"]
+
+  - states: ["1", "2"]
+    label: place-the-concrete-frames
+    note: Each concrete frame not placed yet is matched against the registry, one at a time; the registry grows.
+    actions:
+      - actor: ./books
+        method: place
+        arguments: {db: 'jexl:state.getString("db")', name: 'jexl:state.getString("name")', url: 'jexl:state.getString("url")', model: 'jexl:state.getString("model")', parallel: 'jexl:state.getString("parallel")', sections: ""}
+      - actor: this
+        method: putJson
+        arguments: {path: placed, value: "jexl:result"}
+        execution: direct
+
+  - states: ["2", "3"]
+    label: relate-the-frames
+    note: The sections' relations between their concepts become relations between generalized frames.
+    actions:
+      - actor: ./books
+        method: relate
+        arguments: {db: 'jexl:state.getString("db")', name: 'jexl:state.getString("name")', url: 'jexl:state.getString("url")', model: 'jexl:state.getString("model")', parallel: 'jexl:state.getString("parallel")', sections: ""}
+      - actor: this
+        method: putJson
+        arguments: {path: related, value: "jexl:result"}
+        execution: direct
+
+  - states: ["3", "4"]
+    label: name-the-frames
+    note: Each generalized frame with several concrete frames is named from all of them; while frames are placed, names stay.
+    actions:
+      - actor: ./books
+        method: frame-names
+        arguments: {db: 'jexl:state.getString("db")', name: 'jexl:state.getString("name")', url: 'jexl:state.getString("url")', model: 'jexl:state.getString("model")', parallel: 'jexl:state.getString("parallel")', sections: ""}
+      - actor: this
+        method: putJson
+        arguments: {path: named, value: "jexl:result"}
+        execution: direct
+
+  - states: ["4", "5"]
+    label: ask-the-frames-items
+    note: Each generalized frame with several concrete frames is asked its items over their material put together.
+    actions:
+      - actor: ./books
+        method: frame-items
+        arguments: {db: 'jexl:state.getString("db")', name: 'jexl:state.getString("name")', url: 'jexl:state.getString("url")', model: 'jexl:state.getString("model")', parallel: 'jexl:state.getString("parallel")', sections: ""}
+      - actor: this
+        method: putJson
+        arguments: {path: outcome, value: 'jexl:state.getString("placed") + "; " + state.getString("related") + "; " + state.getString("named") + "; " + result'}
+        execution: direct
+
+  - states: ["1", "failed"]
+    label: could-not-place
+    actions: [{actor: this, method: doNothing, arguments: ["the book is not in the database, or the model could not be reached"], execution: direct}]
+
+  - states: ["2", "failed"]
+    label: could-not-relate
+    actions: [{actor: this, method: doNothing, arguments: ["the frames could not be related"], execution: direct}]
+
+  - states: ["3", "failed"]
+    label: could-not-name
+    actions: [{actor: this, method: doNothing, arguments: ["the frames could not be named"], execution: direct}]
+
+  - states: ["4", "failed"]
+    label: could-not-ask-items
+    actions: [{actor: this, method: doNothing, arguments: ["the items of the frames could not be asked"], execution: direct}]
+
+  - states: ["5", "end"]
+    label: tear-down-actor-tree
+    actions:
+      - actor: loader
+        method: removeChild
+        arguments: ['jexl:self', "./books"]
+      - actor: this
+        method: finish
+        arguments: ["outcome"]
+        execution: direct
+
+  - states: ["failed", "end"]
+    label: report-failure
+    actions:
+      - actor: loader
+        method: removeChild
+        arguments: ['jexl:self', "./books"]
+      - actor: this
+        method: reportFailure
+        arguments: []
+        execution: direct

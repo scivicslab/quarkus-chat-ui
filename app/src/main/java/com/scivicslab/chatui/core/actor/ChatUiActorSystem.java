@@ -1,0 +1,2657 @@
+package com.scivicslab.chatui.core.actor;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.scivicslab.chatui.agent.FileAccessScope;
+import com.scivicslab.chatui.agent.ToolSet;
+import com.scivicslab.chatui.core.iolog.IoLogHistory;
+import com.scivicslab.chatui.core.iolog.IoLogStore;
+import com.scivicslab.chatui.core.plugin.OpenAiCompatProviderFactory;
+import com.scivicslab.chatui.core.plugin.PluginRegistry;
+import com.scivicslab.chatui.plugin.LlmProviderFactory;
+import com.scivicslab.chatui.plugin.ProviderCreationContext;
+import com.scivicslab.chatui.core.iolog.IoLogView;
+import com.scivicslab.chatui.core.provider.LlmProvider;
+import com.scivicslab.chatui.logging.ForwardingAccumulator;
+import com.scivicslab.chatui.logging.RecentEntriesAccumulator;
+import com.scivicslab.chatui.openaicompat.OpenAiCompatProvider;
+import com.scivicslab.chatui.translation.TranslationLanguages;
+import com.scivicslab.chatui.translation.TranslationPrompt;
+import com.scivicslab.pojoactor.core.ActorRef;
+import com.scivicslab.turingworkflow.plugins.logoutput.MultiplexerAccumulator;
+import com.scivicslab.turingworkflow.plugins.logoutput.MultiplexerAccumulatorActor;
+import com.scivicslab.turingworkflow.plugins.logoutput.MultiplexerLogHandler;
+import com.scivicslab.turingworkflow.plugins.promptbuilder.PromptBuilderActor;
+import com.scivicslab.turingworkflow.workflow.IIActorRef;
+import com.scivicslab.turingworkflow.workflow.IIActorSystem;
+import com.scivicslab.pojoactor.action.schema.ActionCatalog;
+import com.scivicslab.pojoactor.action.schema.ActionSchemaRegistry;
+import com.scivicslab.turingworkflow.workflow.RootIIAR;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import jakarta.enterprise.context.ApplicationScoped;
+import io.quarkus.runtime.Startup;
+import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * Actor-system holder for {@code chat-ui-with-audit-trail}.
+ *
+ * <p>Builds one {@link IIActorSystem} whose auto-created {@link RootIIAR} carries a
+ * {@link ConversationSquad} per open conversation, and exposes the tree through
+ * {@link #getActorTree()} for the Actors tab.</p>
+ *
+ * <p>Each {@link ConversationSquad} owns one {@link ChatSessionIIAR} (wrapping a
+ * {@link ChatSession}) and one {@link PromptQueue}, wired per
+ * {@code ChatSessionIIAR_260810_oo01} "ConversationSquad への接続" — stage 1: no agent loop,
+ * no StallMonitor, {@code openai-compat} only (see {@code ChatSessionPorting_260823_oo01}).</p>
+ *
+ * <p>Built eagerly rather than on first use, so the recorded conversations are reopened and the
+ * activity watcher runs from start-up, not from the first time someone opens the Web UI.</p>
+ */
+@Startup
+@ApplicationScoped
+public class ChatUiActorSystem implements ConversationControls {
+
+    private static final Logger LOG = Logger.getLogger(ChatUiActorSystem.class.getName());
+
+    // Field initializers (not just @ConfigProperty defaultValue) so plain `new ChatUiActorSystem()`
+    // in a pure unit test — no CDI container, per this project's testing policy — still has usable
+    // values; CDI overwrites these when the bean is actually managed.
+    @ConfigProperty(name = "chat-ui.servers")
+    List<String> servers = List.of("http://localhost:8000");
+
+    @ConfigProperty(name = "chat-ui.default-model", defaultValue = "default")
+    String defaultModel = "default";
+
+    // Optional, not a defaultValue: an unset property and an empty one must both mean "use the
+    // built-in default" (see the Quarkus empty-string trap). Adding a root here grants whoever can
+    // write files there the power to change how every conversation behaves, so the list is a
+    // deliberate configuration act rather than something discovered at runtime
+    // (SkillAndAgentsFile_260830_oo01 "スキル置き場を足すことは権限を与えることである").
+    @ConfigProperty(name = "chat-ui.skill-roots")
+    Optional<List<String>> skillRoots = Optional.empty();
+
+    // The range of the file system a conversation's read/write may touch
+    // (FileAccessScope_260830_oo01). Unset means what this system did before the range became
+    // configurable: both confined to the directory the process was started in.
+    @ConfigProperty(name = "chat-ui.write-root")
+    Optional<String> writeRoot = Optional.empty();
+
+    @ConfigProperty(name = "chat-ui.read-roots")
+    Optional<List<String>> readRoots = Optional.empty();
+
+    // Ceiling on what a workflow may ask to keep of one tool observation
+    // (TurnResourceLimits_260830_oo01). Derived from the convention that this system's models have
+    // at least a 128K-token context: 128K tokens is 256K characters at ContextBudget's
+    // conservative 2.0 chars/token, half of that is a turn's share, and a turn holds at most its
+    // own step limit's worth of raw observations because finished turns are collapsed to their
+    // question and answer.
+    @ConfigProperty(name = "chat-ui.max-observation-chars", defaultValue = "20000")
+    int maxObservationChars = 20000;
+
+    /** Registry name of the actor that answers what may be called here. */
+    static final String ACTION_CATALOG = "actionCatalog";
+
+    /** This application's own HTTP port, part of the per-instance files a provider keeps. */
+    @ConfigProperty(name = "quarkus.http.port", defaultValue = "8080")
+    int httpPort = 8080;
+
+    /**
+     * Plugin jars to load at start-up ({@code ProviderAndToolPlugins_260912_oo01}), comma-separated
+     * paths. Unset means the body alone: only the {@code openai-compat} kind and the built-in tools,
+     * and no code that reaches beyond the configured local servers.
+     */
+    @ConfigProperty(name = "chat-ui.plugins")
+    Optional<List<String>> pluginJars = Optional.empty();
+
+    /**
+     * Turing Workflow plugins a job's workflow may load ({@code WorkflowPluginLoader_260913_oo01}),
+     * as Maven coordinates or jar paths. Unset means no {@code loader} actor exists at all, so a
+     * workflow has no way to bring in code this instance was not started with.
+     */
+    @ConfigProperty(name = "chat-ui.workflow-plugins")
+    Optional<List<String>> workflowPlugins = Optional.empty();
+
+    @Inject
+    IoLogStore ioLogStore;
+
+    @Inject
+    IoLogView ioLogView;
+
+    @Inject
+    com.scivicslab.chatui.audittrail.ActivityWork activityWork;
+
+    /**
+     * How many recorded turns a restarted conversation gets back. The pane's own limit
+     * ({@code ChatSession.MAX_HISTORY}) and the provider's token budget both still apply on top,
+     * so this only bounds how much is read from the DB.
+     */
+    private static final int RESTORED_TURNS = 50;
+
+    // Field initializer for the no-CDI unit-test path (see the servers/defaultModel comment above).
+    ObjectMapper objectMapper = new ObjectMapper();
+
+    /** Name of the system-wide log multiplexer actor — fixed, per {@code MultiplexerLogHandler}'s
+     *  hardcoded lookup name. */
+    static final String SYSTEM_LOG_ACTOR = "outputMultiplexer";
+    private static final int SYSTEM_LOG_CAPACITY = 500;
+    private static final int TAB_LOG_CAPACITY = 200;
+
+    /**
+     * Name of the log multiplexer actor for calls relayed through {@code POST /v1/chat/completions}
+     * ({@code ArtexProxyResource}) — one external OpenAI-compatible caller (ARTEX) driving its own
+     * agent loop, not a {@link ConversationSquad} of this application's own agent loop. Built once
+     * at start-up, under {@link #HOUSEKEEPER}, the same shape as {@link #SYSTEM_LOG_ACTOR}.
+     */
+    static final String EXTERNAL_PROXY_LOG_ACTOR = "externalProxy.log";
+    private static final int EXTERNAL_PROXY_LOG_CAPACITY = 500;
+    /**
+     * Prefix for an external caller's I/O log session name, distinguishing it from a
+     * {@link Project} batch job's own session — both use {@link IoLogStore#ensureJobSession}, so
+     * both carry its {@code chat-ui-job-} prefix, and without a further marker the two would be
+     * indistinguishable by {@code workflowName} alone (console.js filters on this exact prefix to
+     * find only the former).
+     */
+    public static final String EXTERNAL_PROXY_SESSION_PREFIX = "externalProxy:";
+
+    /** Project id of the project created at startup ({@code Terminology_260829_oo01}). */
+    public static final String DEFAULT_PROJECT_ID = "project1";
+
+    private IIActorSystem actorSystem;
+    /** Keyed by qualified chat name ({@code project1/chat-01}), the same string used in the registry. */
+    private final Map<String, ActorRef<ConversationSquad>> chats = new ConcurrentHashMap<>();
+    private final Map<String, ChatSessionIIAR> chatSessions = new ConcurrentHashMap<>();
+    /** Each conversation's latest tool runner, for chat-ui's MCP server ({@code ToolCatalogAndChatUiMcpServer_261120_oo01}). */
+    private final Map<String, ConversationToolRunner> toolRunners = new ConcurrentHashMap<>();
+    private RecentEntriesAccumulator systemLogBuffer;
+    private final Map<String, RecentEntriesAccumulator> chatLogBuffers = new ConcurrentHashMap<>();
+    private RecentEntriesAccumulator externalProxyLogBuffer;
+    /** Per-caller sequential turn number for {@link #recordExternalCall}, so each call gets its
+     *  own {@code turnN/step1/llm} label (one process's lifetime; restarts start over at 1). */
+    private final Map<String, java.util.concurrent.atomic.AtomicInteger> externalCallTurnCounters =
+            new ConcurrentHashMap<>();
+
+    /** Name of the branch holding the actors that exist once regardless of the work. */
+    public static final String HOUSEKEEPER = "housekeeper";
+
+    private ActorRef<Housekeeper> housekeeperRef;
+    private ActorRef<AutonomousTurnWatcher> autonomousTurnWatcherRef;
+    private ActorRef<TimekeeperTicker> timekeeperTickerRef;
+    private ActorRef<CallWatchdog> callWatchdogRef;
+    private ActorRef<SkillRegistry> skillRegistryRef;
+    private ActorRef<com.scivicslab.chatui.audittrail.ActivityWatcher> activityWatcherRef;
+    private FileAccessScope fileScope;
+    private PluginRegistry pluginRegistry;
+    /**
+     * Provider kinds given before {@link #init} without a plugin jar, registered beside the jars' kinds, so that a
+     * restart's restore finds them. Empty in the application; a test that restarts a system on a provider of its
+     * own puts its factory here.
+     */
+    final List<com.scivicslab.chatui.plugin.LlmProviderFactory> extraProviderFactories = new ArrayList<>();
+
+    /** One {@link Project} grouping actor per project id. Purely an actor-tree grouping plus a
+     *  naming prefix: a project is not a behavioral boundary
+     *  ({@code ProjectScopedActorTree_260829_oo01}, {@code ProjectNamespacePrefix_260829_oo01}). */
+    private final Map<String, ActorRef<Project>> projects = new ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicInteger nextProjectNumber =
+            new java.util.concurrent.atomic.AtomicInteger(2);
+
+    /**
+     * The registry name of a conversation's {@link ConversationSquad} actor: the project id, a
+     * {@code /}, then {@code chat-} and the chat id ({@code Terminology_260829_oo01} "アクター名").
+     *
+     * @param projectId the owning project's id, e.g. {@code "project1"}
+     * @param chatId    the conversation's id within that project, e.g. {@code "01"}
+     * @return e.g. {@code "project1/chat-01"}
+     */
+    public static String chatActorName(String projectId, String chatId) {
+        return projectId + "/" + CHAT_PREFIX + chatId;
+    }
+
+    /**
+     * The name of one conversation's ChatSession bridge.
+     *
+     * <p>The ChatSession is a child of the ConversationSquad, not the ConversationSquad itself, so its name is the
+     * conversation's with {@code .chat} on the end. Anything registered under the ChatSession — the
+     * provider, the prompt builder — is named from this, not from the conversation.</p>
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return the ChatSession actor's name
+     */
+    public static String chatSessionActorName(String projectId, String chatId) {
+        return chatActorName(projectId, chatId) + CHAT_SESSION_SUFFIX;
+    }
+
+    /** What a ChatSession's name adds to its conversation's. */
+    static final String CHAT_SESSION_SUFFIX = ".chat";
+
+    /** What a conversation's name puts before its id. */
+    private static final String CHAT_PREFIX = "chat-";
+
+    /** What a provider's name adds to its ChatSession's. */
+    static final String PROVIDER_SUFFIX = ".provider";
+
+    /**
+     * Initializes the actor system and seeds a small tree so the Actors tab has something to show.
+     */
+    /** The name a workflow calls the plugin loader by. */
+    public static final String WORKFLOW_LOADER = "loader";
+
+    /** The name plugin code finds the project's conversations by ({@link TeamDesk}). */
+    public static final String WORKFLOW_CONVERSATIONS = "conversations";
+
+    /** The name a job's workflow reads and writes files through ({@link ScopedFiles}). */
+    public static final String WORKFLOW_FILES = com.scivicslab.turingworkflow.plugins.rstframe.FileGate.ACTOR;
+
+    /** The name a job's workflow reaches the text steps by ({@code TextsIIAR} of plugin-text). */
+    public static final String WORKFLOW_TEXTS = "texts";
+
+    /** The name a job's workflow reaches the conversations by ({@link Chats}). */
+    public static final String WORKFLOW_CHATS = "chats";
+
+    @PostConstruct
+    void init() {
+        actorSystem = new IIActorSystem("chat-ui");
+        startRemoteNodes();
+
+        // System-wide log multiplexer (150_TabScopedLogging_260826_oo01): the top of the chat-log
+        // hierarchy, and MultiplexerLogHandler's hardcoded forwarding target for framework/non-actor
+        // log records (Quarkus startup, HTTP layer, etc.) that never go through a ConversationSquad.
+        // Deliberately outside any Project's subtree — see ProjectScopedActorTree_260829_oo01 "なぜ
+        // outputMultiplexerはプロジェクトごとに分離しないか": MultiplexerLogHandler's lookup name is
+        // hardcoded, so only one such actor can ever exist, and framework logs (e.g. Quarkus startup)
+        // aren't inherently scoped to any one project anyway.
+        // Housekeeper: the actors that exist once regardless of what work is being done. They are
+        // grouped under one branch so the Actors pane shows the shape of the work, not the
+        // machinery around it (NestedConversationTree_260830_oo01). Grouping changes only the tree
+        // edge — the registry stays flat, so MultiplexerLogHandler's hardcoded "outputMultiplexer"
+        // lookup and every getIIActor(name) call are unaffected.
+        housekeeperRef = actorSystem.getRoot().createChild(HOUSEKEEPER, new Housekeeper());
+
+        systemLogBuffer = new RecentEntriesAccumulator(SYSTEM_LOG_CAPACITY);
+        MultiplexerAccumulator systemMux = new MultiplexerAccumulator();
+        systemMux.addTarget(systemLogBuffer);
+        MultiplexerAccumulatorActor systemLogActor =
+                new MultiplexerAccumulatorActor(SYSTEM_LOG_ACTOR, systemMux, actorSystem);
+        adopt(HOUSEKEEPER, systemLogActor);
+        actorSystem.addIIActor(systemLogActor);
+
+        // External proxy log multiplexer: one caller (ARTEX) driving its own agent loop through
+        // POST /v1/chat/completions (ArtexProxyResource), relayed and recorded but never run as a
+        // ConversationSquad of this application's own agent loop (ArtexProxyLogging_261017_oo01).
+        externalProxyLogBuffer = new RecentEntriesAccumulator(EXTERNAL_PROXY_LOG_CAPACITY);
+        MultiplexerAccumulator externalProxyMux = new MultiplexerAccumulator();
+        externalProxyMux.addTarget(externalProxyLogBuffer);
+        MultiplexerAccumulatorActor externalProxyLogActor =
+                new MultiplexerAccumulatorActor(EXTERNAL_PROXY_LOG_ACTOR, externalProxyMux, actorSystem);
+        adopt(HOUSEKEEPER, externalProxyLogActor);
+        actorSystem.addIIActor(externalProxyLogActor);
+
+        MultiplexerLogHandler logHandler = new MultiplexerLogHandler(actorSystem);
+        logHandler.setLevel(Level.ALL);
+        // Excludes loggers that already reach outputMultiplexer via an explicit path (ChatSession/
+        // PromptQueue's own logToConversationSquad() calls, forwarded through their ConversationSquad's own multiplexer) — one
+        // content stream, one path, matching the proven RunCLI.java wiring (explicit multiplexer.add
+        // for primary content; this root-logger bridge only for content with no other path). Without
+        // this filter every one of those log lines reached outputMultiplexer twice.
+        Set<String> explicitlyForwardedLoggers = Set.of(ChatSession.class.getName(), PromptQueue.class.getName());
+        logHandler.setFilter(record -> {
+            String loggerName = record.getLoggerName();
+            return loggerName == null || !explicitlyForwardedLoggers.contains(loggerName);
+        });
+        Logger.getLogger("").addHandler(logHandler);
+
+        // ask_chat cross-ConversationSquad tool support (AskChatToolAndWatchdog_260827_oo01): one CallWatchdog for
+        // the whole system, refusing ask_chat calls that would create a circular wait. Deliberately
+        // NOT per-project — a wait chain spans projects whenever a cross-project ask_chat happens, and
+        // detecting a cycle needs the whole chain in one place (ProjectScopedActorTree_260829_oo01
+        // "なぜCallWatchdog・CollaborationGraphもプロジェクトごとに分離しないか").
+        callWatchdogRef = housekeeperRef.createChild("callWatchdog", new CallWatchdog());
+
+
+        // The loader a job's workflow calls to create and remove actors, and to bring in a Turing
+        // Workflow plugin (WorkflowPluginLoader_260913_oo01). Always present: creating and removing
+        // actors runs code this program already has. What is gated is loadJar, which brings in code
+        // the instance was not started with — that stays decided at start-up
+        // (ProviderAndToolPlugins_260912_oo01), by chat-ui.workflow-plugins.
+        List<String> allowedPlugins = workflowPlugins.orElse(List.of());
+        WorkflowPluginLoader loader = new WorkflowPluginLoader(WORKFLOW_LOADER, actorSystem, allowedPlugins);
+        adopt(HOUSEKEEPER, loader);
+        actorSystem.addIIActor(loader);
+        LOG.info(allowedPlugins.isEmpty()
+                ? "Workflow plugins: none (chat-ui.workflow-plugins is unset); loadJar refuses everything"
+                : "Workflow plugins: jobs may load " + loader.allowed());
+
+        // Provider kinds and plugin tools (ProviderAndToolPlugins_260912_oo01): the body's own
+        // openai-compat kind, then whatever the jars named in chat-ui.plugins add. Built here, once,
+        // and never changed afterwards. A missing jar stops start-up rather than yield an instance
+        // that silently lacks what it was asked for.
+        pluginRegistry = new PluginRegistry();
+        pluginRegistry.register(new OpenAiCompatProviderFactory(servers, defaultModel));
+        pluginRegistry.loadJars(pluginJars.orElse(List.of()).stream()
+                .map(String::trim).filter(p -> !p.isEmpty()).map(Path::of).toList());
+        extraProviderFactories.forEach(pluginRegistry::register);
+        housekeeperRef.createChild("plugins", pluginRegistry);
+
+        // Skill catalog (SkillAndAgentsFile_260830_oo01): likewise one for the whole system. A skill
+        // is instructions for a kind of work, not for a project, so which conversation will want one
+        // cannot be known in advance — every conversation carries the same catalog.
+        List<Path> skillRootPaths = resolveSkillRoots();
+        fileScope = resolveFileScope(skillRootPaths);
+        // The files a job's workflow may read and write (FileAccessScope_260830_oo01): the same range every
+        // conversation has, behind one actor. The actors of plugin-rst-frame reach it as their FileGate, so a
+        // workflow an LLM wrote cannot read or write past the range through them either.
+        ScopedFilesIIAR files = new ScopedFilesIIAR(WORKFLOW_FILES, new ScopedFiles(fileScope), actorSystem);
+        adopt(HOUSEKEEPER, files);
+        actorSystem.addIIActor(files);
+        // The text steps of a job's workflow (plugin-text): they hold nothing, so one actor serves every job at once,
+        // and no job's workflow creates or removes it.
+        com.scivicslab.turingworkflow.plugins.text.TextsIIAR texts =
+                new com.scivicslab.turingworkflow.plugins.text.TextsIIAR(WORKFLOW_TEXTS, actorSystem);
+        adopt(HOUSEKEEPER, texts);
+        actorSystem.addIIActor(texts);
+        // What a job's workflow does with the conversations: ask, clear, stop, set a model or a provider. It holds
+        // nothing that changes, so the jobs of every project use this one, naming each conversation in full.
+        ChatsIIAR chatsActor = new ChatsIIAR(WORKFLOW_CHATS,
+                new Chats(actorSystem, callWatchdogRef, this::changeProviderForPlan), actorSystem);
+        adopt(HOUSEKEEPER, chatsActor);
+        actorSystem.addIIActor(chatsActor);
+        // What the plugin code of a job's workflow may do to the project's conversations
+        // (TeamBuiltByProjectWorkflow_261108_oo01): a narrow desk, not this whole class. It has no workflow actions, so
+        // no workflow calls it; the team builder a job makes with loader.createChild finds it by this name.
+        TeamDeskIIAR conversations = new TeamDeskIIAR(WORKFLOW_CONVERSATIONS, new SystemTeamDesk(this), actorSystem);
+        adopt(HOUSEKEEPER, conversations);
+        actorSystem.addIIActor(conversations);
+        LOG.info("File access: write root " + fileScope.writeRoot()
+                + ", readable " + fileScope.describeReadRoots());
+        SkillRegistry registry = new SkillRegistry(skillRootPaths);
+        skillRegistryRef = housekeeperRef.createChild("skillRegistry", registry);
+        LOG.info("Skill registry indexed " + registry.getSkills().size() + " skill(s) from "
+                + registry.getRoots());
+        for (String problem : registry.getProblems()) {
+            LOG.warning("Skill ignored: " + problem);
+        }
+
+        // Default (first) project: only chat-01 exists at startup — chat-02, chat-03, ... are
+        // created lazily as work actually needs them (ProjectScopedActorTree_260829_oo01 "開始状態
+        // が違う"), not pre-seeded.
+        projects.put(DEFAULT_PROJECT_ID,
+                actorSystem.getRoot().createChild(DEFAULT_PROJECT_ID, new Project()));
+        wireProject(DEFAULT_PROJECT_ID);
+        // Which actions an actor has, and what one of them takes (ActionArgumentSchema_260807_oo01).
+        // Under the housekeeper because it exists regardless of what work is being done.
+        ActorRef<ActionCatalog> catalogRef = housekeeperRef.createChild(ACTION_CATALOG,
+                new ActionCatalog(actorSystem, new ActionSchemaRegistry()));
+        LOG.info("Action catalog available as actor '" + catalogRef.getName() + "'");
+
+        // Each project builds its own conversations from its own list (EachActorRecordsItsOwnState_261118_oo01);
+        // project1's chat-01, which every start has, is made when the list did not bring it back.
+        Map<String, List<String>> running = reopenRecordedProjects();
+        for (String projectId : List.copyOf(projects.keySet())) {
+            restoreConversationsOf(projectId, running.getOrDefault(projectId, List.of()));
+        }
+        if (!chats.containsKey(chatActorName(DEFAULT_PROJECT_ID, "01"))) createChat(DEFAULT_PROJECT_ID, "01");
+        // Each queue puts back the prompts that were waiting, once every conversation exists, so a request put back
+        // and run at once can answer its asker (EachActorRecordsItsOwnState_261118_oo01, decision 4).
+        for (Map.Entry<String, ChatSessionIIAR> chat : new java.util.ArrayList<>(chatSessions.entrySet())) {
+            ActorRef<PromptQueue> queue = actorSystem.getActor(chat.getKey() + ".queue");
+            ActorRef<SseConnection> sse = actorSystem.getActor(chat.getKey() + ".sse");
+            if (queue == null) continue;
+            java.util.function.Consumer<com.scivicslab.chatui.core.rest.ChatEvent> toScreen = sse == null ? e -> { } : e -> sse.tell(c -> c.emit(e));
+            ActorRef<ChatSession> ref = chat.getValue().asChatSessionRef();
+            try {
+                queue.tell(q -> q.restore(ref, toScreen)).get(10, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Could not put back the queue of " + chat.getKey(), e);
+            }
+        }
+        // After every project exists, whether init created it or the log brought it back. Hanging
+        // this off the "create it if absent" branch of the loop above left out the one project that
+        // is always created here (ProjectProperty_260929_oo01).
+        for (String projectId : List.copyOf(projects.keySet())) {
+            restoreProjectProperties(projectId);
+        }
+        // Each project's role table puts its edges back once every project is back, since an edge may point into
+        // another project; an edge naming a conversation that did not come back is dropped
+        // (CollaborationGraph_260828_oo01, EachActorRecordsItsOwnState_261118_oo01).
+        // Each organization puts itself back likewise, from its own entry, forgetting conversations that did not come
+        // back (ConversationReportingLines_261108_oo01).
+        java.util.Set<String> existing = java.util.Set.copyOf(chats.keySet());
+        for (String projectId : List.copyOf(projects.keySet())) {
+            try {
+                List<String> present = chatIdsOf(projectId);
+                organizationOf(projectId).tell(o -> o.restore(present)).get(10, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Could not restore the organization of " + projectId, e);
+            }
+            try {
+                rolesOf(projectId).tell(t -> t.restore(existing)).get(10, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Could not restore the role edges of " + projectId, e);
+            }
+        }
+        LOG.info("Actor system initialised with " + projects.size() + " project(s), "
+                + chats.size() + " conversation(s)");
+
+        startActivityWatcher();
+        startAutonomousTurnWatcher();
+        startTimekeeperTicker();
+    }
+
+    /**
+     * Creates the actor that holds what this instance is doing, and starts its schedule.
+     *
+     * <p>Under the housekeeper because it exists once regardless of what work is being done. After
+     * the projects and their conversations, because working an answer out reads them.</p>
+     */
+    private void startActivityWatcher() {
+        activityWatcherRef = housekeeperRef.createChild("activity",
+                new com.scivicslab.chatui.audittrail.ActivityWatcher(activityWork));
+        activityWatcherRef.tell(w -> w.bind(activityWatcherRef, actorSystem.getManagedThreadPool()));
+        activityWatcherRef.tell(com.scivicslab.chatui.audittrail.ActivityWatcher::startWatching);
+        LOG.info("ActivityWatcher available as actor '" + activityWatcherRef.getName() + "'");
+    }
+
+    /** @return the actor holding what this instance is doing, for {@code ActivityResource} */
+    public ActorRef<com.scivicslab.chatui.audittrail.ActivityWatcher> getActivityWatcher() {
+        return activityWatcherRef;
+    }
+
+    /**
+     * Starts asking every conversation, every few seconds, to surface a turn its provider produced with no prompt
+     * (a background job the model started finishing). Under the housekeeper, like the activity watcher.
+     */
+    private void startAutonomousTurnWatcher() {
+        autonomousTurnWatcherRef = housekeeperRef.createChild("autonomous-turns",
+                new AutonomousTurnWatcher(chatSessions::values));
+        autonomousTurnWatcherRef.tell(w -> w.bind(autonomousTurnWatcherRef));
+        autonomousTurnWatcherRef.tell(AutonomousTurnWatcher::startWatching);
+    }
+
+    /**
+     * Starts having every conversation's timekeeper check, every half minute
+     * ({@code TimekeeperPausesATurnForAnUrgentRequest_261107_oo01}). Under the housekeeper, like the
+     * autonomous-turn watcher.
+     */
+    private void startTimekeeperTicker() {
+        timekeeperTickerRef = housekeeperRef.createChild("timekeepers", new TimekeeperTicker(() -> {
+            List<ActorRef<Timekeeper>> all = new ArrayList<>();
+            for (String name : chatSessions.keySet()) {
+                ActorRef<Timekeeper> t = actorSystem.getActor(name + ".timekeeper");
+                if (t != null) all.add(t);
+            }
+            return all;
+        }));
+        timekeeperTickerRef.tell(t -> t.bind(timekeeperTickerRef));
+        timekeeperTickerRef.tell(TimekeeperTicker::start);
+    }
+
+    /** The other chat-ui instances this one exchanges requests with, or {@code null} when none is configured. */
+    private com.scivicslab.chatui.core.remote.RemoteNodes remoteNodes;
+
+    /**
+     * Starts the path to other chat-ui instances when there is a source of peers
+     * ({@code ConversationSquadsAcrossInstances_261115_oo01}): the {@code name=host:port} entries of
+     * {@code chat-ui.peers} if any, or else the AI-workspace at {@code chat-ui.workspace-url}, which lists the
+     * instances it runs. With neither, the instance runs alone, as a single jar. This instance's node is {@code chat-ui.node-name}
+     * (default {@code chat-ui-<HTTP port>}) and listens on 127.0.0.1 at {@code chat-ui.actor-port} (default the HTTP
+     * port plus 1000). The message ids it has seen are kept next to the I/O log. A failure leaves the remote path
+     * off and the rest of the instance running.
+     */
+    private void startRemoteNodes() {
+        try {
+            String peers = configValue("chat-ui.peers").orElse("");
+            String name = configValue("chat-ui.node-name").map(String::strip).filter(v -> !v.isEmpty())
+                    .orElse("chat-ui-" + httpPort);
+            int actorPort = configValue("chat-ui.actor-port").map(String::strip).filter(v -> !v.isEmpty())
+                    .map(Integer::parseInt)
+                    .orElseGet(() -> com.scivicslab.pojoactor.distributed.DistributedIIActorSystem.publicationPortFor(httpPort));
+            String dbPath = configValue("chat-ui.iolog.db-path").orElse("chat-ui-iolog");
+            String workspaceUrl = configValue("chat-ui.workspace-url").orElse("");
+            remoteNodes = com.scivicslab.chatui.core.remote.RemoteNodes.start(actorSystem, peers, workspaceUrl, name, actorPort,
+                    java.nio.file.Path.of(dbPath + "-" + httpPort + "-remote-message-ids.txt"));
+            // Every tool that joins the distributed actor system announces itself to the AI-workspace that runs it
+            // (ActorNodesForWorkspaceAndPortal_261118_oo01, decision 4).
+            if (remoteNodes != null) remoteNodes.announceTo(System.getenv("AI_WORKSPACE_NODE"), httpPort);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "The path to other chat-ui instances could not start; it stays off", e);
+            remoteNodes = null;
+        }
+    }
+
+    /** Closes the path to other chat-ui instances before the actor system goes away. */
+    @PreDestroy
+    void stopRemoteNodes() {
+        if (remoteNodes != null) remoteNodes.close();
+    }
+
+    /** Stops the timekeepers' schedule before the actor system goes away. */
+    @PreDestroy
+    void stopTimekeeperTicker() {
+        if (timekeeperTickerRef != null) timekeeperTickerRef.tell(TimekeeperTicker::stop).join();
+    }
+
+    /** @return a timekeeper limit in minutes from its configuration key, or the default */
+    private static long minutesSetting(String key, long fallback) {
+        try {
+            return configValue(key).map(String::trim).filter(v -> !v.isEmpty()).map(Long::parseLong).orElse(fallback);
+        } catch (NumberFormatException e) {
+            LOG.warning("Ignoring " + key + ": not a number of minutes");
+            return fallback;
+        }
+    }
+
+    /** Stops the autonomous-turn schedule before the actor system goes away. */
+    @PreDestroy
+    void stopAutonomousTurnWatcher() {
+        if (autonomousTurnWatcherRef != null) {
+            autonomousTurnWatcherRef.tell(AutonomousTurnWatcher::stopWatching).join();
+        }
+    }
+
+    /** Stops the activity schedule before the actor system goes away. */
+    @PreDestroy
+    void stopActivityWatcher() {
+        if (activityWatcherRef != null) {
+            activityWatcherRef.tell(com.scivicslab.chatui.audittrail.ActivityWatcher::stopWatching)
+                    .join();
+        }
+    }
+
+    /**
+     * Re-opens every project the I/O log still holds a conversation with an unfinished session for, and says which of
+     * its conversations those are.
+     *
+     * <p>The actor tree lives only in memory. Without this, a restart came up with one project and
+     * one conversation however many were open when it stopped, and the rest existed only as rows
+     * in the database. What was open before the restart is what should be open after it. Each project then builds its
+     * own conversations ({@link #restoreConversationsOf}); the running sessions are what it builds from when its log
+     * has no list of its own yet. The project counter is moved past every recorded name, so a later "+" cannot hand
+     * out a name that is already in use.</p>
+     *
+     * @return for each project, the bare ids of its conversations with a running session, oldest first
+     */
+    private Map<String, List<String>> reopenRecordedProjects() {
+        Map<String, List<String>> running = new java.util.LinkedHashMap<>();
+        if (ioLogStore == null) return running;
+        List<String> ordered = new ArrayList<>(ioLogStore.resumableConversationSquads());
+        // Oldest first, so projects and conversations come back in the order they were created.
+        java.util.Collections.reverse(ordered);
+        for (String conversationSquadId : ordered) {
+            String[] parts = splitConversationSquadId(conversationSquadId);
+            if (parts == null) continue;
+            String projectId = parts[0];
+            try {
+                if (!projects.containsKey(projectId)) {
+                    // Wired as well as created. A project that came back from the log but was never
+                    // bound looks complete -- its conversations are all there -- and refuses every
+                    // job with "project null is not bound to an actor system"
+                    // (ProjectsComeBackWiredOrNotAtAll_260917_oo01).
+                    projects.put(projectId, actorSystem.getRoot().createChild(projectId, new Project()));
+                    wireProject(projectId);
+                }
+                advanceProjectCounterPast(projectId);
+                running.computeIfAbsent(projectId, k -> new ArrayList<>()).add(parts[1]);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Could not re-open project " + projectId, e);
+            }
+        }
+        // A project whose conversations were all ended -- it was deleted -- is not reopened, but its
+        // name is still on those sessions, and a new project must not take it
+        // (ProjectDeletion_261011_oo01).
+        for (String conversationSquadId : ioLogStore.recordedConversationSquads()) {
+            String[] parts = splitConversationSquadId(conversationSquadId);
+            if (parts != null) advanceProjectCounterPast(parts[0]);
+        }
+        return running;
+    }
+
+    /**
+     * Builds a project's conversations again from its list, each under the conversation it was nested under
+     * ({@code EachActorRecordsItsOwnState_261118_oo01}). The project decides which and where, and is told which were
+     * built; building one ({@link #buildConversation}) runs here rather than on the project's thread, since it asks the
+     * project for its working directory and instructions.
+     *
+     * @param running the project's conversations with a running session, for a log that has no list yet
+     */
+    private void restoreConversationsOf(String projectId, List<String> running) {
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef == null) return;
+        try {
+            List<Project.Member> toBuild = projectRef.ask(p -> p.conversationsToBuild(running)).get(10, TimeUnit.SECONDS);
+            String instructions = readProjectInstructions(projectRef);
+            List<String> built = new ArrayList<>();
+            for (Project.Member m : toBuild) {
+                try {
+                    buildConversation(projectId, m.chatId(), m.parentChatId(), instructions);
+                    built.add(m.chatId());
+                } catch (RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not re-open conversation " + m.chatId() + " of " + projectId, e);
+                }
+            }
+            projectRef.tell(p -> p.conversationsBuilt(built)).get(10, TimeUnit.SECONDS);
+            LOG.info("Re-opened " + built.size() + " conversation(s) of " + projectId);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not re-open the conversations of " + projectId, e);
+        }
+    }
+
+    /**
+     * Splits a recorded ConversationSquad id back into the project and conversation it names — the inverse of
+     * {@link #chatActorName}.
+     *
+     * @param conversationSquadId e.g. {@code "project2/chat-01"}
+     * @return {@code {projectId, chatId}}, or {@code null} when the name is not one
+     *         {@link #chatActorName} produced
+     */
+    static String[] splitConversationSquadId(String conversationSquadId) {
+        if (conversationSquadId == null) return null;
+        int at = conversationSquadId.indexOf("/chat-");
+        if (at <= 0) return null;
+        String chatId = conversationSquadId.substring(at + "/chat-".length());
+        if (chatId.isBlank()) return null;
+        return new String[] {conversationSquadId.substring(0, at), chatId};
+    }
+
+    /** Keeps {@code createProject} from handing out a name a recorded project already holds. */
+    private void advanceProjectCounterPast(String projectId) {
+        if (!projectId.startsWith("project")) return;
+        int number;
+        try {
+            number = Integer.parseInt(projectId.substring("project".length()));
+        } catch (NumberFormatException e) {
+            return;                                     // a name that was not generated by counting
+        }
+        nextProjectNumber.updateAndGet(next -> Math.max(next, number + 1));
+    }
+
+    /**
+     * Creates a new project — its own {@link Project} grouping actor and that project's first
+     * conversation. Projects group conversations in the actor tree and prefix their names; they
+     * are not isolation boundaries, so a conversation may still {@code ask_chat} one in another
+     * project.
+     *
+     * @return the new project's id (e.g. {@code "project2"}); its first conversation is {@code "01"}
+     */
+    public synchronized String createProject() {
+        String projectId = "project" + nextProjectNumber.getAndIncrement();
+        projects.put(projectId, actorSystem.getRoot().createChild(projectId, new Project()));
+        wireProject(projectId);
+        createChat(projectId, "01");
+        return projectId;
+    }
+
+    /**
+     * What {@link #deleteChat} did: deleted the conversation, or refused and changed nothing.
+     *
+     * @param kind   which of the two, and why when refused
+     * @param reason what a person is shown when refused; empty when deleted
+     */
+    public record ChatDeletion(Kind kind, String reason) {
+        /** {@code DELETED}, or the reason nothing was changed. */
+        public enum Kind { DELETED, DEFAULT_CHAT, LAST_CHAT, UNKNOWN, BUSY, HAS_NESTED }
+
+        static ChatDeletion refused(Kind kind, String reason) {
+            return new ChatDeletion(kind, reason);
+        }
+    }
+
+    /**
+     * Deletes one conversation of a project, the way {@link #deleteProject} deletes a project
+     * ({@code ConversationDeletion_261011_oo01}): its I/O log session is ended rather than deleted,
+     * so it does not come back at the next start-up and what was said stays in the Sessions tab.
+     *
+     * <p>Nothing is changed when any of these applies: {@code project1}'s {@code chat-01}, which
+     * {@link #init} creates on every start; a conversation that does not exist; the project's last
+     * conversation, since a project with none is not rebuilt at start-up and deleting the project is
+     * what that amounts to; a conversation answering or holding queued prompts; and one with a
+     * conversation nested under it, whose own session would be left running.</p>
+     */
+    @Override
+    public synchronized ChatDeletion deleteChat(String projectId, String chatId) {
+        if (DEFAULT_PROJECT_ID.equals(projectId) && "01".equals(chatId)) {
+            return ChatDeletion.refused(ChatDeletion.Kind.DEFAULT_CHAT,
+                    DEFAULT_PROJECT_ID + "/chat-01 is created on every start and cannot be deleted");
+        }
+        String name = chatActorName(projectId, chatId);
+        ActorRef<ConversationSquad> squad = chats.get(name);
+        if (squad == null) {
+            return ChatDeletion.refused(ChatDeletion.Kind.UNKNOWN, "no such conversation: " + name);
+        }
+        String prefix = projectId + "/chat-";
+        if (chats.keySet().stream().filter(n -> n.startsWith(prefix)).count() <= 1) {
+            return ChatDeletion.refused(ChatDeletion.Kind.LAST_CHAT,
+                    name + " is the project's last conversation; delete the project instead");
+        }
+        List<String> nested = squad.getNamesOfChildren().stream().filter(chats::containsKey).sorted().toList();
+        if (!nested.isEmpty()) {
+            return ChatDeletion.refused(ChatDeletion.Kind.HAS_NESTED,
+                    name + " has conversations under it; delete them first: " + String.join(", ", nested));
+        }
+        List<String> subordinates = askOrDefault(organizationOf(projectId), o -> o.subordinatesOf(chatId), List.<String>of());
+        if (!subordinates.isEmpty()) {
+            return ChatDeletion.refused(ChatDeletion.Kind.HAS_NESTED, name + " has subordinates; give them another "
+                    + "superior with set_superior first: " + String.join(", ", subordinates.stream().map(c -> "chat-" + c).toList()));
+        }
+        ChatSessionIIAR session = chatSessions.get(name);
+        if (session != null && session.isBusyDirect()) {
+            return ChatDeletion.refused(ChatDeletion.Kind.BUSY, name + " is answering");
+        }
+        ActorRef<PromptQueue> queue = actorSystem.getActor(name + ".queue");
+        if (queue != null && !askOrDefault(queue, PromptQueue::snapshot, List.<PromptQueue.QueueEntry>of()).isEmpty()) {
+            return ChatDeletion.refused(ChatDeletion.Kind.BUSY, name + " has queued prompts");
+        }
+
+        if (session != null) {
+            ActorRef<LlmProvider> provider = actorSystem.getActor(session.getName() + PROVIDER_SUFFIX);
+            if (provider != null) {
+                try {
+                    provider.ask(p -> { p.cancel(); return null; }).get(5, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Provider of " + name + " did not cancel cleanly", e);
+                }
+            }
+        }
+        // Out of the project's list, and its session ended, so it does not come back (EachActorRecordsItsOwnState_261118_oo01).
+        try {
+            projects.get(projectId).tell(p -> p.conversationRemoved(chatId)).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not take " + name + " out of its project's list", e);
+        }
+        actorSystem.removeActorRecursively(name);
+        chats.remove(name);
+        chatSessions.remove(name);
+        toolRunners.remove(name);
+        chatLogBuffers.remove(name);
+        organizationOf(projectId).tell(o -> o.remove(chatId));
+        // Its role edges, and every edge that names it in any project, go with it (CollaborationGraph_260828_oo01).
+        forgetInEveryRoleTable(t -> t.forgetConversation(name));
+        LOG.info("Deleted conversation " + name);
+        return new ChatDeletion(ChatDeletion.Kind.DELETED, "");
+    }
+
+    /**
+     * What {@link #deleteProject} did: deleted the project, or refused and changed nothing.
+     *
+     * @param kind          which of the two, and why when refused
+     * @param conversations how many conversations went with the project; 0 when refused
+     * @param reason        what a person is shown when refused; empty when deleted
+     */
+    public record ProjectDeletion(Kind kind, int conversations, String reason) {
+        /** {@code DELETED}, or the reason nothing was changed. */
+        public enum Kind { DELETED, DEFAULT_PROJECT, UNKNOWN, BUSY }
+
+        static ProjectDeletion refused(Kind kind, String reason) {
+            return new ProjectDeletion(kind, 0, reason);
+        }
+    }
+
+    /**
+     * Deletes a project and its conversations, so it leaves the actor tree and does not come back
+     * at the next start-up ({@code ProjectDeletion_261011_oo01}).
+     *
+     * <p>Everything that would stop the deletion is checked first, and nothing is changed when one
+     * applies: {@code project1}, which {@link #init} creates on every start; a project that does
+     * not exist; and a project with a conversation answering or holding queued prompts, or a batch
+     * job running. Stopping those instead would lose work the person may want.</p>
+     *
+     * <p>Each conversation's I/O log session is ended the way Clear ends one, not deleted: the
+     * project stops coming back because {@link IoLogStore#resumableConversationSquads} lists only
+     * running sessions, and what was said stays readable in the Sessions tab. The project's
+     * number is not handed out again.</p>
+     *
+     * @param projectId the project to delete
+     * @return what was done
+     */
+    public synchronized ProjectDeletion deleteProject(String projectId) {
+        if (DEFAULT_PROJECT_ID.equals(projectId)) {
+            return ProjectDeletion.refused(ProjectDeletion.Kind.DEFAULT_PROJECT,
+                    DEFAULT_PROJECT_ID + " is created on every start and cannot be deleted");
+        }
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef == null) {
+            return ProjectDeletion.refused(ProjectDeletion.Kind.UNKNOWN, "no such project: " + projectId);
+        }
+        String prefix = projectId + "/chat-";
+        List<String> conversations = chats.keySet().stream().filter(n -> n.startsWith(prefix)).sorted().toList();
+
+        List<String> running = new ArrayList<>();
+        for (String name : conversations) {
+            ChatSessionIIAR session = chatSessions.get(name);
+            if (session != null && session.isBusyDirect()) running.add(name + " is answering");
+            ActorRef<PromptQueue> queue = actorSystem.getActor(name + ".queue");
+            if (queue != null && !askOrDefault(queue, PromptQueue::snapshot, List.<PromptQueue.QueueEntry>of()).isEmpty()) {
+                running.add(name + " has queued prompts");
+            }
+        }
+        for (Project.JobView job : askOrDefault(projectRef, Project::jobs, List.<Project.JobView>of())) {
+            if (Project.RUNNING.equals(job.state())) running.add("job " + job.jobId() + " is running");
+            if (Project.QUEUED.equals(job.state())) running.add("job " + job.jobId() + " is waiting to run");
+        }
+        if (!running.isEmpty()) {
+            return ProjectDeletion.refused(ProjectDeletion.Kind.BUSY, String.join("; ", running));
+        }
+
+        for (String name : conversations) {
+            ChatSessionIIAR session = chatSessions.get(name);
+            if (session != null) {
+                ActorRef<LlmProvider> provider = actorSystem.getActor(session.getName() + PROVIDER_SUFFIX);
+                if (provider != null) {
+                    try {
+                        provider.ask(p -> { p.cancel(); return null; }).get(5, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Provider of " + name + " did not cancel cleanly", e);
+                    }
+                }
+            }
+        }
+        // Every conversation's session ended, so none comes back (ProjectDeletion_261011_oo01).
+        try {
+            projectRef.tell(Project::endEveryConversation).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not end the conversations of " + projectId, e);
+        }
+        projectRef.tell(Project::stopWatching);
+        actorSystem.removeActorRecursively(projectId);
+        for (String name : conversations) {
+            chats.remove(name);
+            chatSessions.remove(name);
+            toolRunners.remove(name);
+            chatLogBuffers.remove(name);
+        }
+        projects.remove(projectId);
+        // The project's role edges went with its role table; edges of other projects that name its conversations go too.
+        forgetInEveryRoleTable(t -> t.forgetProject(projectId + "/"));
+        LOG.info("Deleted project " + projectId + " with " + conversations.size() + " conversation(s)");
+        return new ProjectDeletion(ProjectDeletion.Kind.DELETED, conversations.size(), "");
+    }
+
+    /**
+     * What {@link #translate} gave back: the translation and the model that wrote it, or why there
+     * is none.
+     */
+    public record Translation(Kind kind, String text, String model, String reason) {
+        /** {@code DONE}, or why nothing was translated. */
+        public enum Kind { DONE, UNKNOWN_LANGUAGE, UNKNOWN_CHAT, NO_ANSWER }
+
+        static Translation refused(Kind kind, String reason) {
+            return new Translation(kind, null, null, reason);
+        }
+    }
+
+    /** The translation provider, created the first time a message is translated. */
+    private ActorRef<LlmProvider> translatorRef;
+
+    /**
+     * Translates one message of a conversation ({@code MessageTranslation_261011_oo01}).
+     *
+     * <p>Through one Local LLM provider kept for translating, not the conversation's own: a
+     * conversation's provider answers one request at a time, so asking it while it is answering
+     * would wait for the answer to finish, and a conversation on Claude Code or Codex has no
+     * provider to ask. The translation is not added to the conversation; what was sent and what came
+     * back are recorded in the conversation's I/O log session under the label {@code translation}.</p>
+     *
+     * @param projectId    the conversation's project
+     * @param chatId       the conversation
+     * @param text         the message, unchanged
+     * @param languageCode a code from {@link TranslationLanguages#ALL}
+     */
+    public Translation translate(String projectId, String chatId, String text, String languageCode) {
+        return translate(projectId, chatId, text, languageCode, piece -> { });
+    }
+
+    /**
+     * Translates as {@link #translate(String, String, String, String)} does, handing over the
+     * translation piece by piece as the model writes it.
+     *
+     * @param onDelta receives each piece of the translation, in order, on the translator's own
+     *                thread; it must not block
+     */
+    public Translation translate(String projectId, String chatId, String text, String languageCode,
+                                 java.util.function.Consumer<String> onDelta) {
+        var language = TranslationLanguages.find(languageCode);
+        if (language.isEmpty()) {
+            return Translation.refused(Translation.Kind.UNKNOWN_LANGUAGE, "unknown language: " + languageCode);
+        }
+        String conversation = chatActorName(projectId, chatId);
+        if (!chats.containsKey(conversation)) {
+            return Translation.refused(Translation.Kind.UNKNOWN_CHAT, "no such conversation: " + conversation);
+        }
+        String prompt = TranslationPrompt.of(text, language.get().name());
+        String[] answer;
+        try {
+            answer = translator().ask(p -> {
+                OpenAiCompatProvider local = (OpenAiCompatProvider) p;
+                return new String[] { local.completeOutsideConversationStreaming(prompt, onDelta),
+                        local.getCurrentModel() };
+            }).get(5, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Translation of a message in " + conversation + " failed", e);
+            answer = new String[] { null, null };
+        }
+        String translation = answer[0] == null ? null : answer[0].strip();
+        if (ioLogStore != null) {
+            ioLogStore.record(ioLogStore.ensureSession(conversation), conversation, "translation",
+                    "LANGUAGE: " + language.get().code() + "\nMODEL: " + answer[1]
+                            + "\n\nINPUT:\n" + prompt + "\n\nOUTPUT:\n" + (translation == null ? "(no answer)" : translation));
+        }
+        if (translation == null || translation.isEmpty()) {
+            return Translation.refused(Translation.Kind.NO_ANSWER, "the model gave no translation");
+        }
+        return new Translation(Translation.Kind.DONE, translation, answer[1], "");
+    }
+
+    private synchronized ActorRef<LlmProvider> translator() {
+        if (translatorRef == null) {
+            translatorRef = housekeeperRef.createChild("translator",
+                    newProvider(OpenAiCompatProviderFactory.KIND, ToolSet.FULL, DEFAULT_PROJECT_ID, "translator"));
+        }
+        return translatorRef;
+    }
+
+    /** Asks an actor for a value, or gives {@code fallback} when it does not answer in 5 seconds. */
+    private static <T, R> R askOrDefault(ActorRef<T> actor, java.util.function.Function<T, R> question, R fallback) {
+        try {
+            return actor.ask(question).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not ask " + actor.getName(), e);
+            return fallback;
+        }
+    }
+
+    /**
+     * Gives a freshly created project what it needs to run jobs, and starts its watch over them
+     * ({@code ProjectPerspective_260911_oo01}). Called at every place a project is created --
+     * including the one that brings a project back from the log at start-up, which for a while did
+     * not ({@code ProjectsComeBackWiredOrNotAtAll_260917_oo01}).
+     */
+    private void wireProject(String projectId) {
+        ActorRef<Project> ref = projects.get(projectId);
+        com.scivicslab.chatui.core.iolog.SessionEntries own =
+                com.scivicslab.chatui.core.iolog.SessionEntries.ofProject(ioLogStore, ioLogView, projectId);
+        ref.tell(p -> p.bind(projectId, actorSystem, ref, SYSTEM_LOG_ACTOR, ioLogStore));
+        // The project records its own name and working directory (EachActorRecordsItsOwnState_261118_oo01).
+        ref.tell(p -> p.recordsTo(own));
+        ref.tell(Project::startWatching);
+        // The project's role table, its child, recording to the project's own session (EachActorRecordsItsOwnState_261118_oo01).
+        ref.createChild(rolesActorName(projectId), new RoleTable(projectId, own));
+    }
+
+    /** Stops every project's job watch before the actor system goes away. */
+    @PreDestroy
+    void stopProjectWatchers() {
+        for (ActorRef<Project> ref : projects.values()) {
+            try {
+                ref.tell(Project::stopWatching).join();
+            } catch (RuntimeException e) {
+                LOG.log(Level.FINE, "Could not stop the job watch of " + ref.getName(), e);
+            }
+        }
+    }
+
+    /** @return the ids of all projects created so far */
+    public List<String> getProjectIds() {
+        return new ArrayList<>(projects.keySet());
+    }
+
+    /**
+     * Resolves the target of a cross-conversation tool call ({@code ask_chat}/{@code set_agent_loop})
+     * into a qualified conversation name. A bare id ({@code "02"}) names a conversation in the
+     * caller's own project; a qualified one ({@code "project2/02"}) names one in another project,
+     * so crossing a project boundary is visible in the argument itself
+     * ({@code ProjectNamespacePrefix_260829_oo01}). The id may also be written as the conversation's own name
+     * shows it, {@code "chat-02"} or {@code "project2/chat-02"}: the {@code chat-} is not added a second time.
+     *
+     * @param callerProjectId the calling conversation's project id
+     * @param target          the {@code chatId} argument as written by the caller
+     * @return e.g. {@code "project1/chat-02"}
+     */
+    public static String resolveChatName(String callerProjectId, String target) {
+        int slash = target.indexOf('/');
+        String project = slash < 0 ? callerProjectId : target.substring(0, slash);
+        String id = slash < 0 ? target : target.substring(slash + 1);
+        if (id.startsWith(CHAT_PREFIX)) id = id.substring(CHAT_PREFIX.length());
+        return chatActorName(project, id);
+    }
+
+    /**
+     * Asks a conversation to abandon the LLM call it is running, if any.
+     *
+     * <p>Sent with {@code tellNow} so it reaches {@link ChatSession#cancel()} without queueing
+     * behind the very turn it is meant to stop. An agent-loop step blocks its thread on
+     * {@code providerRef.ask(...).get()} until the model's reply ends, so a queued cancel would
+     * arrive only after the call it was supposed to interrupt had already finished.</p>
+     *
+     * <p>What the model is producing when the cancel arrives does not matter. A thinking model
+     * streams its reasoning as {@code delta.reasoning_content}, so bytes keep arriving during a
+     * long deliberation, and the client's read loop tests its own interrupt flag once per streamed
+     * line ({@code OpenAiCompatClient.sendPrompt}). The stop therefore lands mid-thought, which is
+     * the case it exists for.</p>
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return {@code true} if the conversation exists and was asked to cancel
+     */
+    public boolean cancelPrompt(String projectId, String chatId) {
+        ChatSessionIIAR chat = chatSessions.get(chatActorName(projectId, chatId));
+        if (chat == null) return false;
+        chat.tellNow(a -> ((ChatSession) a).cancel());
+        return true;
+    }
+
+    /**
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return that conversation's recent log entries (oldest first), or {@code null} if it does not exist
+     */
+    public List<RecentEntriesAccumulator.Entry> getChatLogEntries(String projectId, String chatId) {
+        RecentEntriesAccumulator buf = chatLogBuffers.get(chatActorName(projectId, chatId));
+        return buf == null ? null : buf.recent();
+    }
+
+    /**
+     * The in-memory log, filled in front from the persisted history when it is short of
+     * {@code wanted}: the provider's own record when it keeps one (Claude Code's transcript),
+     * otherwise this conversation's I/O log ({@code GetChatLogReadsPersistedHistory_261119_oo01}).
+     * Nothing read here is written to {@link #chatLogBuffers}.
+     */
+    @Override
+    public com.scivicslab.chatui.logging.ChatLog getChatLog(String projectId, String chatId, int wanted) {
+        String name = chatActorName(projectId, chatId);
+        RecentEntriesAccumulator buf = chatLogBuffers.get(name);
+        if (buf == null) return null;
+        ChatSessionIIAR session = chatSessions.get(name);
+        return com.scivicslab.chatui.logging.ChatLog.fill(buf.recent(), wanted, (limit, before) -> {
+            com.scivicslab.chatui.core.provider.PersistedLog own =
+                    session == null ? null : session.persistedLogDirect(limit, before);
+            return own != null ? own : new IoLogHistory(ioLogStore).read(name, limit, before);
+        });
+    }
+
+    /** @return the system-wide log's recent entries (oldest first) */
+    public List<RecentEntriesAccumulator.Entry> getSystemLogEntries() {
+        return systemLogBuffer.recent();
+    }
+
+    /** @return the external proxy log's recent entries (oldest first) — ARTEX's relayed calls */
+    public List<RecentEntriesAccumulator.Entry> getExternalProxyLogEntries() {
+        // The buffer is filled by messages the log actor was told (recordExternalCall's "add" enqueues
+        // one). Reading it through the same actor puts the read behind every add already queued;
+        // reading the buffer from this thread would race the actor's own queue.
+        IIActorRef<?> logRef = actorSystem.getIIActor(EXTERNAL_PROXY_LOG_ACTOR);
+        if (logRef == null) return externalProxyLogBuffer.recent();
+        try {
+            return logRef.ask(mux -> externalProxyLogBuffer.recent()).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not read the external proxy log through its actor", e);
+            return externalProxyLogBuffer.recent();
+        }
+    }
+
+    /**
+     * Records one call relayed through {@code POST /v1/chat/completions}
+     * ({@code ArtexProxyResource}), both permanently (the I/O log, surviving a restart) and for the
+     * live view ({@link #getExternalProxyLogEntries()}).
+     *
+     * <p>Uses {@link IoLogStore#ensureJobSession}, not {@link IoLogStore#ensureSession}: the
+     * caller is not a {@link ConversationSquad} of this application's own agent loop (it drives its
+     * own, elsewhere), so its session must not carry the {@code chat-ui-conversation-} prefix that
+     * {@link IoLogStore#resumableConversationSquads()} rebuilds into a {@link ConversationSquad} —
+     * and a {@link ConversationSquad} with no {@link ChatSessionIIAR} behind it would be a
+     * conversation that cannot actually run (see the plan this implements,
+     * {@code tasks/artex-on-w206-261017/todo.md}).</p>
+     *
+     * <p>The label is {@code turn<N>/step1/llm}, {@code N} one call in, counting from the first
+     * call this process has relayed for {@code callerId} — not a turn of this application's own
+     * agent loop, but the same label shape, so the Sessions tab's trace viewer (which parses
+     * exactly {@code turn(\d+)/step(\d+)/(llm|tool)}, {@code IoLogView.TURN_LABEL}) renders this
+     * job session too: opening the Sessions tab with no conversation active lists every session,
+     * {@code chat-ui-job-<callerId>} among them ({@code ArtexProxyLogging_261017_oo01}).</p>
+     *
+     * @param callerId one external caller's name (e.g. {@code "artex"}); the I/O log session's
+     *                 name is {@value #EXTERNAL_PROXY_SESSION_PREFIX} followed by this, and this
+     *                 entry's {@code source} is this alone
+     * @param content  the full record: {@code REQUEST:}/{@code RESPONSE:}/… in
+     *                 {@link ChatSession}'s {@code recordStepIo} marker format, so
+     *                 {@code IoLogView}'s existing parser covers it too
+     */
+    public void recordExternalCall(String callerId, String content) {
+        if (ioLogStore != null) {
+            long sessionId = ioLogStore.ensureJobSession(EXTERNAL_PROXY_SESSION_PREFIX + callerId);
+            int turn = externalCallTurnCounters
+                    .computeIfAbsent(callerId, k -> new java.util.concurrent.atomic.AtomicInteger(0))
+                    .incrementAndGet();
+            ioLogStore.record(sessionId, callerId, "turn" + turn + "/step1/llm", content);
+        }
+        IIActorRef<?> logRef = actorSystem.getIIActor(EXTERNAL_PROXY_LOG_ACTOR);
+        if (logRef == null) return;
+        try {
+            org.json.JSONObject args = new org.json.JSONObject();
+            args.put("source", callerId);
+            args.put("type", "INFO");
+            args.put("data", content);
+            logRef.callByActionName("add", args.toString());
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not log external call for " + callerId, e);
+        }
+    }
+
+    /**
+     * Creates, or returns the existing, conversation {@code projectId/chat-<chatId>} as a child of
+     * its owning project's {@link Project} actor (not ROOT directly), together with its {@link
+     * ChatSessionIIAR} and {@link PromptQueue}.
+     *
+     * @param projectId owning project's id, e.g. {@code "project1"}
+     * @param chatId    conversation id within that project, e.g. {@code "01"}
+     * @return the conversation's actor reference
+     */
+    /**
+     * Creates the project's next conversation, allocating its id here rather than taking one
+     * ({@code ProjectProperty_260929_oo01}).
+     *
+     * <p>The id is one past the highest the project has, formatted to two digits, and never a gap
+     * left by a conversation that went away: a reused id would name the log session of the old
+     * conversation, and the next start-up would restore that conversation's history into the new
+     * one.</p>
+     *
+     * <p>Allocated on this side because the screen cannot allocate safely. Two screens reading the
+     * list and adding one both arrive at the same number, and the second of them is handed the
+     * conversation the first just made.</p>
+     *
+     * @param projectId the project to add a conversation to
+     * @return the new conversation's id, e.g. {@code "02"}
+     */
+    @Override
+    public synchronized String createChat(String projectId) {
+        if (!projects.containsKey(projectId)) {
+            throw new IllegalArgumentException("Unknown project: " + projectId);
+        }
+        String prefix = projectId + "/chat-";
+        // Every conversation the log holds a session for counts too, ended ones included: a deleted
+        // conversation's session keeps its name, and a new one must not take it
+        // (ConversationDeletion_261011_oo01).
+        List<String> named = new ArrayList<>(chats.keySet());
+        if (ioLogStore != null) named.addAll(ioLogStore.recordedConversationSquads());
+        int highest = 0;
+        for (String name : named) {
+            if (!name.startsWith(prefix)) continue;
+            try {
+                highest = Math.max(highest, Integer.parseInt(name.substring(prefix.length())));
+            } catch (NumberFormatException e) {
+                // A conversation whose id is not a number does not take part in the numbering.
+            }
+        }
+        String chatId = String.format("%02d", highest + 1);
+        createChat(projectId, chatId);
+        return chatId;
+    }
+
+    public synchronized ActorRef<ConversationSquad> createChat(String projectId, String chatId) {
+        return createChat(projectId, chatId, null);
+    }
+
+    /**
+     * Creates the conversation under another conversation instead of directly under its project
+     * ({@code NestedConversationTree_260830_oo01}).
+     *
+     * <p>Who a conversation is addressed as does not change — the registry is flat and every
+     * lookup is by name. What changes is the set operations: an actor can act on all of its own
+     * descendants at once ({@code apply} over {@code ./*}), and the Actors pane shows which
+     * conversation is working for which.</p>
+     *
+     * @param projectId    owning project's id
+     * @param chatId       conversation id within that project
+     * @param parentChatId the conversation to place this one under, or {@code null} for the project
+     * @return the conversation's actor reference
+     */
+    public synchronized ActorRef<ConversationSquad> createChat(String projectId, String chatId,
+                                                              String parentChatId) {
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef == null) {
+            throw new IllegalArgumentException("Unknown project: " + projectId);
+        }
+        ActorRef<ConversationSquad> made = buildConversation(projectId, chatId, parentChatId, readProjectInstructions(projectRef));
+        // In the project's list, with its parent, so it comes back after a restart where it was
+        // (EachActorRecordsItsOwnState_261118_oo01). Waited for: a restart right after must find it.
+        try {
+            projectRef.tell(p -> p.conversationAdded(chatId, parentChatId)).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not add " + chatActorName(projectId, chatId) + " to its project's list", e);
+        }
+        return made;
+    }
+
+    /**
+     * Builds one conversation's actors under its project or under another conversation. Records nothing in the
+     * project's list: {@link #createChat} adds it there, and a project restoring its list already has it.
+     *
+     * @param projectInstructions the project's instructions, read once by the caller
+     */
+    private synchronized ActorRef<ConversationSquad> buildConversation(String projectId, String chatId,
+                                                                       String parentChatId, String projectInstructions) {
+        String qualifiedName = chatActorName(projectId, chatId);
+        ActorRef<ConversationSquad> existing = chats.get(qualifiedName);
+        if (existing != null) {
+            return existing;
+        }
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef == null) {
+            throw new IllegalArgumentException("Unknown project: " + projectId);
+        }
+        ActorRef<?> parentRef = projectRef;
+        if (parentChatId != null && !parentChatId.isBlank()) {
+            ActorRef<ConversationSquad> parentChat =
+                    chats.get(resolveChatName(projectId, parentChatId));
+            if (parentChat == null) {
+                throw new IllegalArgumentException("Unknown parent conversation: " + parentChatId);
+            }
+            parentRef = parentChat;
+        }
+        ActorRef<ConversationSquad> conversationSquadRef = parentRef.createChild(qualifiedName, new ConversationSquad());
+        chats.put(qualifiedName, conversationSquadRef);
+
+        // Tab log multiplexer (150_TabScopedLogging_260826_oo01): this tab's own recent-entries
+        // buffer, plus delegation up to the system-wide multiplexer via ForwardingAccumulator.
+        String conversationSquadLogActorName = conversationSquadRef.getName() + ".log";
+        RecentEntriesAccumulator conversationSquadLogBuffer = new RecentEntriesAccumulator(TAB_LOG_CAPACITY);
+        chatLogBuffers.put(qualifiedName, conversationSquadLogBuffer);
+        MultiplexerAccumulator conversationSquadMux = new MultiplexerAccumulator();
+        conversationSquadMux.addTarget(conversationSquadLogBuffer);
+        conversationSquadMux.addTarget(new ForwardingAccumulator(actorSystem, SYSTEM_LOG_ACTOR, qualifiedName));
+        MultiplexerAccumulatorActor conversationSquadLogActor =
+                new MultiplexerAccumulatorActor(conversationSquadLogActorName, conversationSquadMux, actorSystem);
+        adopt(conversationSquadRef.getName(), conversationSquadLogActor);
+        actorSystem.addIIActor(conversationSquadLogActor);
+
+        // ChatSessionIIAR — manual IIActorRef bridge, since ConversationSquad is a plain POJO and
+        // cannot call addChildActor itself (ChatSessionIIAR_260810_oo01 "ConversationSquad への接続").
+        LlmProvider provider = newProvider(OpenAiCompatProviderFactory.KIND, ToolSet.FULL, projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = new ChatSessionIIAR(
+                conversationSquadRef.getName() + CHAT_SESSION_SUFFIX, provider, Optional.empty(), ioLogStore,
+                actorSystem);
+        chatSessionIIAR.setParentName(conversationSquadRef.getName());
+        conversationSquadRef.getNamesOfChildren().add(chatSessionIIAR.getName());
+        actorSystem.addIIActor(chatSessionIIAR);
+        chatSessions.put(qualifiedName, chatSessionIIAR);
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setChatIdentity(projectId, chatId));
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setWatchdogRef(callWatchdogRef));
+        ActorRef<RoleTable> roleTable = rolesOf(projectId);
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setRoleTableRef(roleTable));
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setConversationControls(this));
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setSkillRegistryRef(skillRegistryRef));
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setFileScope(fileScope));
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setMaxObservationChars(maxObservationChars));
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setPluginTools(pluginRegistry.tools()));
+        // A conversation created after its project's working directory was set must still receive
+        // that project's instructions, so they are handed in here rather than pushed only at the
+        // moment setProjectWorkingDir runs.
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setProjectInstructions(projectInstructions));
+
+        // provider child — created by the generating side, not by ChatSession itself
+        // (ChatSessionPorting_260823_oo01 "なぜ init を無くしたか").
+        LlmProvider providerAsLlmProvider = provider;
+        ActorRef<LlmProvider> providerRef = chatSessionIIAR.<LlmProvider>createChild(
+                chatSessionIIAR.getName() + PROVIDER_SUFFIX, providerAsLlmProvider);
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setProviderName(providerRef.getName()));
+
+        // Prompt builder — a child of the ChatSession, so a prompt-construction sub-workflow (also
+        // registered as a child of the ChatSession by Interpreter.call) reaches it as its own
+        // sibling and never touches another conversation's buffer
+        // (DocRetrievalAgentLoop_260830_oo01).
+        PromptBuilderActor promptBuilder =
+                new PromptBuilderActor(chatSessionIIAR.getName() + ".promptBuilder", actorSystem);
+        promptBuilder.setParentName(chatSessionIIAR.getName());
+        chatSessionIIAR.getNamesOfChildren().add(promptBuilder.getName());
+        actorSystem.addIIActor(promptBuilder);
+
+        // PromptQueue — plain createChild, same as any other ConversationSquad sibling.
+        ActorRef<PromptQueue> promptQueueRef =
+                conversationSquadRef.createChild(conversationSquadRef.getName() + ".queue", new PromptQueue());
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setPromptQueueName(promptQueueRef.getName()));
+        // Lets PromptQueue's own dispatch-request handlers (enqueue/onPromptComplete/advance)
+        // hand the actual queue.remove(0) back to its own actor thread via self.ask(...) instead
+        // of mutating `queue` directly from ChatSession's thread (see PromptQueueThreadSafety
+        // fix — mirrors how ChatSession receives its own setActorSystem/setProviderName).
+        promptQueueRef.tell(q -> q.setSelf(promptQueueRef));
+        promptQueueRef.tell(q -> q.setLogging(actorSystem, conversationSquadLogActorName));
+
+        // SseConnection — plain createChild, same as PromptQueue (ChatResourceDesign_260823_oo01).
+        ActorRef<SseConnection> sseRef =
+                conversationSquadRef.createChild(conversationSquadRef.getName() + ".sse", new SseConnection(objectMapper));
+
+        // Timekeeper — this conversation's watch over time, deleted with it
+        // (TimekeeperPausesATurnForAnUrgentRequest_261107_oo01).
+        conversationSquadRef.createChild(conversationSquadRef.getName() + ".timekeeper",
+                new Timekeeper(qualifiedName, chatSessionIIAR, promptQueueRef, event -> sseRef.tell(c -> c.emit(event)),
+                        TimeUnit.MINUTES.toMillis(minutesSetting("chat-ui.timekeeper.urgent-wait-minutes",
+                                Timekeeper.DEFAULT_URGENT_WAIT_MINUTES)),
+                        TimeUnit.MINUTES.toMillis(minutesSetting("chat-ui.timekeeper.child-reply-warn-minutes",
+                                Timekeeper.DEFAULT_CHILD_REPLY_WARN_MINUTES)),
+                        target -> {
+                            // What the notice says about the conversation the request went to, read without
+                            // waiting for its turn. A conversation of another instance is asked over the remote path.
+                            int mark = target.indexOf(ChatSession.REMOTE_TARGET_MARK);
+                            if (mark > 0) {
+                                return com.scivicslab.chatui.core.remote.RemoteNodes.turnStateOf(actorSystem,
+                                        target.substring(mark + ChatSession.REMOTE_TARGET_MARK.length()),
+                                        target.substring(0, mark));
+                            }
+                            IIActorRef<?> t = actorSystem.getIIActor(target + ".chat");
+                            if (!(t instanceof ChatSessionIIAR c)) return Timekeeper.TargetState.UNKNOWN;
+                            Long since = c.runningSinceDirect();
+                            return new Timekeeper.TargetState(true, since != null, since == null ? 0 : since);
+                        }));
+
+        // Each actor that holds part of the conversation's state records it in the conversation's own session
+        // (EachActorRecordsItsOwnState_261118_oo01): the squad its name, the chat session its settings and agent loop,
+        // the timekeeper its limits.
+        com.scivicslab.chatui.core.iolog.SessionEntries own =
+                com.scivicslab.chatui.core.iolog.SessionEntries.ofConversation(ioLogStore, ioLogView, qualifiedName);
+        conversationSquadRef.tell(s -> s.recordsTo(own));
+        chatSessionIIAR.tell(a -> ((ChatSession) a).recordsTo(own));
+        ActorRef<Timekeeper> keeperRef = actorSystem.getActor(qualifiedName + ".timekeeper");
+        if (keeperRef != null) keeperRef.tell(k -> k.recordsTo(own));
+        promptQueueRef.tell(q -> q.recordsTo(own, qualifiedName));
+        restoreConversation(qualifiedName, chatSessionIIAR, providerRef);
+        // Its first settings, so that it comes back as it was made even if it never runs a turn; one being brought
+        // back already has them and writes nothing (ConversationRestoreOnRestart_260904_oo01).
+        try {
+            chatSessionIIAR.tell(a -> ((ChatSession) a).recordIfNew()).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not record the settings of " + qualifiedName, e);
+        }
+
+        return conversationSquadRef;
+    }
+
+    /**
+     * Refills a just-created conversation from what the I/O log recorded for it, so that restarting
+     * the process does not empty the pane or lose what the model was told
+     * ({@code ConversationRestoreOnRestart_260904_oo01}).
+     *
+     * <p>Two lists are rebuilt, because they are different things. The {@code ChatSession}'s own
+     * conversation is what {@code GET /conversation} returns and the browser draws. The provider's
+     * history is what accompanies the next LLM call. Filling only the first would show the
+     * conversation without the model remembering it; filling only the second would do the
+     * reverse.</p>
+     *
+     * <p>Nothing happens when the ConversationSquad has no resumable session, which is the case for a genuinely
+     * new conversation and for one the user cleared before the restart.</p>
+     *
+     * @param conversationSquadName         the conversation's qualified actor name, which is also its log ConversationSquad id
+     * @param chatSessionIIAR the conversation's ChatSession bridge
+     * @param providerRef     the conversation's own provider
+     */
+    private void restoreConversation(String conversationSquadName, ChatSessionIIAR chatSessionIIAR,
+                                     ActorRef<LlmProvider> providerRef) {
+        if (ioLogStore == null || ioLogView == null) return;
+        long sessionId = ioLogStore.findResumableSession(conversationSquadName);
+        if (sessionId < 0) return;
+
+        List<IoLogView.Turn> turns;
+        int lastTurn;
+        try {
+            turns = ioLogView.conversation(sessionId, RESTORED_TURNS);
+            lastTurn = ioLogView.lastTurnNumber(sessionId);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not read the recorded conversation for " + conversationSquadName, e);
+            return;
+        }
+
+        // Done whether or not anything is restored: a session recorded before this feature existed
+        // holds turns but no conversation entry, and its numbering must still be continued.
+        if (lastTurn > 0) {
+            chatSessionIIAR.tell(a -> ((ChatSession) a).resumeTurnNumbering(lastTurn));
+        }
+
+        // Each part puts back what it recorded itself: the name, the timekeeper's limits, the agent loop.
+        ActorRef<ConversationSquad> squadRef = chats.get(conversationSquadName);
+        if (squadRef != null) squadRef.tell(ConversationSquad::restore);
+        ActorRef<Timekeeper> keeperRef = actorSystem.getActor(conversationSquadName + ".timekeeper");
+        if (keeperRef != null) keeperRef.tell(Timekeeper::restore);
+        // The requests it received and has not answered, and those it sent and waits on (step 9).
+        chatSessionIIAR.tell(a -> ((ChatSession) a).restoreOpenRequests());
+
+        // The agent loop put on it, by file or as YAML, whether or not it has run a turn.
+        String recordedLoop;
+        try {
+            recordedLoop = chatSessionIIAR.<String>ask(a -> ((ChatSession) a).recordedAgentLoop()).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not read the agent loop of " + conversationSquadName, e);
+            recordedLoop = null;
+        }
+        if (recordedLoop != null) applyRecordedAgentLoop(conversationSquadName, chatSessionIIAR, recordedLoop);
+
+        if (turns.isEmpty()) {
+            LOG.info("I/O log session " + sessionId + " holds no restorable turn for " + conversationSquadName
+                    + "; continuing it from turn " + (lastTurn + 1));
+            String[] ids = splitConversationSquadId(conversationSquadName);
+            if (ids != null) applyRecordedSettings(conversationSquadName, sessionId, ids[0], ids[1]);
+            return;
+        }
+
+        for (IoLogView.Turn t : turns) {
+            chatSessionIIAR.tell(a -> {
+                ChatSession c = (ChatSession) a;
+                c.restoreHistory("user", t.question());
+                if (t.error() != null) {
+                    // A failed turn comes back as the failure it was, not as an empty answer
+                    // (TurnErrorInConversation_260913_oo01).
+                    c.restoreHistory("error", "Error: " + t.error(), t.at(), null, null);
+                } else {
+                    c.restoreHistory("assistant", t.answer(), t.at(), t.model(), t.durationMs());
+                }
+            });
+            // collapseTurn appends the pair and moves the collapsed/running boundary past it, which
+            // is the same state a turn ending normally leaves behind — so seeding is just replaying
+            // it once per restored turn, and needs no separate provider API.
+            providerRef.tell(p -> p.collapseTurn(t.question(), t.answer()));
+        }
+        // The questions go on the queue's sent list too, so the checklist the browser draws
+        // starts where the conversation left off (QueueChecklistView_260913_oo01).
+        ActorRef<PromptQueue> queueRef = actorSystem.getActor(conversationSquadName + ".queue");
+        if (queueRef != null) {
+            List<String> questions = turns.stream().map(IoLogView.Turn::question).toList();
+            queueRef.tell(q -> q.seedSent(questions));
+        }
+        LOG.info("Restored " + turns.size() + " turn(s) into " + conversationSquadName
+                + " from I/O log session " + sessionId);
+        String[] ids = splitConversationSquadId(conversationSquadName);
+        if (ids != null) applyRecordedSettings(conversationSquadName, sessionId, ids[0], ids[1]);
+    }
+
+    /**
+     * Puts an actor that registers itself ({@code addIIActor}) into the tree under {@code parent}.
+     * {@code createChild} does this for actors it creates; one that arrives ready-made needs both
+     * halves — its own parent name, and its entry in the parent's child list — or it shows up at
+     * the top of the Actors pane with no owner.
+     *
+     * @param parentName the owning actor's registry name
+     * @param child      the actor to place under it
+     */
+    private void adopt(String parentName, IIActorRef<?> child) {
+        child.setParentName(parentName);
+        ActorRef<?> parent = actorSystem.getActor(parentName);
+        if (parent == null) parent = actorSystem.getIIActor(parentName);
+        if (parent != null) parent.getNamesOfChildren().add(child.getName());
+    }
+
+    /** @return the configured skill roots, or {@code ~/.claude/skills} when none is configured */
+    private List<Path> resolveSkillRoots() {
+        List<String> configured = skillRoots.orElse(List.of()).stream()
+                .map(String::strip).filter(s -> !s.isEmpty()).toList();
+        if (configured.isEmpty()) {
+            return List.of(Path.of(System.getProperty("user.home"), ".claude", "skills"));
+        }
+        return configured.stream().map(Path::of).map(Path::toAbsolutePath).toList();
+    }
+
+    /**
+     * Builds the file range from configuration. A skill root is readable without being listed
+     * again: {@code load_skill}'s third loading level is the {@code read} tool, so configuring a
+     * skill root already declares the intent to read what is in it
+     * ({@code FileAccessScope_260830_oo01}).
+     *
+     * @param skillRootPaths the configured skill roots
+     * @return the range every conversation gets
+     */
+    private FileAccessScope resolveFileScope(List<Path> skillRootPaths) {
+        Path write = writeRoot.map(String::strip).filter(v -> !v.isEmpty())
+                .map(Path::of).orElseGet(() -> Path.of("").toAbsolutePath());
+        List<Path> extra = new ArrayList<>(skillRootPaths);
+        for (String configured : readRoots.orElse(List.of())) {
+            String stripped = configured.strip();
+            if (!stripped.isEmpty()) extra.add(Path.of(stripped));
+        }
+        return new FileAccessScope(write, extra);
+    }
+
+    /** @return the range every conversation's read/write is confined to */
+    public FileAccessScope getFileScope() {
+        return fileScope;
+    }
+
+    /** @return the given project's instructions, or {@code null} if it has none */
+    private String readProjectInstructions(ActorRef<Project> projectRef) {
+        try {
+            return projectRef.ask(Project::getInstructions).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to read project instructions", e);
+            return null;
+        }
+    }
+
+    /**
+     * Points a project at a working directory, reads that directory's {@code AGENTS.md} (or
+     * {@code CLAUDE.md}), and hands the result to every conversation already in that project
+     * ({@code SkillAndAgentsFile_260830_oo01}).
+     *
+     * @param projectId  the project to point
+     * @param workingDir the directory, or {@code null} to clear it
+     * @return a one-line account of what was loaded, or an {@code error: ...} string
+     */
+    /**
+     * Sets the name a person reads for a project, and records it
+     * ({@code ProjectProperty_260929_oo01}).
+     *
+     * @param projectId the project to name
+     * @param name      the name, or null/blank to clear it
+     * @return {@code "ok: ..."}, or {@code "error: ..."} when there is no such project
+     */
+    public String setProjectName(String projectId, String name) {
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef == null) return "error: unknown project: " + projectId;
+        try {
+            projectRef.tell(p -> p.setName(name)).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to set the name of " + projectId, e);
+            return "error: " + e.getMessage();
+        }
+        String applied = getProjectName(projectId);
+        return applied == null ? "ok: name cleared" : "ok: name set to " + applied;
+    }
+
+    /** @return the name a person reads for the project, or null when it has none */
+    public String getProjectName(String projectId) {
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef == null) return null;
+        try {
+            return projectRef.ask(Project::getName).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not read the name of " + projectId, e);
+            return null;
+        }
+    }
+
+    /**
+     * Sets the name a person reads for one conversation, and records it in that conversation's
+     * I/O log session so that it comes back on restart, as a project's name does
+     * ({@link #setProjectName}).
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @param name      the name, or null/blank to clear it
+     * @return {@code "ok: ..."}, or {@code "error: ..."} when there is no such conversation
+     */
+    @Override
+    public String setChatName(String projectId, String chatId, String name) {
+        String qualifiedName = chatActorName(projectId, chatId);
+        ActorRef<ConversationSquad> squadRef = chats.get(qualifiedName);
+        if (squadRef == null) return "error: unknown conversation: " + qualifiedName;
+        try {
+            squadRef.tell(c -> c.setName(name)).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to set the name of " + qualifiedName, e);
+            return "error: " + e.getMessage();
+        }
+        // The squad records the name itself (EachActorRecordsItsOwnState_261118_oo01).
+        String applied = getChatName(projectId, chatId);
+        return applied == null ? "ok: name cleared" : "ok: name set to " + applied;
+    }
+
+    // ── Organization (ConversationReportingLines_261108_oo01) ──────────────────────────────────────
+
+    /** The name of a project's organization actor, which {@code ask_chat} also looks up. */
+    public static String organizationActorName(String projectId) {
+        return projectId + "/organization";
+    }
+
+    /** @return the project's organization actor, created as the project's child the first time it is asked for */
+    public synchronized ActorRef<Organization> organizationOf(String projectId) {
+        String name = organizationActorName(projectId);
+        ActorRef<Organization> ref = actorSystem.getActor(name);
+        if (ref != null) return ref;
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef == null) throw new IllegalArgumentException("Unknown project: " + projectId);
+        return projectRef.createChild(name,
+                new Organization(com.scivicslab.chatui.core.iolog.SessionEntries.ofProject(ioLogStore, ioLogView, projectId)));
+    }
+
+    /** @return the bare ids of the project's conversations, in id order */
+    private List<String> chatIdsOf(String projectId) {
+        String prefix = projectId + "/chat-";
+        return chats.keySet().stream().filter(n -> n.startsWith(prefix))
+                .map(n -> n.substring(prefix.length())).sorted().toList();
+    }
+
+    @Override
+    public String listChats(String projectId, String callerChatId) {
+        Organization snapshot = organizationSnapshot(projectId);
+        StringBuilder sb = new StringBuilder();
+        for (String id : chatIdsOf(projectId)) {
+            String name = getChatName(projectId, id);
+            String sup = snapshot.superiorOf(id);
+            ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, id));
+            sb.append("chat-").append(id)
+              .append(name == null ? "" : " \"" + name + "\"")
+              .append(id.equals(callerChatId) ? " (you)" : "")
+              .append(id.equals(snapshot.liaison()) ? " (liaison)" : "")
+              .append("; superior: ").append(sup == null ? "none" : "chat-" + sup)
+              .append("; subordinates: ").append(snapshot.subordinatesOf(id).size());
+            if (session != null) {
+                sb.append("; ").append(session.getProviderIdDirect()).append(" ").append(session.getModelDirect())
+                  .append(session.isBusyDirect() ? "; busy" : "; idle");
+            }
+            sb.append('\n');
+        }
+        sb.append("Each superior may have at most ").append(snapshot.maxSubordinates()).append(" subordinates.");
+        return sb.toString();
+    }
+
+    /** A copy of the project's organization, read in one message, for building text from it. */
+    private Organization organizationSnapshot(String projectId) {
+        Organization copy = new Organization();
+        org.json.JSONObject json = askOrDefault(organizationOf(projectId), Organization::toJson, null);
+        if (json != null) copy.loadJson(json);
+        return copy;
+    }
+
+    @Override
+    public String setSuperior(String projectId, String chatId, String superiorChatId) {
+        List<String> present = chatIdsOf(projectId);
+        if (!present.contains(chatId)) return "error: no such conversation: " + chatActorName(projectId, chatId);
+        String sup = superiorChatId == null || superiorChatId.isBlank() ? null : superiorChatId;
+        if (sup != null && !present.contains(sup)) return "error: no such conversation: " + chatActorName(projectId, sup);
+        String refusal = askOrDefault(organizationOf(projectId), o -> o.setSuperior(chatId, sup), "the organization did not answer");
+        if (refusal != null) return "error: refused — " + refusal;
+        return sup == null ? "ok: chat-" + chatId + " has no superior now"
+                : "ok: chat-" + chatId + " now reports to chat-" + sup;
+    }
+
+    @Override
+    public String roomFor(String projectId, String superiorChatId) {
+        return askOrDefault(organizationOf(projectId), o -> o.roomFor(superiorChatId), null);
+    }
+
+    @Override
+    public String positionOf(String projectId, String chatId) {
+        return organizationSnapshot(projectId).positionText(projectId, chatId, c -> labelOf(projectId, c));
+    }
+
+    @Override
+    public String superiorToAsk(String projectId, String chatId) {
+        if (!projects.containsKey(projectId) || isLiaison(projectId, chatId)) return null;
+        return organizationSnapshot(projectId).superiorOf(chatId);
+    }
+
+    // ── What the team desk needs (TeamBuiltByProjectWorkflow_261108_oo01) ──────────────────────────────
+
+    /** @return the bare id of the project's liaison */
+    public String liaisonIdOf(String projectId) {
+        return organizationSnapshot(projectId).liaison();
+    }
+
+    /** @return how many subordinates one superior of the project may have */
+    public int subordinateLimitOf(String projectId) {
+        return organizationSnapshot(projectId).maxSubordinates();
+    }
+
+    /** @return how many more subordinates the conversation can take before it reaches the project's limit */
+    public int roomLeftUnder(String projectId, String chatId) {
+        Organization snapshot = organizationSnapshot(projectId);
+        return Math.max(0, snapshot.maxSubordinates() - snapshot.subordinatesOf(chatId).size());
+    }
+
+    /**
+     * @return the names of the models the conversation's provider lists now; empty when it lists none, or the
+     *         conversation does not exist
+     */
+    public List<String> modelNamesOf(String projectId, String chatId) {
+        ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
+        if (session == null) return List.of();
+        try {
+            return session.ask(a -> ((ChatSession) a).getAvailableModels()).get(60, TimeUnit.SECONDS).stream()
+                    .map(m -> m.name()).toList();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "could not read the models of " + chatActorName(projectId, chatId), e);
+            return List.of();
+        }
+    }
+
+    @Override
+    public String rolesText(String projectId) {
+        return rolesTextOf(projectId);
+    }
+
+    /**
+     * @return the text of the project's own role table, {@code <working directory>/team/team-roles.yaml}, or {@code ""}
+     *         when the project has none
+     */
+    public String rolesTextOf(String projectId) {
+        ActorRef<Project> project = projects.get(projectId);
+        if (project == null) throw new IllegalArgumentException("Unknown project: " + projectId);
+        Path dir = askOrDefault(project, Project::getWorkingDir, null);
+        if (dir == null) return "";
+        Path file = dir.resolve("team").resolve("team-roles.yaml");
+        try {
+            return Files.isRegularFile(file) ? Files.readString(file) : "";
+        } catch (IOException e) {
+            throw new IllegalStateException("could not read " + file + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Puts one message in the conversation's queue, as the timekeeper puts its notices: it is not a request, so it has
+     * no request id and nobody waits for an answer.
+     *
+     * @param source where the message comes from, e.g. {@code job:project1/job-02}
+     * @return {@code null} when queued, otherwise why not
+     */
+    public String notifyConversation(String projectId, String chatId, String source, String text) {
+        String name = chatActorName(projectId, chatId);
+        ChatSessionIIAR session = chatSessions.get(name);
+        ActorRef<PromptQueue> queue = actorSystem.getActor(name + ".queue");
+        if (session == null || queue == null) return "error: no such conversation: " + name;
+        ActorRef<SseConnection> sse = actorSystem.getActor(name + ".sse");
+        java.util.function.Consumer<com.scivicslab.chatui.core.rest.ChatEvent> watchers =
+                sse == null ? event -> { } : event -> sse.tell(c -> c.emit(event));
+        queue.tell(q -> q.enqueue(text, null, "queue", watchers, session.asChatSessionRef(), source, null,
+                new java.util.concurrent.CompletableFuture<>(), false, true, List.of(), null, false));
+        return null;
+    }
+
+    private String labelOf(String projectId, String chatId) {
+        String name = getChatName(projectId, chatId);
+        return "chat-" + chatId + (name == null ? "" : " \"" + name + "\"");
+    }
+
+    /**
+     * Sets the project's liaison and subordinate limit, either left {@code null} to keep it.
+     *
+     * @return {@code "ok: ..."} or {@code "error: ..."}
+     */
+    public String setOrganizationSettings(String projectId, String liaison, Integer maxSubordinates) {
+        if (!projects.containsKey(projectId)) return "error: unknown project: " + projectId;
+        if (liaison != null && !chatIdsOf(projectId).contains(liaison)) {
+            return "error: no such conversation: " + chatActorName(projectId, liaison);
+        }
+        String refusal = askOrDefault(organizationOf(projectId), o -> {
+            if (liaison != null) { String r = o.setLiaison(liaison); if (r != null) return r; }
+            return maxSubordinates == null ? null : o.setMaxSubordinates(maxSubordinates);
+        }, "the organization did not answer");
+        if (refusal != null) return "error: " + refusal;
+        return "ok";
+    }
+
+    /** @return whether the conversation is its project's liaison, the one that talks with the person */
+    public boolean isLiaison(String projectId, String chatId) {
+        if (!projects.containsKey(projectId)) return false;
+        return chatId.equals(askOrDefault(organizationOf(projectId), Organization::liaison, null));
+    }
+
+    /**
+     * Puts a conversation on a bundled agent loop and records it, so a restart puts it back
+     * ({@code ConversationRestoreOnRestart_260904_oo01}). What {@code POST .../agent-loop-workflow} calls.
+     *
+     * @return {@code null} on success, or {@code "error: ..."} with the conversation left on its loop
+     */
+    public String setAgentLoopFile(String projectId, String chatId, String file) {
+        String name = chatActorName(projectId, chatId);
+        ChatSessionIIAR session = chatSessions.get(name);
+        if (session == null) return "error: no such conversation: " + name;
+        // The conversation records the loop itself (EachActorRecordsItsOwnState_261118_oo01).
+        return session.setAgentLoopWorkflowFile(file);
+    }
+
+    /**
+     * {@code set_agent_loop}: puts the YAML on the target conversation and records it, so a restart puts it back.
+     *
+     * @return {@code "ok: ..."}, or {@code "error: ..."} with nothing changed
+     */
+    @Override
+    public String setAgentLoop(String myProjectId, String target, String yaml) {
+        String outcome = com.scivicslab.chatui.agent.SetAgentLoopTool.setAgentLoop(actorSystem, myProjectId, target, yaml);
+        if (outcome.startsWith("ok")) {
+            ChatSessionIIAR session = chatSessions.get(resolveChatName(myProjectId, target));
+            if (session != null) session.recordAgentLoopDirect(ChatSession.AGENT_LOOP_YAML + yaml);
+        }
+        return outcome;
+    }
+
+    private void applyRecordedAgentLoop(String conversationSquadName, ChatSessionIIAR session, String entry) {
+        try {
+            if (entry.startsWith(ChatSession.AGENT_LOOP_FILE)) {
+                String error = session.setAgentLoopWorkflowFile(entry.substring(ChatSession.AGENT_LOOP_FILE.length()), false);
+                if (error != null) LOG.warning("Restoring the agent loop of " + conversationSquadName + ": " + error);
+            } else if (entry.startsWith(ChatSession.AGENT_LOOP_YAML)) {
+                byte[] yaml = entry.substring(ChatSession.AGENT_LOOP_YAML.length()).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                session.<Void>ask(i -> {
+                    ChatSession chat = (ChatSession) i;
+                    chat.reset();
+                    chat.readYaml(new java.io.ByteArrayInputStream(yaml));
+                    return null;
+                }).get(10, TimeUnit.SECONDS);
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not restore the agent loop of " + conversationSquadName, e);
+        }
+    }
+
+    /**
+     * Sets a role edge and saves it at once with the project's settings, where the organization is saved
+     * ({@code CollaborationGraph_260828_oo01}), so that a restart finds it.
+     *
+     * @param myChatName         the calling conversation's qualified name
+     * @param target             whose role table to set, as {@code set_collaborator} takes it
+     * @param role               the role name
+     * @param collaboratorChatId who plays the role, as {@code set_collaborator} takes it
+     * @return {@code "ok: ..."}, or {@code "error: ..."} with nothing changed
+     */
+    @Override
+    public String setCollaborator(String myChatName, String target, String role, String collaboratorChatId) {
+        return setCollaborator(myChatName, target, role, collaboratorChatId, null);
+    }
+
+    /** As above; {@code node} names another chat-ui instance this one knows, as {@code ask_chat} takes it. */
+    @Override
+    public String setCollaborator(String myChatName, String target, String role, String collaboratorChatId, String node) {
+        String projectId = myChatName.substring(0, myChatName.indexOf('/'));
+        if (!projects.containsKey(projectId)) return "error: unknown project: " + projectId;
+        com.scivicslab.chatui.core.remote.RemoteNodes nodes = com.scivicslab.chatui.core.remote.RemoteNodes.of(actorSystem);
+        return com.scivicslab.chatui.agent.SetCollaboratorTool.setCollaborator(rolesOf(projectId),
+                myChatName, target, role, collaboratorChatId, node, n -> nodes != null && nodes.knows(n));
+    }
+
+    /** @return the conversation's timekeeper, or {@code null} when there is no such conversation */
+    ActorRef<Timekeeper> timekeeperOf(String projectId, String chatId) {
+        return actorSystem.getActor(chatActorName(projectId, chatId) + ".timekeeper");
+    }
+
+    /** The name of a project's role table, its child ({@code EachActorRecordsItsOwnState_261118_oo01}). */
+    public static String rolesActorName(String projectId) {
+        return projectId + "/roles";
+    }
+
+    /** @return the project's role table, created with the project ({@link #wireProject}) */
+    public ActorRef<RoleTable> rolesOf(String projectId) {
+        ActorRef<RoleTable> ref = actorSystem.getActor(rolesActorName(projectId));
+        if (ref == null) throw new IllegalArgumentException("Unknown project: " + projectId);
+        return ref;
+    }
+
+    /**
+     * @param from the qualified name of the conversation the role is played for, e.g. {@code "project1/chat-02"}
+     * @return the qualified name of who plays {@code role} for it, or {@code null} when nobody does
+     */
+    public String collaboratorOf(String from, String role) {
+        int slash = from.indexOf('/');
+        if (slash < 0 || !projects.containsKey(from.substring(0, slash))) return null;
+        return askOrDefault(rolesOf(from.substring(0, slash)), t -> t.collaborator(from, role), null);
+    }
+
+    /** Tells every project's role table to forget something, and waits, so a restart right after finds it recorded. */
+    private void forgetInEveryRoleTable(java.util.function.Consumer<RoleTable> forget) {
+        for (String p : List.copyOf(projects.keySet())) {
+            try {
+                rolesOf(p).tell(forget).get(10, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Could not update the role edges of " + p, e);
+            }
+        }
+    }
+
+    /**
+     * The project's conversations with their superior and role edges, for the left pane's graph
+     * ({@code ConversationGraphInTheLeftPane_261117_oo01}). Read from the organization and the collaboration
+     * graph on each call; neither is copied.
+     *
+     * @return the graph, or {@code null} for an unknown project
+     */
+    public ConversationGraph conversationGraph(String projectId) {
+        if (!projects.containsKey(projectId)) return null;
+        List<String> ids = chatIdsOf(projectId);
+        Organization org = organizationSnapshot(projectId);
+        Map<String, String> names = new HashMap<>();
+        Map<String, String> superiors = new HashMap<>();
+        for (String id : ids) {
+            String name = getChatName(projectId, id);
+            if (name != null) names.put(id, name);
+            String sup = org.superiorOf(id);
+            if (sup != null) superiors.put(id, sup);
+        }
+        List<RoleTable.Edge> edges = askOrDefault(rolesOf(projectId), RoleTable::edges, List.<RoleTable.Edge>of());
+        // What each conversation runs on, read from it now as get_chat_status reads it (without waiting for a
+        // running turn), so a set_chat_model or set_chat_provider shows on the next call.
+        Map<String, ConversationGraph.Model> models = new HashMap<>();
+        List<ConversationControls.ProviderOption> options = providerOptions();
+        for (String id : ids) {
+            ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, id));
+            if (session == null) continue;
+            try {
+                models.put(id, new ConversationGraph.Model(
+                        providerLabel(options, session.getProviderIdDirect(), session.getToolSetDirect()),
+                        session.getModelDirect()));
+            } catch (RuntimeException e) {
+                LOG.log(Level.FINE, "Could not read what " + id + " runs on", e);
+            }
+        }
+        return ConversationGraph.of(projectId, getProjectName(projectId), ids, names, superiors, org.liaison(), edges, models);
+    }
+
+    /**
+     * Every project's graph, for the left pane's single tree: each read from the actors on this call, as
+     * {@link #conversationGraph} reads one ({@code ConversationGraphInTheLeftPane_261117_oo01}).
+     *
+     * @return the projects in the order of their numbers
+     */
+    public ConversationGraph.All conversationGraphs() {
+        List<ConversationGraph> all = new ArrayList<>();
+        for (String projectId : projectsInNumberOrder()) {
+            ConversationGraph g = conversationGraph(projectId);
+            if (g != null) all.add(g);
+        }
+        return new ConversationGraph.All(all);
+    }
+
+    /** project1, project2, ..., project10: by the number at the end, then by name for any other id. */
+    private List<String> projectsInNumberOrder() {
+        List<String> ids = new ArrayList<>(projects.keySet());
+        ids.sort((a, b) -> {
+            String na = a.replaceAll("^\\D*", ""), nb = b.replaceAll("^\\D*", "");
+            if (!na.isEmpty() && !nb.isEmpty() && na.chars().allMatch(Character::isDigit) && nb.chars().allMatch(Character::isDigit)) {
+                int c = Long.compare(Long.parseLong(na), Long.parseLong(nb));
+                if (c != 0) return c;
+            }
+            return a.compareTo(b);
+        });
+        return ids;
+    }
+
+    /**
+     * The name the screen's provider dropdown gives a provider kind with a tool set; the kind's first entry when
+     * no entry has that tool set; the kind itself when the dropdown does not list it.
+     */
+    static String providerLabel(List<ConversationControls.ProviderOption> options, String kind, String toolSetId) {
+        if (kind == null) return null;
+        ConversationControls.ProviderOption first = null;
+        for (ConversationControls.ProviderOption o : options) {
+            if (!kind.equals(o.kind())) continue;
+            if (o.toolSet() != null && o.toolSet().id().equals(toolSetId)) return o.label();
+            if (first == null) first = o;
+        }
+        return first != null ? first.label() : kind;
+    }
+
+    /** @return the project's organization as JSON, for the Project tab */
+    public org.json.JSONObject organizationJson(String projectId) {
+        return askOrDefault(organizationOf(projectId), Organization::toJson, new org.json.JSONObject());
+    }
+
+    /** @return the name a person reads for the conversation, or null when it has none */
+    public String getChatName(String projectId, String chatId) {
+        return nameOfChat(chatActorName(projectId, chatId));
+    }
+
+    private String nameOfChat(String qualifiedName) {
+        ActorRef<ConversationSquad> squadRef = chats.get(qualifiedName);
+        if (squadRef == null) return null;
+        try {
+            return squadRef.ask(ConversationSquad::getName).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not read the name of " + qualifiedName, e);
+            return null;
+        }
+    }
+
+    /**
+     * Puts a project that came back from the log onto the name and working directory it recorded, and hands the
+     * directory's instructions to its conversations, as setting the directory does. The project reads them itself
+     * and writes nothing ({@code EachActorRecordsItsOwnState_261118_oo01}).
+     */
+    private void restoreProjectProperties(String projectId) {
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef == null) return;
+        try {
+            projectRef.tell(Project::restore).get(10, TimeUnit.SECONDS);
+            handInstructions(projectId, projectRef);
+            LOG.info("Restored the properties of " + projectId + ": name=" + getProjectName(projectId));
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not restore the properties of " + projectId, e);
+        }
+    }
+
+    public String setProjectWorkingDir(String projectId, Path workingDir) {
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef == null) return "error: unknown project: " + projectId;
+        String outcome;
+        try {
+            outcome = projectRef.ask(p -> p.setWorkingDir(workingDir)).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to set working directory for " + projectId, e);
+            return "error: " + e.getMessage();
+        }
+        handInstructions(projectId, projectRef);
+        return outcome;
+    }
+
+    /** Hands the project's instructions, as the project read them from its working directory, to its conversations. */
+    private void handInstructions(String projectId, ActorRef<Project> projectRef) {
+        String instructions = readProjectInstructions(projectRef);
+        String prefix = projectId + "/";
+        for (Map.Entry<String, ChatSessionIIAR> entry : chatSessions.entrySet()) {
+            if (!entry.getKey().startsWith(prefix)) continue;
+            entry.getValue().tell(a -> ((ChatSession) a).setProjectInstructions(instructions));
+        }
+    }
+
+    /**
+     * @param projectId the project to describe
+     * @return that project's {@link Project} actor, or {@code null} if there is no such project
+     */
+    public ActorRef<Project> getProject(String projectId) {
+        return projects.get(projectId);
+    }
+
+    /** @return the shared {@link SkillRegistry}, or {@code null} before the system is initialised */
+    public ActorRef<SkillRegistry> getSkillRegistry() {
+        return skillRegistryRef;
+    }
+
+    /**
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return the conversation's {@link PromptQueue}, or {@code null} if it does not exist
+     */
+    /**
+     * A conversation's own LLM provider, by name.
+     *
+     * <p>Looked up rather than held: the provider is a child of the ChatSession, created when the
+     * conversation is ({@code ChatSessionPorting_260823_oo01}). A child of the ChatSession, which
+     * is itself a child of the conversation — so the name carries both steps, and asking for
+     * {@code <conversation>.provider} finds nothing.</p>
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return that conversation's provider, or {@code null} if it has none
+     */
+    @SuppressWarnings("unchecked")
+    public ActorRef<LlmProvider> getProviderRef(String projectId, String chatId) {
+        return (ActorRef<LlmProvider>) (ActorRef<?>)
+                actorSystem.getActor(chatSessionActorName(projectId, chatId) + PROVIDER_SUFFIX);
+    }
+
+    /**
+     * Replaces a conversation's provider with one of another kind
+     * ({@code CliHarnessProvider_260912_oo01}). The provider is a child of the ChatSession and the
+     * ChatSession finds it by name, so the new one takes the old one's name: the old actor is
+     * cancelled, closed and removed from the registry and from the ChatSession's child list, and
+     * the new provider is created under the same name. The ChatSession is then told about the new
+     * provider and tool set on its own thread, so a turn already running finishes on the old one.
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @param kind      {@code openai-compat}, {@code claude} or {@code codex}
+     * @param toolSet   the conversation's tool set from now on
+     * @throws IllegalArgumentException for an unknown kind, or a tool set the kind cannot take
+     */
+    @Override
+    public synchronized void setProvider(String projectId, String chatId, String kind, ToolSet toolSet) {
+        setProvider(projectId, chatId, kind, toolSet, true);
+    }
+
+    /**
+     * The providers a conversation can be put on, as the screen's provider dropdown lists them
+     * ({@code GET /api/plugins}'s {@code providerChoices}).
+     */
+    @Override
+    public List<ConversationControls.ProviderOption> providerOptions() {
+        List<ConversationControls.ProviderOption> options = new ArrayList<>();
+        for (com.scivicslab.chatui.plugin.ProviderChoice c : pluginRegistry.choices()) {
+            ToolSet defaultToolSet = pluginRegistry.factory(c.kind()).map(LlmProviderFactory::defaultToolSet)
+                    .orElse(c.toolSet());
+            options.add(new ConversationControls.ProviderOption(c.value(defaultToolSet), c.kind(), c.toolSet(), c.label()));
+        }
+        return options;
+    }
+
+    /**
+     * @param record whether to write a settings record; a restore replays an existing record and
+     *               must not write a new one, or the provider's default model would overwrite the
+     *               recorded model (ConversationSettingsRecord_260913_oo01)
+     */
+    private synchronized void setProvider(String projectId, String chatId, String kind, ToolSet toolSet, boolean record) {
+        if (!hasChat(projectId, chatId)) {
+            throw new IllegalArgumentException("no such conversation: " + chatActorName(projectId, chatId));
+        }
+        String qualifiedName = chatActorName(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = chatSessions.get(qualifiedName);
+        String providerName = chatSessionIIAR.getName() + PROVIDER_SUFFIX;
+        LlmProvider provider = newProvider(kind, toolSet, projectId, chatId);
+
+        ActorRef<LlmProvider> old = actorSystem.getActor(providerName);
+        if (old != null) {
+            try {
+                old.ask(p -> { p.cancel(); return null; }).get(5, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Old provider of " + qualifiedName + " did not cancel cleanly", e);
+            }
+            old.close();
+            actorSystem.removeActor(providerName);
+            chatSessionIIAR.getNamesOfChildren().remove(providerName);
+        }
+        ActorRef<LlmProvider> providerRef = chatSessionIIAR.<LlmProvider>createChild(providerName, provider);
+        chatSessionIIAR.tell(a -> {
+            ChatSession c = (ChatSession) a;
+            c.setProvider(provider, Optional.empty());
+            c.setToolSet(toolSet);
+            c.setProviderName(providerRef.getName());
+            // The conversation records its new provider with the change; a restore writes nothing.
+            if (record) c.recordSettings(null);
+        });
+        LOG.info("Provider of " + qualifiedName + " is now " + kind + " with tool set " + toolSet.id());
+    }
+
+    /**
+     * Sets which model a conversation runs on, and records it with the conversation's provider
+     * and tool set ({@code ConversationSettingsRecord_260913_oo01}). Delivered to the provider's
+     * own actor, so a change made while a turn is running lands after that turn.
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @param model     the model name
+     * @return {@code false} when the conversation has no provider
+     */
+    @Override
+    public boolean setModel(String projectId, String chatId, String model) {
+        return setModel(projectId, chatId, model, false);
+    }
+
+    /**
+     * @param wait whether to wait until the provider is on the model: a project workflow's next step expects it to
+     *             be (as {@code Chats} always waited), while the screen and the tools return at once, since a turn
+     *             running on the provider would hold them until it ends
+     */
+    private boolean setModel(String projectId, String chatId, String model, boolean wait) {
+        ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
+        if (providerRef == null) return false;
+        java.util.concurrent.CompletableFuture<Void> set = providerRef.tell(p -> p.setModel(model));
+        if (wait) set.join();
+        ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
+        if (session != null) session.recordSettingsDirect(model);
+        return true;
+    }
+
+    /**
+     * Sets what a conversation asks the server to sample at, and records it with the rest of that
+     * conversation's settings ({@code ConversationTemperature_260914_oo01}).
+     *
+     * @param projectId   owning project's id
+     * @param chatId      conversation id within that project
+     * @param temperature what to sample at, or {@code null} to ask for nothing
+     * @return {@code false} when the conversation has no provider
+     */
+    /**
+     * Sets whether one conversation asks its model to skip the thinking phase
+     * ({@code ThinkingAndEffortAreConversationSettings_260917_oo01}).
+     *
+     * @return {@code false} when there is no such conversation
+     */
+    public boolean setNoThink(String projectId, String chatId, boolean value) {
+        String name = chatActorName(projectId, chatId);
+        ChatSessionIIAR session = chatSessions.get(name);
+        if (session == null) return false;
+        // The conversation records it with the change, so a restart puts it back.
+        session.tell(a -> {
+            ChatSession c = (ChatSession) a;
+            c.setNoThink(value);
+            c.recordSettings(null);
+        }).join();
+        return true;
+    }
+
+    /**
+     * Sets how hard one conversation's provider should work on an answer, where it has such a
+     * setting ({@code ThinkingAndEffortAreConversationSettings_260917_oo01}).
+     *
+     * @return {@code false} when there is no such conversation
+     */
+    public boolean setEffort(String projectId, String chatId, String effort) {
+        ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
+        if (providerRef == null) return false;
+        providerRef.tell(p -> p.setEffort(effort)).join();
+        // The conversation, which holds the provider, records it, so a restart puts it back.
+        ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
+        if (session != null) session.recordSettingsDirect(null);
+        return true;
+    }
+
+    /**
+     * Changes one conversation's timekeeper limits and records them with its other settings
+     * ({@code TimekeeperPausesATurnForAnUrgentRequest_261107_oo01}).
+     *
+     * @param urgentWaitMinutes     the new limit for an urgent request waiting at the front, or {@code null} to keep it
+     * @param childReplyWarnMinutes the new limit for a sent request with no reply, or {@code null} to keep it
+     * @return the limits now in force, as {@code [urgentWaitMinutes, childReplyWarnMinutes]}
+     * @throws IllegalArgumentException for an unknown conversation or a limit below one minute
+     */
+    @Override
+    public long[] setTimekeeperLimits(String projectId, String chatId, Long urgentWaitMinutes, Long childReplyWarnMinutes) {
+        if ((urgentWaitMinutes != null && urgentWaitMinutes < 1) || (childReplyWarnMinutes != null && childReplyWarnMinutes < 1)) {
+            throw new IllegalArgumentException("a limit is a whole number of minutes, at least 1");
+        }
+        String name = chatActorName(projectId, chatId);
+        ActorRef<Timekeeper> keeper = actorSystem.getActor(name + ".timekeeper");
+        ChatSessionIIAR session = chatSessions.get(name);
+        if (keeper == null || session == null) throw new IllegalArgumentException("no such conversation: " + name);
+        long[] limits;
+        try {
+            limits = keeper.ask(k -> {
+                k.setLimits(urgentWaitMinutes, childReplyWarnMinutes);
+                return new long[] {k.urgentWaitMinutes(), k.childReplyWarnMinutes()};
+            }).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            throw new IllegalStateException("the timekeeper of " + name + " did not answer: " + e.getMessage(), e);
+        }
+        // The timekeeper records its limits itself (EachActorRecordsItsOwnState_261118_oo01).
+        return limits;
+    }
+
+    public boolean setTemperature(String projectId, String chatId, Double temperature) {
+        ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
+        if (providerRef == null) return false;
+        providerRef.tell(p -> p.setTemperature(temperature)).join();
+        ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
+        if (session != null) session.recordSettingsDirect(null);
+        return true;
+    }
+
+    /**
+     * Puts one conversation on a named provider kind, for a job that names it
+     * ({@code ChooseTheLlmPerRole_260915_oo01}).
+     *
+     * <p>A kind this instance was not started with is refused with the reason, so a job asking for
+     * Claude Code on an instance started without the harness plugin stops there rather than
+     * running the whole checklist on the wrong model.</p>
+     *
+     * @param chatName the conversation's full actor name, e.g. {@code project1/chat-02}
+     * @param kind     the provider kind
+     * @param tools    the tool set, or {@code ""} for the kind's own default
+     * @return what went wrong, or {@code null} when the change was made
+     */
+    private String changeProviderForPlan(String chatName, String kind, String tools) {
+        String[] parts = splitConversationSquadId(chatName);
+        if (parts == null) return "not a conversation name: " + chatName;
+        try {
+            ToolSet toolSet = (tools == null || tools.isBlank())
+                    ? pluginRegistry.factory(kind.trim().toLowerCase()).map(LlmProviderFactory::defaultToolSet)
+                            .orElse(ToolSet.FULL)
+                    : ToolSet.parse(tools);
+            setProvider(parts[0], parts[1], kind, toolSet);
+            return null;
+        } catch (IllegalArgumentException e) {
+            return e.getMessage();
+        }
+    }
+
+    /**
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return what that conversation asks to sample at, or {@code null} when it asks for nothing
+     */
+    public Double getTemperature(String projectId, String chatId) {
+        return temperatureOf(chatActorName(projectId, chatId));
+    }
+
+    /** @return what that conversation asks to sample at, or {@code null} when it asks for nothing */
+    private Double temperatureOf(String conversationSquadName) {
+        ActorRef<LlmProvider> providerRef = actorSystem.getActor(conversationSquadName + CHAT_SESSION_SUFFIX + PROVIDER_SUFFIX);
+        if (providerRef == null) return null;
+        try {
+            return providerRef.ask(LlmProvider::getTemperature).join();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Puts a restored conversation back on the provider and model its last settings record
+     * names ({@code ConversationSettingsRecord_260913_oo01}). A kind this instance was not started
+     * with — a harness plugin not passed on the command line — leaves the default in place and
+     * says so.
+     */
+    private void applyRecordedSettings(String conversationSquadName, long sessionId, String projectId, String chatId) {
+        IoLogView.Settings s;
+        try {
+            ChatSessionIIAR own = chatSessions.get(conversationSquadName);
+            s = own == null ? null : own.<IoLogView.Settings>ask(a -> ((ChatSession) a).recordedSettings()).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not read the recorded settings of " + conversationSquadName, e);
+            return;
+        }
+        if (s == null) return;
+        String kind = s.provider() == null ? OpenAiCompatProviderFactory.KIND : s.provider();
+        ToolSet toolSet = ToolSet.FULL;
+        try {
+            if (s.tools() != null) toolSet = ToolSet.parse(s.tools());
+        } catch (IllegalArgumentException e) {
+            LOG.warning(conversationSquadName + ": recorded tool set '" + s.tools() + "' is unknown; using full");
+        }
+        if (!OpenAiCompatProviderFactory.KIND.equals(kind) || toolSet != ToolSet.FULL) {
+            if (pluginRegistry.factory(kind).isEmpty()) {
+                LOG.warning(conversationSquadName + " was on provider '" + kind + "', which this instance was not started with"
+                        + " (available: " + String.join(", ", pluginRegistry.kinds()) + "); staying on the default");
+                return;
+            }
+            try {
+                setProvider(projectId, chatId, kind, toolSet, false);
+            } catch (IllegalArgumentException e) {
+                LOG.warning(conversationSquadName + ": recorded provider could not be restored: " + e.getMessage());
+                return;
+            }
+        }
+        if (s.model() != null && !s.model().isBlank()) {
+            ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
+            if (providerRef != null) {
+                String model = s.model();
+                providerRef.tell(p -> p.setModel(model));
+            }
+        }
+        if (s.temperature() != null) {
+            ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
+            if (providerRef != null) {
+                Double t = s.temperature();
+                providerRef.tell(p -> p.setTemperature(t));
+            }
+        }
+        // Absent in a record written before they were kept: left at their defaults.
+        if (s.noThink() != null) {
+            ChatSessionIIAR session = chatSessions.get(conversationSquadName);
+            boolean noThink = s.noThink();
+            if (session != null) session.tell(a -> ((ChatSession) a).setNoThink(noThink));
+        }
+        if (s.effort() != null && !s.effort().isBlank()) {
+            ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
+            String effort = s.effort();
+            if (providerRef != null) providerRef.tell(p -> p.setEffort(effort));
+        }
+        if (s.mcpServers() != null && !s.mcpServers().isEmpty()) {
+            ChatSessionIIAR session = chatSessions.get(conversationSquadName);
+            Map<String, String> servers = s.mcpServers();
+            if (session != null) session.tell(a -> {
+                try {
+                    ((ChatSession) a).setMcpServers(servers);
+                } catch (IllegalArgumentException e) {
+                    LOG.warning(conversationSquadName + ": recorded MCP servers not restored: " + e.getMessage());
+                }
+            });
+        }
+        LOG.info("Restored settings of " + conversationSquadName + ": provider=" + kind + ", tools=" + toolSet.id()
+                + ", model=" + s.model() + ", temperature=" + s.temperature());
+    }
+
+    /** Builds a provider of the given kind for one conversation, through the registry's factory. */
+    private LlmProvider newProvider(String kind, ToolSet toolSet, String projectId, String chatId) {
+        String k = kind == null ? "" : kind.trim().toLowerCase();
+        LlmProviderFactory factory = pluginRegistry.factory(k).orElseThrow(() ->
+                new IllegalArgumentException("unknown provider kind '" + kind + "' (available: "
+                        + String.join(", ", pluginRegistry.kinds()) + ")"));
+        if (!factory.accepts(toolSet)) {
+            throw new IllegalArgumentException("provider kind '" + k + "' cannot take tool set '"
+                    + toolSet.id() + "'");
+        }
+        return factory.create(new ProviderCreationContext(projectId, chatId, providerWorkingDir(projectId),
+                toolSet, httpPort, ChatUiActorSystem::configValue));
+    }
+
+    /** One configuration value, for a plugin's own keys; empty outside a CDI-managed process. */
+    private static Optional<String> configValue(String key) {
+        try {
+            return org.eclipse.microprofile.config.ConfigProvider.getConfig().getOptionalValue(key, String.class);
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    /** The directory a harness works in: the project's working directory, else the write root. */
+    private java.nio.file.Path providerWorkingDir(String projectId) {
+        ActorRef<Project> projectRef = projects.get(projectId);
+        if (projectRef != null) {
+            try {
+                java.nio.file.Path dir = projectRef.ask(Project::getWorkingDir).get(5, TimeUnit.SECONDS);
+                if (dir != null) return dir;
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Could not read the working directory of " + projectId, e);
+            }
+        }
+        return fileScope == null ? null : fileScope.writeRoot();
+    }
+
+    /** @return the provider kinds and plugin tools this instance was started with */
+    public PluginRegistry getPluginRegistry() { return pluginRegistry; }
+
+    @Override
+    public String setMcpServers(String myProjectId, String target, String serversJson) {
+        Map<String, String> servers;
+        try {
+            servers = McpServerList.parse(serversJson);
+        } catch (IllegalArgumentException e) {
+            return "error: " + e.getMessage();
+        }
+        String name = resolveChatName(myProjectId, target);
+        ChatSessionIIAR session = chatSessions.get(name);
+        if (session == null) return "error: no such conversation: " + name;
+        session.tell(a -> {
+            ChatSession c = (ChatSession) a;
+            c.setMcpServers(servers);
+            c.recordSettings(null);
+        }).join();
+        return servers.isEmpty() ? "ok: " + name + " has no external MCP server"
+                : "ok: " + name + " uses the MCP servers " + String.join(", ", servers.keySet())
+                        + "; their tools are given to the model from its next turn as <server>__<tool>";
+    }
+
+    /**
+     * @param conversation a qualified conversation name, e.g. {@code "project1/chat-01"}
+     * @return its external MCP servers by name, or {@code null} when there is no such conversation
+     */
+    public Map<String, String> mcpServersOf(String conversation) {
+        ChatSessionIIAR session = chatSessions.get(conversation);
+        if (session == null) return null;
+        try {
+            return session.<Map<String, String>>ask(a -> ((ChatSession) a).getMcpServers()).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not read the MCP servers of " + conversation, e);
+            return null;
+        }
+    }
+
+    @Override
+    public void publishToolRunner(ConversationToolRunner runner) {
+        if (chatSessions.containsKey(runner.conversationName())) toolRunners.put(runner.conversationName(), runner);
+    }
+
+    /**
+     * @param conversation a qualified conversation name, e.g. {@code "project1/chat-01"}
+     * @return the runner of its tools, or {@code null} when there is no such conversation
+     */
+    public ConversationToolRunner toolRunnerOf(String conversation) {
+        return conversation == null ? null : toolRunners.get(conversation);
+    }
+
+    public ActorRef<PromptQueue> getPromptQueue(String projectId, String chatId) {
+        return actorSystem.getActor(chatActorName(projectId, chatId) + ".queue");
+    }
+
+    /**
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return the conversation's {@link SseConnection}, or {@code null} if it does not exist
+     */
+    public ActorRef<SseConnection> getSseConnection(String projectId, String chatId) {
+        return actorSystem.getActor(chatActorName(projectId, chatId) + ".sse");
+    }
+
+    /**
+     * Whether the conversation exists. A request for one that does not is an error, never a reason
+     * to create it: a conversation is made only by {@link #createChat(String)} or
+     * {@link #createChat(String, String, String)}, which a caller asks for by name.
+     *
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     */
+    public boolean hasChat(String projectId, String chatId) {
+        // The actor system's own registry is the one place that says what exists; the maps this
+        // class keeps beside it are for the things that hang off a conversation.
+        return actorSystem.getActor(chatActorName(projectId, chatId)) != null;
+    }
+
+    /**
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return the conversation's {@link ChatSessionIIAR}, or {@code null} if none was created
+     */
+    public ChatSessionIIAR getChatSession(String projectId, String chatId) {
+        return chatSessions.get(chatActorName(projectId, chatId));
+    }
+
+    /**
+     * What one conversation's timekeeper is watching now, for the screen
+     * ({@code TimekeeperViewInTheActorTree_261115_oo01}). Read-only: it does not wait for a running turn, since it
+     * asks the timekeeper, a child of the conversation with a thread of its own.
+     *
+     * @return the state, or {@code null} when the conversation has no timekeeper
+     * @throws IllegalStateException when the timekeeper did not answer within 5 seconds
+     */
+    public Timekeeper.Watch timekeeperWatch(String projectId, String chatId) {
+        ActorRef<Timekeeper> keeper = actorSystem.getActor(chatActorName(projectId, chatId) + ".timekeeper");
+        if (keeper == null) return null;
+        long now = System.currentTimeMillis();
+        try {
+            return keeper.ask(k -> k.watch(now)).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            throw new IllegalStateException("the timekeeper did not answer: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * @param projectId owning project's id
+     * @param chatId    conversation id within that project
+     * @return the conversation's {@link ConversationSquad}, or {@code null} if none was created
+     */
+    public ActorRef<ConversationSquad> getChat(String projectId, String chatId) {
+        return chats.get(chatActorName(projectId, chatId));
+    }
+
+    /**
+     * Returns the qualified names ({@code project1/chat-01}) of all conversations created so far
+     * (insertion order not guaranteed — callers that need a stable display order should sort).
+     *
+     * @return qualified conversation names
+     */
+    public List<String> getChatNames() {
+        return new ArrayList<>(chats.keySet());
+    }
+
+    /**
+     * Builds the actor tree from ROOT for the Actors tab.
+     *
+     * @return the root {@link ActorNode}
+     */
+    /**
+     * The class whose {@code @Action} methods a workflow calls under this actor name, or null when
+     * nothing answers to it. {@code this} is the plan's own runner, since a plan is what a person
+     * writes against the Actions tab; a live actor is looked up as the interpreter would look it up.
+     *
+     * @param name the actor name as a workflow writes it
+     */
+    public Class<?> actorClassOf(String name) {
+        if (name == null || name.isBlank() || actorSystem == null) return null;
+        if (name.equals("this")) return PlanRunnerIIAR.class;
+        // A conversation is named by its qualified name, which the registry holds a ConversationSquad
+        // under; the actions a workflow calls on it are its ChatSessionIIAR's.
+        ChatSessionIIAR chat = chatSessions.get(name);
+        if (chat != null) return chat.getClass();
+        IIActorRef<?> ii = actorSystem.getIIActor(name);
+        if (ii != null) return ii.getClass();
+        ActorRef<?> ref = actorSystem.getActor(name);
+        if (ref == null) return null;
+        // A plain actor carries its actions on the object it holds, not on the reference.
+        try {
+            @SuppressWarnings("unchecked")
+            ActorRef<Object> r = (ActorRef<Object>) ref;
+            return r.askNow(o -> (Class<?>) o.getClass()).get(2, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * The actors a workflow may write under {@code actor:}, for the Actions tab's upper pane:
+     * {@code this} (the plan's own runner, origin {@code plan}), then every live actor by its qualified
+     * name (origin {@code application}), in the order the actor tree lists them. Each row carries the
+     * simple name of the class whose {@code @Action} methods answer for it — for a conversation that is
+     * its {@code ChatSessionIIAR}, not the {@code ConversationSquad} the registry holds.
+     */
+    public List<Map<String, String>> workflowActors() {
+        List<Map<String, String>> rows = new ArrayList<>();
+        rows.add(Map.of("name", "this", "type", PlanRunnerIIAR.class.getSimpleName(), "origin", "plan"));
+        List<String> names = new ArrayList<>();
+        collectNames(getActorTree(), names);
+        for (String name : names) {
+            Class<?> type = actorClassOf(name);
+            rows.add(Map.of("name", name, "type", type == null ? "?" : type.getSimpleName(), "origin", "application"));
+        }
+        return rows;
+    }
+
+    private static void collectNames(ActorNode node, List<String> into) {
+        if (node == null) return;
+        if (node.name() != null && !node.name().isBlank() && !into.contains(node.name())) into.add(node.name());
+        for (ActorNode child : node.children()) collectNames(child, into);
+    }
+
+    public ActorNode getActorTree() {
+        if (actorSystem == null) {
+            return new ActorNode("chat-ui", "IIActorSystem", null, null, false, List.of());
+        }
+        RootIIAR root = actorSystem.getRoot();
+        return buildActorNode(root.getName(), root);
+    }
+
+    private ActorNode buildActorNode(String name, ActorRef<?> ref) {
+        String type;
+        try {
+            @SuppressWarnings("unchecked")
+            ActorRef<Object> r = (ActorRef<Object>) ref;
+            type = r.askNow(o -> o.getClass().getSimpleName()).get(2, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            type = "?";
+        }
+        List<ActorNode> children = new ArrayList<>();
+        for (String childName : new TreeSet<>(ref.getNamesOfChildren())) {
+            ActorRef<?> childRef = actorSystem.getActor(childName);
+            if (childRef == null) {
+                // ChatSessionIIAR etc. live in iiActors, not actors (ChatSessionIIAR_260810_oo01
+                // "getActorTree() に必要な追随修正").
+                childRef = actorSystem.getIIActor(childName);
+            }
+            if (childRef == null) {
+                continue;
+            }
+            children.add(buildActorNode(childName, childRef));
+        }
+        // Projects and conversations are the actors a person names; every other node has none.
+        String displayName = projects.containsKey(name) ? getProjectName(name)
+                : chats.containsKey(name) ? nameOfChat(name) : null;
+        return new ActorNode(name, type, ActorNotes.noteOf(name), displayName, ref.isAlive(), children);
+    }
+}

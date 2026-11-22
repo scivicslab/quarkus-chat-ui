@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat UI with audit trail {buildVersion}</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <!-- Hallmark redesign (modern-minimal · Cobalt): Space Grotesk display, Inter body, JetBrains Mono code. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+    <!-- chat-ui stylesheet first, then the shell overrides/additions. -->
+    <link rel="stylesheet" href="styles.css?v={assetVersion}">
+    <link rel="stylesheet" href="console.css?v={assetVersion}">
+    <!-- Markdown rendering for assistant messages (headings/tables/bold/lists) — app.js -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- KaTeX: render LaTeX math ($...$, $$...$$) in assistant answers — app.js -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked-katex-extension@5.1.4/lib/index.umd.js"></script>
+</head>
+<body>
+    <!-- Login screen hidden in this static mock; the console shell is shown directly. -->
+    <div id="login-screen" style="display:none">
+        <form id="login-form" style="text-align:center;">
+            <h2 id="login-title" style="margin-bottom:16px;">Quarkus Chat UI</h2>
+            <input id="login-user" type="text" placeholder="Username" autocomplete="username"
+                   style="padding:8px 12px;font-size:16px;border-radius:4px;border:1px solid #555;background:#2a2a2a;color:#eee;width:220px;">
+            <br><br>
+            <button type="submit" style="padding:8px 24px;font-size:16px;border-radius:4px;cursor:pointer;">Login</button>
+        </form>
+    </div>
+
+    <!--
+      Two-pane console (chat-ui3-style).
+        - #main-panel  : the existing Claude chat UI, embedded inline and unchanged (app.js owns it).
+        - #splitter    : draggable divider.
+        - #right-panel : tabbed workspace (Sessions / System Log / Agent Loop).
+      Everything from the original chat-ui <body> is kept verbatim inside #main-panel so app.js
+      finds every element id it expects (header, chat, queue, log panel, input, overlays).
+    -->
+    <!-- Global header bar (chat-ui3-style): app-wide controls span the full width above the panes.
+         Settings of one chat live in that chat's header below. -->
+    <div id="app-header">
+        <button id="dock-toggle" title="Toggle the actor panel">&#9776;</button>
+        <h1 id="app-title">Chat UI with Audit Trail <span id="app-version" title="The version this chat-ui was built as, and the git commit it was built from">{buildVersion}</span></h1>
+        <div id="status-bar">
+            <label id="theme-label">Theme:
+                <select id="theme-select">
+                    <option value="dark-catppuccin">Dark Catppuccin</option>
+                    <option value="dark-nord">Dark Nord</option>
+                    <option value="dark-blue">Dark Blue</option>
+                    <option value="dark-green">Dark Green</option>
+                    <option value="dark-red">Dark Red</option>
+                    <option value="light-clean">Light Clean</option>
+                    <option value="light-warm">Light Warm</option>
+                    <option value="light-blue">Light Blue</option>
+                    <option value="light-green">Light Green</option>
+                    <option value="light-red">Light Red</option>
+                </select>
+            </label>
+            <span id="session-label"></span>
+            <span id="user-label" style="display:none"></span>
+            <button id="logout-btn" style="display:none" title="Logout">Logout</button>
+            <div id="extensions-menu" class="ext-menu">
+                <button id="extensions-btn" title="Show the skill catalog and this project's working directory">Extensions &#x25be;</button>
+                <div id="extensions-panel" class="ext-panel" style="display:none;">
+                    <div class="ext-tabs">
+                        <button class="ext-tab active" data-tab="skills">Skills</button>
+                        <button class="ext-tab" data-tab="project">Project</button>
+                    </div>
+                    <div id="ext-content" class="ext-content">
+                        <div class="ext-loading">Loading…</div>
+                    </div>
+                </div>
+            </div>
+            <span id="connection-status" class="disconnected">disconnected</span>
+        </div>
+    </div>
+
+    <div id="app-body">
+        <!-- (2) Collapsible left dock: the actor tree (html-saurus-style). -->
+        <aside id="left-dock">
+            <!-- Row 1: what the dock shows (the menu names the view, so there is no title), then the controls.
+                 The actor tree, or every project's conversations with their superior and role edges
+                 (ConversationGraphInTheLeftPane_261117_oo01). Refresh and Auto apply to the view shown. -->
+            <div class="dock-head">
+                <!-- One menu, as the right pane has (#right-tab-select). -->
+                <select id="left-view-select" aria-label="Left pane">
+                    <option value="tree" title="Every actor of this instance, as a tree">Actor Tree</option>
+                    <option value="graph" title="Every project's conversations: superior to subordinate, and the roles set with set_collaborator">Graph</option>
+                </select>
+                <button id="new-project-btn" type="button" title="Create a new project">+</button>
+                <button id="actors-refresh" type="button" title="Refresh">&#x21bb;</button>
+                <label class="tab-auto"><input type="checkbox" id="actors-auto" checked> Auto</label>
+            </div>
+            <!-- Row 2: how much the view shows, small and muted. -->
+            <div id="actors-status" class="dock-status"></div>
+            <div id="actors-tree"></div>
+            <div id="conv-graph" hidden></div>
+        </aside>
+        <div id="left-dock-resize-handle" title="Drag to resize the actor panel"></div>
+
+        <!-- (3) Main pane: (3-1) centre sub-pane | (3-2) right sub-pane (tabs).
+             data-perspective decides what both sub-panes show (ProjectPerspective_260911_oo01):
+               "chat"    — one conversation: #main-panel, and the chat-scoped right tabs
+               "project" — one project: #project-panel, and the project-scoped right tabs
+               "timekeeper" — one conversation's timekeeper: #timekeeper-panel, and a right pane with nothing to show
+             Clicking a chat-<id> actor picks "chat"; clicking a Project actor picks "project"; clicking a
+             chat-<id>.timekeeper actor picks "timekeeper" (TimekeeperViewInTheActorTree_261115_oo01). -->
+        <div id="console-root" data-perspective="chat">
+        <div id="main-panel">
+            <!-- ===== BEGIN chat-ui markup (unchanged: Claude features kept) ===== -->
+            <div id="app">
+                <!-- Conversation-tab switching happens via the Actors tree (#left-dock) now —
+                     clicking a "chat-<id>" actor's name switches this pane (ActorTreeTabSwitcher_260826_oo01)
+                     — instead of a dedicated bar here. -->
+                <!-- Left-pane header: actions that operate only on this pane's chat (chat-ui3-style). -->
+                <!-- This chat's own settings: the server keeps them per chat actor and the page
+                     reloads them when another chat is opened (ChatSettingsInTheChatHeader_261012_oo01). -->
+                <header>
+                    <div id="chat-settings" class="chat-settings">
+                        <label id="provider-label" title="Which provider this conversation talks to (CliHarnessProvider_260912_oo01)">Provider:
+                            <select id="provider-select">
+                                <!-- Populated from GET /api/plugins: only the kinds this instance was started with -->
+                            </select>
+                        </label>
+                        <label id="model-label">Model:
+                            <select id="model-select">
+                                <!-- Populated dynamically from /api/models -->
+                            </select>
+                            <button id="refresh-models-btn" title="Refresh model list">&#x21bb;</button>
+                        </label>
+                        <label id="temperature-label" title="What this conversation asks the server to sample at. Empty asks for nothing and leaves the server on its own default (ConversationTemperature_260914_oo01).">Temp:
+                            <input id="temperature-input" type="number" min="0" max="2" step="0.1" placeholder="server">
+                        </label>
+                        <label id="think-label" title="Whether this conversation lets its model think before answering. Unticked asks the model to skip the thinking phase (ThinkingAndEffortAreConversationSettings_260917_oo01).">
+                            <input type="checkbox" id="think-check" checked> Think
+                        </label>
+                        <label id="effort-label" title="How hard a harness should work on one answer, passed as --effort. Empty leaves the harness on its own default; a plain LLM ignores it.">Effort:
+                            <input id="effort-input" type="text" size="6" placeholder="harness">
+                        </label>
+                        <span id="activity-label"></span>
+                    </div>
+                    <div class="left-pane-actions" style="display:flex;align-items:center;gap:8px">
+                        <button id="save-chat-btn" title="Save conversation as Markdown">Save Chat</button>
+                        <button id="clear-chat-btn" title="Clear chat display (session continues)">Clear</button>
+                        <button id="view-mode-btn" aria-pressed="false" title="Showing every message of this ConversationSquad actor. Click to hide the inputs and steps of the turns you did not start, keeping their final answers.">Show all messages</button>
+                    </div>
+                </header>
+                <div id="notification-bar"></div>
+                <main id="chat-area">
+                    <!-- Messages will be appended here -->
+                </main>
+
+                <div id="queue-resize-handle" style="display:none"></div>
+                <div id="queue-area" style="display:none"></div>
+
+                <div id="input-resize-handle" title="Drag to resize input area"></div>
+                <footer>
+                    <div id="input-area" style="position:relative">
+                        <div id="predict-popup" style="display:none"></div>
+                        <div id="skill-suggest" style="display:none"></div>
+                        <div id="image-attachments" style="display:none"></div>
+                        <textarea id="prompt-input" placeholder="Type a message… (Shift+Enter to send, Tab to predict, /btw question for side questions, paste or drop an image to attach it)" rows="5"></textarea>
+                        <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
+                        <div id="input-toolbar">
+                            <div id="input-toolbar-left">
+                                <button id="attach-btn" class="icon-btn" title="Attach image">📎</button>
+                                <button id="queue-btn" class="icon-btn" title="Add to queue">⏱</button>
+                            </div>
+                            <div id="send-cancel-slot">
+                                <button id="cancel-btn" title="Cancel" disabled>Cancel</button>
+                                <button id="send-btn" title="Send (Shift+Enter)">Send</button>
+                            </div>
+                        </div>
+                    </div>
+                </footer>
+            </div>
+            <!-- ===== END chat-ui markup ===== -->
+        </div>
+
+        <!-- Centre sub-pane for the "project" perspective: the project's Turing workflows —
+             find one, read it, edit it. Shown in place of #main-panel when a Project actor is
+             selected (ProjectPerspective_260911_oo01). The catalog and the editor arrive in later
+             steps; this is the pane they go into. -->
+        <div id="project-panel">
+            <header>
+                <div class="left-pane-actions" style="display:flex;align-items:center;gap:8px">
+                    <span id="project-panel-title" class="project-panel-title">Project</span>
+                </div>
+            </header>
+            <main id="project-workflows">
+                <!-- Two regions, each with its own scroll, as the Sessions tab has: the catalog
+                     above, the one workflow being read below. -->
+                <div class="tab-toolbar">
+                    <input id="project-wf-search" type="search" placeholder="Search workflows…" autocomplete="off">
+                    <button id="project-wf-refresh" type="button">Refresh</button>
+                    <span id="project-wf-status"></span>
+                </div>
+                <div id="project-wf-list"></div>
+                <!-- Drag to give the catalog above or the workflow below more room. -->
+                <div id="project-wf-resize-handle" title="Drag to resize"></div>
+                <div id="project-wf-reading">
+                    <div id="project-wf-head">Pick a workflow above to read it here.</div>
+                    <!-- Reading and editing share the region: the boxes, or the editor, one at a
+                         time (ProjectPerspective_260911_oo01, step 3). Saving writes the project's
+                         own file under workflows/; a bundled workflow saved becomes the project's
+                         copy and hides the bundled one. -->
+                    <div class="tab-toolbar" id="project-wf-actions">
+                        <button id="project-wf-edit" type="button" disabled>Edit</button>
+                        <button id="project-wf-new" type="button">New</button>
+                    </div>
+                    <div id="project-wf-view"></div>
+                    <div id="project-wf-editor" style="display:none">
+                        <div class="tab-toolbar">
+                            <label class="tab-auto">Name:
+                                <input id="project-wf-edit-name" type="text" placeholder="my-workflow" autocomplete="off" spellcheck="false">
+                            </label>
+                            <button id="project-wf-save" type="button">Save</button>
+                            <button id="project-wf-cancel" type="button">Cancel</button>
+                            <span id="project-wf-edit-status"></span>
+                        </div>
+                        <textarea id="project-wf-edit-yaml" spellcheck="false" wrap="off"></textarea>
+                    </div>
+                </div>
+            </main>
+        </div>
+
+        <!-- Centre sub-pane for the "timekeeper" perspective: what one conversation's timekeeper is
+             watching now. Read-only; console.js fills it from GET api/projects/&lt;project&gt;/chats/&lt;chat&gt;/timekeeper
+             (TimekeeperViewInTheActorTree_261115_oo01). -->
+        <div id="timekeeper-panel">
+            <header>
+                <div class="left-pane-actions" style="display:flex;align-items:center;gap:8px">
+                    <span id="timekeeper-panel-title" class="project-panel-title">Timekeeper</span>
+                    <button id="timekeeper-refresh" type="button">Refresh</button>
+                    <span id="timekeeper-status"></span>
+                </div>
+            </header>
+            <main id="timekeeper-body">
+                <section class="tk-section">
+                    <h3>Limits</h3>
+                    <dl class="tk-limits">
+                        <dt>urgentWaitMinutes</dt><dd id="tk-urgent-wait"></dd>
+                        <dt>childReplyWarnMinutes</dt><dd id="tk-warn"></dd>
+                        <dt>Turn</dt><dd id="tk-turn"></dd>
+                    </dl>
+                </section>
+                <section class="tk-section">
+                    <h3>Urgent item at the front of the queue</h3>
+                    <div id="tk-urgent"></div>
+                </section>
+                <section class="tk-section">
+                    <h3>Requests sent, no reply yet</h3>
+                    <div id="tk-sent"></div>
+                </section>
+                <section class="tk-section">
+                    <h3>Promised reports</h3>
+                    <div id="tk-promised"></div>
+                </section>
+            </main>
+        </div>
+
+        <div id="splitter" title="Drag to resize"></div>
+
+        <div id="right-panel">
+            <div id="right-tab-bar">
+                <!-- One menu instead of a row of tabs, which no longer fitted the pane's width. Each entry
+                     belongs to one perspective; only the active perspective's entries are offered
+                     (ProjectPerspective_260911_oo01). The value names the section to show (tab-<value>). -->
+                <select id="right-tab-select" aria-label="Right pane">
+                    <option value="logdb" data-perspective="chat" selected>Sessions</option>
+                    <option value="syslog" data-perspective="chat">System Log</option>
+                    <option value="agentloop" data-perspective="chat">Agent Loop</option>
+                    <option value="logsearch" data-perspective="chat">Log Search</option>
+                    <option value="projectprop" data-perspective="project">Project Property</option>
+                    <option value="jobrun" data-perspective="project">Run</option>
+                    <option value="joblog" data-perspective="project">Job Log</option>
+                    <option value="jobs" data-perspective="project">Batch Jobs</option>
+                    <option value="methodsearch" data-perspective="project">Method Search</option>
+                    <option value="timekeeper" data-perspective="timekeeper">Timekeeper</option>
+                    <!-- Actions belongs to both perspectives: one entry per perspective, one section
+                         without a perspective, so it stays shown whichever is active. -->
+                    <option value="actions" data-perspective="chat">Actions</option>
+                    <option value="actions" data-perspective="project">Actions</option>
+                    <!-- Add new feature entries here, with the perspective they belong to, and their
+                         description in console.js (RIGHT_TAB_DESCRIPTIONS). -->
+                </select>
+                <!-- What the selected entry shows and when to use it (console.js fills it in). -->
+                <div id="right-tab-desc" aria-live="polite"></div>
+            </div>
+
+            <div class="rtab-body">
+                <section id="tab-logdb" class="rtab-content active" data-perspective="chat">
+                    <!-- Sessions: list conversations; expand one to read its turn-by-turn trace inline;
+                         clean up. (Backed by the H2 I/O log — added in a later phase.) -->
+                    <div class="tab-toolbar">
+                        <button id="io-refresh" type="button">Refresh</button>
+                        <span class="tab-auto" title="Delete sessions older than this many days (the active conversation is never deleted)">older than
+                            <input id="io-del-days" type="number" value="30" min="0" max="3650" style="width:4em">d
+                            <button id="io-del-old" type="button">Delete old</button>
+                        </span>
+                        <span id="io-status"></span>
+                    </div>
+                    <!-- Two regions, each with its own scroll: the conversations and their turns
+                         above, and the one message being read below. Together in one scroll, a
+                         message of several kilobytes pushed the session and turn it belongs to off
+                         the top, and the delete button in the session's heading with them. -->
+                    <div id="io-sessions"></div>
+                    <div id="io-reading">
+                        <div id="io-reading-head">Pick a message above to read it here.</div>
+                        <div id="io-reading-body"></div>
+                    </div>
+                </section>
+
+                <section id="tab-syslog" class="rtab-content" data-perspective="chat">
+                    <div class="tab-toolbar">
+                        <button id="logs-refresh" type="button">Refresh</button>
+                        <label class="tab-auto"><input type="checkbox" id="logs-auto" checked> Auto</label>
+                        <label class="tab-auto" title="Show this severity and above (filtered by numeric level value)">Level:
+                            <select id="logs-level">
+                                <option value="" selected>ALL</option>
+                                <option value="400">TRACE</option>
+                                <option value="500">DEBUG</option>
+                                <option value="800">INFO</option>
+                                <option value="900">WARN</option>
+                                <option value="1000">ERROR</option>
+                            </select>
+                        </label>
+                        <span id="logs-status"></span>
+                    </div>
+                    <div id="logs-list"></div>
+                </section>
+
+                <!-- Log Search: one query against every conversation this instance has recorded,
+                     the ones whose tab was removed included (CrossConversationLogSearch_260913_oo01).
+                     Opened by clicking outputMultiplexer in the actor tree. -->
+                <section id="tab-logsearch" class="rtab-content" data-perspective="chat">
+                    <div class="tab-toolbar">
+                        <input id="lsearch-q" type="search" placeholder="Find in every conversation" spellcheck="false">
+                        <button id="lsearch-go" type="button">Search</button>
+                        <span id="lsearch-status"></span>
+                    </div>
+                    <!-- Same two regions as the Sessions tab: the hits above, the one message being
+                         read below, so reading a request never pushes the hit list off the top. -->
+                    <div id="lsearch-hits"></div>
+                    <div id="lsearch-reading">
+                        <div id="lsearch-reading-head">Pick a message above to read it here.</div>
+                        <div id="lsearch-reading-body"></div>
+                    </div>
+                </section>
+
+                <section id="tab-agentloop" class="rtab-content" data-perspective="chat">
+                    <!-- Read-only workflow YAML viewer, ported from quarkus-chat-ui3, made tab-scoped:
+                         the catalog is this tab's agent-loop workflow + prompt-construction sub-workflow
+                         (AgentLoopTab_260827_oo01). -->
+                    <div class="tab-toolbar">
+                        <label class="tab-auto">Agent loop:
+                            <select id="wf-loop-select" title="The agent loop this conversation runs. It also decides how each step's prompt is built."></select>
+                        </label>
+                        <label class="tab-auto">Workflow:
+                            <select id="wf-select"></select>
+                        </label>
+                        <button id="wf-refresh" type="button">Refresh</button>
+                        <span id="wf-status"></span>
+                    </div>
+                    <div id="wf-list"></div>
+                </section>
+
+                <!-- Actions: what a workflow YAML may write in an actor/method pair, from the action
+                     catalog, without a run (ActionCatalogWithJavadoc_260930_oo01). Naming an actor
+                     lists its actions with their first sentence; naming an action shows its
+                     description, its arguments and the step as the YAML writes it. -->
+                <section id="tab-actions" class="rtab-content">
+                    <!-- Actions: the actors a workflow may name (upper pane) and the chosen one's actions
+                         (lower pane), from the action catalog, without a run
+                         (ActionCatalogWithJavadoc_260930_oo01). -->
+                    <div class="tab-toolbar">
+                        <input id="act-filter" type="text" placeholder="filter actors">
+                        <button id="act-clear" type="button">Clear</button>
+                        <span id="act-status"></span>
+                    </div>
+                    <div id="act-actors" class="act-actors"></div>
+                    <div id="act-resize-handle" class="act-resize-handle" title="Drag to resize"></div>
+                    <div id="act-list" class="act-list"></div>
+                </section>
+
+                <!-- Project perspective tabs (ProjectPerspective_260911_oo01). Running a workflow,
+                     reading a job's log and listing the project's batch jobs arrive in a later
+                     step; these are the tabs they go into. -->
+                <!-- Run: the workflow open in the centre pane, started as a batch job
+                     (POST api/projects/PROJECT/jobs). No braces in this file's comments: Qute
+                     reads them as expressions and the page fails to render. -->
+                <!-- Project Property: this project's own name and working directory, and the
+                     button that adds a conversation (ProjectProperty_260929_oo01). Both values are
+                     kept in the project's own log session, so they survive a restart. -->
+                <!-- Method Search: part of a method name finds the actions that have it, one row per
+                     class and action, with the actors a workflow may name to call it; choosing a row
+                     shows it the way the Actions tab does (MethodSearch_261011_oo01). -->
+                <section id="tab-timekeeper" class="rtab-content" data-perspective="timekeeper">
+                    <div class="project-placeholder">Nothing to show for a timekeeper.</div>
+                </section>
+                <section id="tab-methodsearch" class="rtab-content" data-perspective="project">
+                    <div class="tab-toolbar">
+                        <input id="ms-query" type="text" placeholder="method name, e.g. putJson">
+                        <span id="ms-status"></span>
+                    </div>
+                    <div id="ms-list" class="act-list"></div>
+                </section>
+
+                <section id="tab-projectprop" class="rtab-content" data-perspective="project">
+                    <div class="tab-toolbar">
+                        <span class="tab-auto">Project: <b id="projectprop-id">(none selected)</b></span>
+                        <span id="projectprop-status"></span>
+                    </div>
+                    <div class="projectprop-form">
+                        <div class="projectprop-field">
+                            <label class="projectprop-label" for="projectprop-name">Name</label>
+                            <div class="projectprop-control">
+                                <input type="text" id="projectprop-name" placeholder="What this project is for">
+                                <button id="projectprop-name-save" type="button">Save</button>
+                            </div>
+                            <div class="projectprop-desc">Shown beside the project in the Actors tree.</div>
+                        </div>
+                        <div class="projectprop-field">
+                            <label class="projectprop-label" for="projectprop-dir">Working directory</label>
+                            <div class="projectprop-control">
+                                <input type="text" id="projectprop-dir" placeholder="/home/devteam/works/...">
+                                <button id="projectprop-dir-save" type="button">Save</button>
+                            </div>
+                            <div class="projectprop-desc">
+                                Where a CLI harness runs. Its AGENTS.md, or CLAUDE.md when there is no
+                                AGENTS.md, becomes every conversation's instructions.
+                            </div>
+                            <div id="projectprop-dir-outcome" class="projectprop-outcome"></div>
+                        </div>
+                        <div class="projectprop-field">
+                            <span class="projectprop-label">Conversations</span>
+                            <div class="projectprop-control">
+                                <button id="projectprop-add-chat" type="button">+ New Chat</button>
+                            </div>
+                            <div class="projectprop-desc">
+                                Adds one to this project. Its id is the next free two-digit number.
+                                A name given below is shown beside the conversation in the Actors tree.
+                            </div>
+                            <!-- This project's conversations, each with its name and a Save button,
+                                 and a Delete button (ConversationDeletion_261011_oo01). -->
+                            <ul id="projectprop-chats" class="projectprop-chats"></ul>
+                            <div id="projectprop-chats-outcome" class="projectprop-outcome"></div>
+                            <!-- The organization: which conversation talks with the person, and how many
+                                 subordinates one superior may have (ConversationReportingLines_261108_oo01).
+                                 Each conversation's superior is shown in the list above. -->
+                            <div class="projectprop-org">
+                                <label>Liaison (talks with the person): chat-<input type="text" id="projectprop-liaison" size="3"></label>
+                                <label>Subordinates per superior, at most: <input type="number" id="projectprop-maxsub" min="1" style="width:4em"></label>
+                                <button type="button" id="projectprop-org-save">Save</button>
+                                <span id="projectprop-org-outcome" class="projectprop-outcome"></span>
+                            </div>
+                        </div>
+                        <!-- Delete: not shown for project1, which every start creates again
+                             (ProjectDeletion_261011_oo01). -->
+                        <div class="projectprop-field" id="projectprop-delete-field">
+                            <span class="projectprop-label">Delete</span>
+                            <div class="projectprop-control">
+                                <button id="projectprop-delete" type="button" class="projectprop-danger">Delete project</button>
+                            </div>
+                            <div class="projectprop-desc">
+                                Removes this project and its conversations from the tree. What they
+                                said stays in the Sessions tab. A project with a conversation still
+                                answering, prompts waiting in a queue, or a job running is not deleted.
+                            </div>
+                            <div id="projectprop-delete-outcome" class="projectprop-outcome"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="tab-jobrun" class="rtab-content" data-perspective="project">
+                    <div class="tab-toolbar">
+                        <span class="tab-auto">Workflow: <b id="jobrun-workflow">(none open)</b></span>
+                        <button id="jobrun-run" type="button" disabled>Run</button>
+                        <span id="jobrun-status"></span>
+                    </div>
+                    <!-- One field per input the open workflow declares (JobParameterForm_260913_oo01). -->
+                    <div id="jobrun-params"></div>
+                    <div id="jobrun-hint" class="project-placeholder">
+                        Open a workflow in the centre pane, then Run. The job appears under Batch Jobs,
+                        and its log under Job Log.
+                    </div>
+                </section>
+
+                <!-- Job Log: the lines one job wrote (GET api/projects/PROJECT/jobs/JOB/log). -->
+                <section id="tab-joblog" class="rtab-content" data-perspective="project">
+                    <div class="tab-toolbar">
+                        <span class="tab-auto">Job: <b id="joblog-job">(none selected)</b></span>
+                        <button id="joblog-refresh" type="button">Refresh</button>
+                        <label class="tab-auto"><input type="checkbox" id="joblog-auto" checked> Auto</label>
+                        <span id="joblog-status"></span>
+                    </div>
+                    <div id="joblog-list"></div>
+                </section>
+
+                <!-- Batch Jobs: this project's jobs, newest first (GET api/projects/PROJECT/jobs). -->
+                <section id="tab-jobs" class="rtab-content" data-perspective="project">
+                    <div class="tab-toolbar">
+                        <button id="jobs-refresh" type="button">Refresh</button>
+                        <label class="tab-auto"><input type="checkbox" id="jobs-auto" checked> Auto</label>
+                        <span id="jobs-status"></span>
+                    </div>
+                    <div id="jobs-list"></div>
+                </section>
+            </div>
+        </div>
+    </div>
+    </div>
+
+    <!-- BTW Overlay (side question while LLM is processing) -->
+    <div id="btw-overlay" style="display:none">
+        <div id="btw-header">
+            <span class="btw-label">BTW</span>
+            <button id="btw-close" title="Close (Escape)">&#x00D7;</button>
+        </div>
+        <div id="btw-question"></div>
+        <div id="btw-response"></div>
+    </div>
+    <!-- API Key Dialog (shown when no authentication is configured) -->
+    <div id="auth-overlay" style="display:none">
+        <div id="auth-dialog">
+            <h2>Anthropic API Key Required</h2>
+            <p>Claude CLI was not found on this system. Please enter your Anthropic API key to continue.</p>
+            <input type="password" id="api-key-input" placeholder="sk-ant-…" autocomplete="off">
+            <button id="auth-submit-btn">Submit</button>
+            <p id="auth-error" style="color:var(--error-text,#f44);display:none"></p>
+        </div>
+    </div>
+    <!-- Extensions content dialog -->
+    <div id="ext-dialog-overlay" style="display:none">
+        <div id="ext-dialog">
+            <div id="ext-dialog-header">
+                <span id="ext-dialog-title"></span>
+                <button id="ext-dialog-close" title="Close">&#x00D7;</button>
+            </div>
+            <div id="ext-dialog-body"></div>
+        </div>
+    </div>
+    <script src="app.js?v={assetVersion}"></script>
+    <script src="console.js?v={assetVersion}"></script>
+</body>
+</html>

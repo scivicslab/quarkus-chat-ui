@@ -1,0 +1,826 @@
+package com.scivicslab.chatui.openaicompat.client;
+
+import com.scivicslab.chatui.openaicompat.ToolDefinition;
+
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.stream.Stream;
+
+/**
+ * Stateless HTTP client for OpenAI-compatible LLM APIs (vLLM, Ollama, NemoClaw, etc.).
+ *
+ * <p>Conversation history is managed by the caller. This client only handles
+ * HTTP communication and SSE stream parsing.</p>
+ */
+public class OpenAiCompatClient {
+
+    private static final Logger logger = Logger.getLogger(OpenAiCompatClient.class.getName());
+
+    private final String baseUrl;
+    private final HttpClient httpClient;
+    private volatile List<String> cachedModels = List.of();
+    private volatile Map<String, Integer> cachedMaxModelLen = Map.of();
+
+    public interface StreamCallback {
+        void onDelta(String content);
+
+        /**
+         * The reply ended.
+         *
+         * @param durationMs   how long the whole call took
+         * @param finishReason why the server stopped: {@code stop} when the model said everything
+         *                     it meant to, {@code length} when it was cut off at a token limit —
+         *                     by the model's own {@code max_tokens} or by the broker's ceiling
+         *                     ({@code RunawayGenerationLimits_260915_oo01}). {@code null} when the
+         *                     server never said.
+         */
+        void onComplete(long durationMs, String finishReason);
+
+        void onError(String message);
+
+        /**
+         * Receives reasoning text, which a server that separates a thinking model's chain of
+         * thought sends in {@code delta.reasoning_content} rather than {@code delta.content}.
+         * Reasoning is deliberately a channel of its own: it is not part of the answer, so it must
+         * never reach the text that the agent loop parses for tool calls and keeps as the final
+         * answer. Default no-op, so a caller that does not care about reasoning is unaffected.
+         *
+         * @param reasoning one streamed chunk of the model's reasoning
+         */
+        default void onReasoning(String reasoning) {}
+
+        /**
+         * Receives the tool calls of the reply, joined from its {@code delta.tool_calls} chunks, once the
+         * stream has ended and before {@link #onComplete}. Not called when the reply has none
+         * ({@code OpenAiCompatStandardToolCalling_261120_oo01}).
+         *
+         * @param toolCalls the calls in the order the server indexed them
+         */
+        default void onToolCalls(List<ChatMessage.ToolCallRequest.ToolCall> toolCalls) {}
+    }
+
+    /**
+     * Response from a non-streaming chat completion request.
+     *
+     * @param content      text content of the assistant message (may be {@code null} when tool_calls
+     *                     are present)
+     * @param toolCalls    list of tool calls requested by the model (empty when finish_reason is
+     *                     {@code stop})
+     * @param finishReason the value of {@code finish_reason} from the response ({@code stop},
+     *                     {@code tool_calls}, or {@code error:…} on failure)
+     */
+    public record NonStreamingResponse(
+            String content,
+            List<ChatMessage.ToolCallRequest.ToolCall> toolCalls,
+            String finishReason) {}
+
+    /**
+     * Creates a client targeting the given OpenAI-compatible server.
+     *
+     * @param baseUrl the server's base URL (e.g. {@code http://localhost:8000})
+     */
+    public OpenAiCompatClient(String baseUrl) {
+        this.baseUrl = baseUrl;
+        this.httpClient = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
+    }
+
+    /**
+     * Returns the base URL of this client's target server.
+     *
+     * @return the base URL
+     */
+    public String getBaseUrl() { return baseUrl; }
+
+    /**
+     * Checks whether this server advertises the given model (based on the last cached model list).
+     *
+     * @param model the model identifier to look up
+     * @return {@code true} if the model was found in the cached list
+     */
+    public boolean servesModel(String model) { return cachedModels.contains(model); }
+
+    /**
+     * Returns the list of model identifiers from the last successful {@link #fetchModels()} call.
+     *
+     * @return cached model IDs, or an empty list if models have not been fetched yet
+     */
+    public List<String> getCachedModels() { return cachedModels; }
+
+    /**
+     * Returns the maximum context length for the given model, as reported by the server.
+     *
+     * @param model the model identifier
+     * @return the maximum model length, or {@code -1} if unknown
+     */
+    public int getMaxModelLen(String model) { return cachedMaxModelLen.getOrDefault(model, -1); }
+
+    /**
+     * Fetches the list of available models from the server's {@code /v1/models} endpoint
+     * and updates the internal cache.
+     *
+     * @return list of model identifiers, or an empty list if the request fails
+     */
+    public List<String> fetchModels() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/v1/models"))
+                    .header("Accept", "application/json")
+                    .GET()
+                    .timeout(java.time.Duration.ofSeconds(5))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) return List.of();
+            String body = response.body();
+            this.cachedModels = parseModelIds(body);
+            this.cachedMaxModelLen = parseMaxModelLens(body);
+            return cachedModels;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        } catch (Exception e) {
+            logger.fine(() -> baseUrl + " /v1/models unavailable: " + e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Sends a non-streaming chat completion request, optionally with tool definitions.
+     *
+     * <p>Used by the agent loop for intermediate turns where tool call parsing is needed.
+     * The final user-visible turn may also use this method; callers emit the response content
+     * as a single delta event.</p>
+     *
+     * @param model     the model identifier
+     * @param messages  conversation history
+     * @param noThink   if {@code true}, disables the model's thinking/CoT mode
+     * @param maxTokens maximum tokens to generate (0 for server default)
+     * @param tools     tool definitions to include in the request; empty list for no tools
+     * @return a {@link NonStreamingResponse} — never {@code null}; errors are represented as
+     *         {@code finishReason} starting with {@code "error:"}
+     */
+    public NonStreamingResponse sendNonStreaming(String model, List<ChatMessage> messages,
+                                                 boolean noThink, int maxTokens,
+                                                 List<ToolDefinition> tools) {
+        return sendNonStreaming(model, messages, noThink, maxTokens, tools, null);
+    }
+
+    /** As above; {@code requestBodyListener} (may be null) receives the body just before it is sent. */
+    public NonStreamingResponse sendNonStreaming(String model, List<ChatMessage> messages,
+                                                 boolean noThink, int maxTokens,
+                                                 List<ToolDefinition> tools,
+                                                 java.util.function.Consumer<String> requestBodyListener) {
+        try {
+            String requestBody = buildRequestBody(model, messages, noThink, maxTokens, false, tools,
+                    temperature);
+            if (requestBodyListener != null) requestBodyListener.accept(requestBody);
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/v1/chat/completions"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .timeout(Duration.ofMinutes(5))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                return new NonStreamingResponse(null, List.of(), "error:" + response.statusCode());
+            }
+            return parseNonStreamingResponse(response.body());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new NonStreamingResponse("Cancelled", List.of(), "error:interrupted");
+        } catch (Exception e) {
+            logger.warning("Non-streaming request failed: " + e.getMessage());
+            return new NonStreamingResponse("Error: " + e.getMessage(), List.of(), "error:exception");
+        }
+    }
+
+    /**
+     * Sends a streaming chat completion request to the server.
+     *
+     * @param model     the model identifier to use
+     * @param history   the conversation history to include as context
+     * @param noThink   if {@code true}, disables the model's thinking/chain-of-thought mode
+     * @param maxTokens maximum number of tokens to generate (0 for server default)
+     * @param callback  receives streamed deltas, completion, and error events
+     * @return the full response text, or {@code null} if the request failed or was cancelled
+     * @throws ContextLengthExceededException if the prompt exceeds the model's context window
+     */
+    public String sendPrompt(String model, List<ChatMessage> history, boolean noThink,
+                             int maxTokens, StreamCallback callback) {
+        return sendPrompt(model, history, noThink, maxTokens, callback, null);
+    }
+
+    /**
+     * Same as {@link #sendPrompt(String, List, boolean, int, StreamCallback)}, and hands the request
+     * body to {@code requestBodyListener} (may be null) just before it is sent, so the caller can
+     * record the body that was actually sent.
+     */
+    public String sendPrompt(String model, List<ChatMessage> history, boolean noThink,
+                             int maxTokens, StreamCallback callback,
+                             java.util.function.Consumer<String> requestBodyListener) {
+        return sendPrompt(model, history, noThink, maxTokens, List.of(), callback, requestBodyListener);
+    }
+
+    /**
+     * As {@link #sendPrompt(String, List, boolean, int, StreamCallback, java.util.function.Consumer)}, with the
+     * tools the model may call in the request's {@code tools}. The calls it makes reach
+     * {@link StreamCallback#onToolCalls} ({@code OpenAiCompatStandardToolCalling_261120_oo01}).
+     *
+     * @param tools the tools; empty sends no {@code tools}
+     */
+    public String sendPrompt(String model, List<ChatMessage> history, boolean noThink,
+                             int maxTokens, List<ToolDefinition> tools, StreamCallback callback,
+                             java.util.function.Consumer<String> requestBodyListener) {
+        long startTime = System.currentTimeMillis();
+        try {
+            String requestBody = buildRequestBody(model, history, noThink, maxTokens, true,
+                    tools, temperature);
+            if (requestBodyListener != null) requestBodyListener.accept(requestBody);
+            HttpResponse<Stream<String>> response = sendWithRetry(requestBody);
+
+            if (response.statusCode() == 400) {
+                StringBuilder errorBody = new StringBuilder();
+                response.body().forEach(errorBody::append);
+                String errorStr = errorBody.toString();
+                if (isContextLengthError(errorStr)) throw new ContextLengthExceededException(errorStr);
+                callback.onError("HTTP 400: " + errorStr);
+                return null;
+            }
+            if (response.statusCode() != 200) {
+                StringBuilder errorBody = new StringBuilder();
+                response.body().forEach(errorBody::append);
+                callback.onError("HTTP " + response.statusCode() + ": " + errorBody);
+                return null;
+            }
+
+            StringBuilder fullResponse = new StringBuilder();
+            ToolCallAssembler toolCalls = new ToolCallAssembler();
+            boolean interrupted = false;
+            String finishReason = null;
+            var iterator = response.body().iterator();
+            while (iterator.hasNext()) {
+                if (Thread.currentThread().isInterrupted()) { interrupted = true; break; }
+                SseDelta delta = parseSseDelta(iterator.next());
+                if (delta == null) continue;
+                // The server failed after it had answered 200 and started the stream: the failure
+                // comes as a chunk of its own, and read as content it is an empty answer.
+                if (delta.error() != null) {
+                    callback.onError("Server error (" + baseUrl + "): " + delta.error());
+                    return null;
+                }
+                // Reasoning first: while a thinking model reasons, this is the only field that
+                // moves, and the caller needs to see that the call is alive.
+                if (delta.reasoning() != null) callback.onReasoning(delta.reasoning());
+                if (delta.content() != null) {
+                    fullResponse.append(delta.content());
+                    callback.onDelta(delta.content());
+                }
+                toolCalls.add(delta.toolCalls());
+                if (delta.finishReason() != null) finishReason = delta.finishReason();
+            }
+            if (interrupted) { callback.onError("Request cancelled"); return null; }
+            if (!toolCalls.isEmpty()) callback.onToolCalls(toolCalls.calls());
+            callback.onComplete(System.currentTimeMillis() - startTime, finishReason);
+            return fullResponse.length() > 0 ? fullResponse.toString() : null;
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            callback.onError("Request cancelled");
+            return null;
+        } catch (java.io.UncheckedIOException e) {
+            if (e.getCause() != null && e.getCause().getCause() instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+                callback.onError("Request cancelled");
+                return null;
+            }
+            String msg = e.getMessage();
+            if (isContextLengthError(msg)) throw new ContextLengthExceededException(msg);
+            callback.onError("Error (" + baseUrl + "): " + msg);
+            return null;
+        } catch (ContextLengthExceededException e) {
+            throw e;
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "Request failed", e);
+            String detail = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            if (isContextLengthError(detail)) throw new ContextLengthExceededException(detail);
+            callback.onError("Error (" + baseUrl + "): " + detail);
+            return null;
+        }
+    }
+
+    private HttpResponse<Stream<String>> sendWithRetry(String requestBody)
+            throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/v1/chat/completions"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build();
+        try {
+            return httpClient.send(request, HttpResponse.BodyHandlers.ofLines());
+        } catch (IOException e) {
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("Connection reset") || msg.contains("received no bytes"))) {
+                logger.info("Connection reset, retrying");
+                return HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()
+                        .send(request, HttpResponse.BodyHandlers.ofLines());
+            }
+            throw e;
+        }
+    }
+
+    /** Builds a streaming request body with no tools (backward-compatible). */
+    /**
+     * What to ask the server to sample at, or {@code null} to ask for nothing.
+     *
+     * <p>A property of the conversation, set through {@code LlmProvider.setTemperature}, kept here
+     * because this client serves one conversation ({@code ConversationTemperature_260914_oo01}).</p>
+     */
+    private volatile Double temperature;
+
+    /** @param temperature what to sample at, or {@code null} to leave it to the server */
+    public void setTemperature(Double temperature) {
+        this.temperature = temperature;
+    }
+
+    /** @return what this conversation asks to sample at, or {@code null} when it asks for nothing */
+    public Double getTemperature() {
+        return temperature;
+    }
+
+    static String buildRequestBody(String model, List<ChatMessage> messages,
+                                   boolean noThink, int maxTokens) {
+        return buildRequestBody(model, messages, noThink, maxTokens, true, List.of(), null);
+    }
+
+    static String buildRequestBody(String model, List<ChatMessage> messages,
+                                   boolean noThink, int maxTokens,
+                                   boolean stream, List<ToolDefinition> tools) {
+        return buildRequestBody(model, messages, noThink, maxTokens, stream, tools, null);
+    }
+
+    /**
+     * Builds a chat completion request body.
+     *
+     * @param stream      whether to request SSE streaming ({@code stream:true/false})
+     * @param tools       tool definitions to include; empty list omits the {@code tools} field
+     * @param temperature what to ask the server to sample at, or {@code null} to ask for nothing
+     *                    and leave the server on its own default. Two runs of one batch differ
+     *                    otherwise, for reasons that have nothing to do with the prompt being
+     *                    compared ({@code ConversationTemperature_260914_oo01})
+     */
+    static String buildRequestBody(String model, List<ChatMessage> messages,
+                                   boolean noThink, int maxTokens,
+                                   boolean stream, List<ToolDefinition> tools,
+                                   Double temperature) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"model\":\"").append(escapeJson(model))
+          .append("\",\"stream\":").append(stream).append(",");
+        if (maxTokens > 0) sb.append("\"max_tokens\":").append(maxTokens).append(",");
+        if (temperature != null) sb.append("\"temperature\":").append(temperature).append(",");
+        // Sent both ways. The servers serving one model default differently -- Strata thinks unless
+        // told not to, vLLM and TensorFold do not unless told to -- so leaving it out when thinking
+        // is wanted left the Think box to whichever server the broker picked
+        // (ThinkFlagAlwaysSent_261011_oo01).
+        sb.append("\"chat_template_kwargs\":{\"enable_thinking\":").append(!noThink).append("},");
+        if (!tools.isEmpty()) {
+            sb.append("\"tools\":[");
+            for (int i = 0; i < tools.size(); i++) {
+                if (i > 0) sb.append(",");
+                ToolDefinition t = tools.get(i);
+                sb.append("{\"type\":\"function\",\"function\":{")
+                  .append("\"name\":\"").append(escapeJson(t.name())).append("\",")
+                  .append("\"description\":\"").append(escapeJson(t.description())).append("\",")
+                  .append("\"parameters\":").append(t.parametersJson())
+                  .append("}}");
+            }
+            sb.append("],\"tool_choice\":\"auto\",");
+        }
+        sb.append("\"messages\":[");
+        for (int i = 0; i < messages.size(); i++) {
+            if (i > 0) sb.append(",");
+            ChatMessage msg = messages.get(i);
+            sb.append("{\"role\":\"").append(escapeJson(msg.role())).append("\",");
+            switch (msg) {
+                case ChatMessage.User u when u.hasImages() -> {
+                    sb.append("\"content\":[");
+                    for (int j = 0; j < u.imageDataUrls().size(); j++) {
+                        if (j > 0) sb.append(",");
+                        sb.append("{\"type\":\"image_url\",\"image_url\":{\"url\":\"")
+                          .append(escapeJson(u.imageDataUrls().get(j))).append("\"}}");
+                    }
+                    sb.append(",{\"type\":\"text\",\"text\":\"").append(escapeJson(u.content())).append("\"}]");
+                }
+                case ChatMessage.User u ->
+                    sb.append("\"content\":\"").append(escapeJson(u.content())).append("\"");
+                case ChatMessage.Assistant a ->
+                    sb.append("\"content\":\"").append(escapeJson(a.content())).append("\"");
+                case ChatMessage.ToolCallRequest t -> {
+                    sb.append("\"content\":");
+                    if (t.content() == null || t.content().isEmpty()) sb.append("null");
+                    else sb.append("\"").append(escapeJson(t.content())).append("\"");
+                    sb.append(",\"tool_calls\":[");
+                    for (int j = 0; j < t.toolCalls().size(); j++) {
+                        if (j > 0) sb.append(",");
+                        var tc = t.toolCalls().get(j);
+                        sb.append("{\"id\":\"").append(escapeJson(tc.id())).append("\",")
+                          .append("\"type\":\"function\",\"function\":{")
+                          .append("\"name\":\"").append(escapeJson(tc.name())).append("\",")
+                          .append("\"arguments\":\"").append(escapeJson(tc.arguments())).append("\"}}");
+                    }
+                    sb.append("]");
+                }
+                case ChatMessage.ToolResult r ->
+                    sb.append("\"tool_call_id\":\"").append(escapeJson(r.toolCallId())).append("\",")
+                      .append("\"name\":\"").append(escapeJson(r.toolName())).append("\",")
+                      .append("\"content\":\"").append(escapeJson(r.content())).append("\"");
+                case ChatMessage.System s ->
+                    sb.append("\"content\":\"").append(escapeJson(s.content())).append("\"");
+            }
+            sb.append("}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    static NonStreamingResponse parseNonStreamingResponse(String json) {
+        String finishReason = parseNsFinishReason(json);
+        String content = parseNsContent(json);
+        List<ChatMessage.ToolCallRequest.ToolCall> toolCalls = parseNsToolCalls(json);
+        return new NonStreamingResponse(content, toolCalls, finishReason);
+    }
+
+    /** As {@link #extractFinishReason}, but a whole response always has one: absent means stop. */
+    static String parseNsFinishReason(String json) {
+        String value = extractFinishReason(json);
+        return value != null && !value.isEmpty() ? value : "stop";
+    }
+
+    static String parseNsContent(String json) {
+        int msgIdx = json.indexOf("\"message\":");
+        if (msgIdx < 0) return null;
+        return readStringField(json, "\"content\":", msgIdx);
+    }
+
+    static List<ChatMessage.ToolCallRequest.ToolCall> parseNsToolCalls(String json) {
+        List<ChatMessage.ToolCallRequest.ToolCall> result = new ArrayList<>();
+        int tcIdx = json.indexOf("\"tool_calls\":");
+        if (tcIdx < 0) return result;
+        int arrStart = json.indexOf('[', tcIdx);
+        if (arrStart < 0) return result;
+        int i = arrStart + 1;
+        while (i < json.length()) {
+            while (i < json.length() && Character.isWhitespace(json.charAt(i))) i++;
+            if (i >= json.length() || json.charAt(i) == ']') break;
+            if (json.charAt(i) == '{') {
+                int objEnd = findMatchingBrace(json, i);
+                if (objEnd < 0) break;
+                String obj = json.substring(i, objEnd + 1);
+                String id = extractFirstString(obj, "\"id\":\"");
+                String name = null, arguments = null;
+                int funcIdx = obj.indexOf("\"function\":");
+                if (funcIdx >= 0) {
+                    String funcPart = obj.substring(funcIdx);
+                    name = extractFirstString(funcPart, "\"name\":\"");
+                    arguments = extractFirstString(funcPart, "\"arguments\":\"");
+                }
+                if (id != null && name != null) {
+                    result.add(new ChatMessage.ToolCallRequest.ToolCall(
+                            id, name, arguments != null ? arguments : "{}"));
+                }
+                i = objEnd + 1;
+            } else {
+                i++;
+            }
+            while (i < json.length() && (json.charAt(i) == ',' || Character.isWhitespace(json.charAt(i)))) i++;
+        }
+        return result;
+    }
+
+    private static int findMatchingBrace(String json, int start) {
+        int depth = 0;
+        for (int i = start; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '{') { depth++; }
+            else if (c == '}') { depth--; if (depth == 0) return i; }
+            else if (c == '"') {
+                i++;
+                while (i < json.length() && json.charAt(i) != '"') {
+                    if (json.charAt(i) == '\\') i++;
+                    i++;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static String extractFirstString(String json, String marker) {
+        int idx = json.indexOf(marker);
+        if (idx < 0) return null;
+        return unescapeJsonString(json, idx + marker.length());
+    }
+
+    /**
+     * One streamed chunk's two text fields.
+     *
+     * @param content   answer text from {@code delta.content}, or {@code null} when this chunk
+     *                  carried none
+     * @param reasoning reasoning text from {@code delta.reasoning_content}, or {@code null} when
+     *                  the server does not separate reasoning or this chunk carried none
+     * @param error     the server's message when this chunk is {@code {"error":{...}}} — how vLLM
+     *                  and the GPU broker report a failure after the stream has started — or
+     *                  {@code null} for an ordinary chunk
+     */
+    record SseDelta(String content, String reasoning, String finishReason, String error,
+                    List<ToolCallDelta> toolCalls) {
+        SseDelta(String content, String reasoning, String finishReason, String error) {
+            this(content, reasoning, finishReason, error, List.of());
+        }
+    }
+
+    /**
+     * One chunk's piece of one tool call ({@code delta.tool_calls[]}). The first piece of a call carries its
+     * {@code id} and {@code function.name}; later pieces carry more of {@code function.arguments}.
+     *
+     * @param index     which call of the reply this piece belongs to
+     * @param id        the call's id, or {@code null} when this piece does not carry it
+     * @param name      the tool's name, or {@code null} when this piece does not carry it
+     * @param arguments the next part of the arguments' JSON text, or {@code ""}
+     */
+    record ToolCallDelta(int index, String id, String name, String arguments) {}
+
+    /** Joins the {@link ToolCallDelta} pieces of one reply into whole calls, by index. */
+    static final class ToolCallAssembler {
+        private final java.util.TreeMap<Integer, String[]> byIndex = new java.util.TreeMap<>();
+
+        void add(List<ToolCallDelta> pieces) {
+            for (ToolCallDelta d : pieces) {
+                String[] call = byIndex.computeIfAbsent(d.index(), i -> new String[] {null, null, ""});
+                if (d.id() != null && call[0] == null) call[0] = d.id();
+                if (d.name() != null && call[1] == null) call[1] = d.name();
+                call[2] = call[2] + d.arguments();
+            }
+        }
+
+        boolean isEmpty() {
+            return byIndex.isEmpty();
+        }
+
+        /** @return the calls, in index order; one without an id is given {@code call_<index>} */
+        List<ChatMessage.ToolCallRequest.ToolCall> calls() {
+            List<ChatMessage.ToolCallRequest.ToolCall> out = new ArrayList<>();
+            byIndex.forEach((index, c) -> out.add(new ChatMessage.ToolCallRequest.ToolCall(
+                    c[0] != null ? c[0] : "call_" + index, c[1] != null ? c[1] : "", c[2])));
+            return out;
+        }
+    }
+
+    static SseDelta parseSseDelta(String line) {
+        if (line == null || !line.startsWith("data: ")) return null;
+        String data = line.substring(6).trim();
+        if (data.equals("[DONE]")) return null;
+        String error = extractStreamError(data);
+        if (error != null) return new SseDelta(null, null, null, error);
+        return new SseDelta(extractDeltaContent(data), extractDeltaReasoning(data),
+                extractFinishReason(data), null, extractDeltaToolCalls(data));
+    }
+
+    /**
+     * Reads {@code choices[0].delta.tool_calls} of one streamed chunk.
+     *
+     * @param json one SSE data payload
+     * @return the pieces of tool calls the chunk carries; empty when it carries none
+     */
+    static List<ToolCallDelta> extractDeltaToolCalls(String json) {
+        if (!json.contains("\"tool_calls\"")) return List.of();
+        try {
+            org.json.JSONArray choices = new org.json.JSONObject(json).optJSONArray("choices");
+            org.json.JSONObject choice = choices == null ? null : choices.optJSONObject(0);
+            org.json.JSONObject delta = choice == null ? null : choice.optJSONObject("delta");
+            org.json.JSONArray calls = delta == null ? null : delta.optJSONArray("tool_calls");
+            if (calls == null) return List.of();
+            List<ToolCallDelta> out = new ArrayList<>();
+            for (int i = 0; i < calls.length(); i++) {
+                org.json.JSONObject c = calls.optJSONObject(i);
+                if (c == null) continue;
+                org.json.JSONObject f = c.optJSONObject("function");
+                String id = c.isNull("id") ? null : c.optString("id", null);
+                String name = f == null || f.isNull("name") ? null : f.optString("name", null);
+                String arguments = f == null || f.isNull("arguments") ? "" : f.optString("arguments", "");
+                out.add(new ToolCallDelta(c.optInt("index", i), id, name, arguments));
+            }
+            return out;
+        } catch (org.json.JSONException e) {
+            logger.fine(() -> "Unreadable tool_calls chunk: " + json);
+            return List.of();
+        }
+    }
+
+    /**
+     * Reads the message of an error chunk. An ordinary chunk always has {@code choices}, and text
+     * the model wrote is inside it, so a chunk with {@code choices} is never an error even when its
+     * content quotes one.
+     *
+     * @param json one SSE data payload
+     * @return the server's message, the whole payload when it gave none, or {@code null}
+     */
+    static String extractStreamError(String json) {
+        if (json.contains("\"choices\"")) return null;
+        int idx = json.indexOf("\"error\"");
+        if (idx < 0) return null;
+        String message = readStringField(json, "\"message\":", idx);
+        return message != null ? message : json;
+    }
+
+    /**
+     * Reads {@code choices[].finish_reason} from one streamed chunk. Every chunk but the last
+     * carries {@code null} there, which is not a string and so does not match.
+     *
+     * <p>vLLM writes compact JSON ({@code "finish_reason":"stop"}); llama.cpp writes a space after
+     * every colon ({@code "finish_reason": "stop"}). The two chunks carry the same value, so the
+     * space is skipped rather than made part of what is searched for — a marker with the value's
+     * opening quote built in, as this used to have, matches vLLM's chunks and silently matches
+     * nothing in llama.cpp's, which then look exactly like an in-progress chunk that has not
+     * finished yet.</p>
+     *
+     * @param json one SSE data payload
+     * @return {@code stop}, {@code length}, … or {@code null} while the reply is still running
+     */
+    static String extractFinishReason(String json) {
+        return readStringField(json, "\"finish_reason\":", 0);
+    }
+
+    static String extractDeltaContent(String json) {
+        return extractDeltaField(json, "\"content\":");
+    }
+
+    /**
+     * Reads {@code delta.reasoning_content}, the field vLLM fills for a thinking model when it is
+     * started with a reasoning parser. Such a server sends {@code "content":null} for the whole
+     * thinking phase, so a client that reads only {@code content} sees nothing at all while the
+     * model reasons.
+     *
+     * @param json one SSE data payload
+     * @return the reasoning text of this chunk, or {@code null} when the field is absent
+     */
+    static String extractDeltaReasoning(String json) {
+        return extractDeltaField(json, "\"reasoning_content\":");
+    }
+
+    /** As {@link #extractFinishReason}, scoped to the {@code delta} object a streamed chunk carries. */
+    private static String extractDeltaField(String json, String marker) {
+        int deltaIdx = json.indexOf("\"delta\"");
+        if (deltaIdx < 0) return null;
+        return readStringField(json, marker, deltaIdx);
+    }
+
+    /**
+     * Finds {@code marker} (a key and its colon, e.g. {@code "\"content\":"}) at or after
+     * {@code fromIndex} and reads the string value that follows, tolerating the space llama.cpp
+     * writes after the colon (vLLM does not). A non-string value — {@code null}, mid-stream — means
+     * the field is not there yet, so this returns {@code null} rather than reading past it into
+     * whatever string literal happens to follow in the rest of the chunk.
+     *
+     * @param json      one SSE data payload, or a whole non-streaming response body
+     * @param marker    the key to find, including its trailing colon but not the value
+     * @param fromIndex where to start searching, so a caller can scope the search to one sub-object
+     * @return the field's string value, or {@code null} when absent or not a string
+     */
+    private static String readStringField(String json, String marker, int fromIndex) {
+        int idx = json.indexOf(marker, fromIndex);
+        if (idx < 0) return null;
+        int pos = idx + marker.length();
+        while (pos < json.length() && json.charAt(pos) == ' ') pos++;
+        if (pos >= json.length() || json.charAt(pos) != '"') return null;
+        return unescapeJsonString(json, pos + 1);
+    }
+
+    static boolean isContextLengthError(String body) {
+        return body != null && (body.contains("input_tokens")
+                || body.contains("context length") || body.contains("maximum input length"));
+    }
+
+    static List<String> parseModelIds(String json) {
+        List<String> ids = new ArrayList<>();
+        int dataIdx = json.indexOf("\"data\"");
+        if (dataIdx < 0) return ids;
+        int arrStart = json.indexOf('[', dataIdx);
+        if (arrStart < 0) return ids;
+        String marker = "\"id\":\"";
+        int depth = 0, i = arrStart;
+        while (i < json.length()) {
+            char c = json.charAt(i);
+            if (c == '[' || c == '{') { depth++; i++; }
+            else if (c == ']' || c == '}') { depth--; if (depth <= 0) break; i++; }
+            else if (c == '"') {
+                if (depth == 2 && json.startsWith(marker, i)) {
+                    int start = i + marker.length();
+                    String value = unescapeJsonString(json, start);
+                    if (value != null && !value.isEmpty()) ids.add(value);
+                    i = start;
+                    while (i < json.length() && json.charAt(i) != '"') { if (json.charAt(i) == '\\') i++; i++; }
+                    i++;
+                } else {
+                    i++;
+                    while (i < json.length() && json.charAt(i) != '"') { if (json.charAt(i) == '\\') i++; i++; }
+                    i++;
+                }
+            } else i++;
+        }
+        return ids;
+    }
+
+    static Map<String, Integer> parseMaxModelLens(String json) {
+        Map<String, Integer> result = new HashMap<>();
+        int dataIdx = json.indexOf("\"data\"");
+        if (dataIdx < 0) return result;
+        int arrStart = json.indexOf('[', dataIdx);
+        if (arrStart < 0) return result;
+        int i = arrStart;
+        while (i < json.length()) {
+            int objStart = json.indexOf('{', i);
+            if (objStart < 0) break;
+            int depth = 0, objEnd = objStart;
+            for (int j = objStart; j < json.length(); j++) {
+                char c = json.charAt(j);
+                if (c == '{') depth++;
+                else if (c == '}') { depth--; if (depth == 0) { objEnd = j; break; } }
+            }
+            if (objEnd <= objStart) break;
+            String obj = json.substring(objStart, objEnd + 1);
+            int idIdx = obj.indexOf("\"id\":\"");
+            String id = null;
+            if (idIdx >= 0) id = unescapeJsonString(obj, idIdx + 6);
+            int lenIdx = obj.indexOf("\"max_model_len\":");
+            if (id != null && lenIdx >= 0) {
+                int numStart = lenIdx + 16, numEnd = numStart;
+                while (numEnd < obj.length() && Character.isDigit(obj.charAt(numEnd))) numEnd++;
+                if (numEnd > numStart) {
+                    try { result.put(id, Integer.parseInt(obj.substring(numStart, numEnd))); }
+                    catch (NumberFormatException ignored) {}
+                }
+            }
+            i = objEnd + 1;
+        }
+        return result;
+    }
+
+    static String unescapeJsonString(String json, int startIdx) {
+        StringBuilder result = new StringBuilder();
+        int i = startIdx;
+        while (i < json.length()) {
+            char c = json.charAt(i);
+            if (c == '"') return result.toString();
+            if (c == '\\' && i + 1 < json.length()) {
+                char next = json.charAt(i + 1);
+                switch (next) {
+                    case '"' -> result.append('"');
+                    case '\\' -> result.append('\\');
+                    case '/' -> result.append('/');
+                    case 'n' -> result.append('\n');
+                    case 'r' -> result.append('\r');
+                    case 't' -> result.append('\t');
+                    case 'b' -> result.append('\b');
+                    case 'f' -> result.append('\f');
+                    case 'u' -> {
+                        if (i + 5 < json.length()) {
+                            try { result.append((char) Integer.parseInt(json.substring(i + 2, i + 6), 16)); }
+                            catch (NumberFormatException e) { result.append("\\u").append(json, i + 2, i + 6); }
+                            i += 4;
+                        }
+                    }
+                    default -> { result.append('\\'); result.append(next); }
+                }
+                i += 2;
+            } else { result.append(c); i++; }
+        }
+        return result.toString();
+    }
+
+    static String escapeJson(String str) {
+        if (str == null) return "";
+        StringBuilder sb = new StringBuilder(str.length());
+        for (int i = 0; i < str.length(); i++) {
+            char c = str.charAt(i);
+            switch (c) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                case '\b' -> sb.append("\\b");
+                case '\f' -> sb.append("\\f");
+                default -> { if (c < 0x20) sb.append(String.format("\\u%04x", (int) c)); else sb.append(c); }
+            }
+        }
+        return sb.toString();
+    }
+}

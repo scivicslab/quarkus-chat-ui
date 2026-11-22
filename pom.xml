@@ -3,41 +3,42 @@
     xmlns="http://maven.apache.org/POM/4.0.0"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>com.scivicslab.chatui</groupId>
-  <artifactId>quarkus-chat-ui-parent</artifactId>
-  <version>2.6.0-SNAPSHOT</version>
+  <groupId>com.scivicslab</groupId>
+  <artifactId>chat-ui-with-audit-trail-parent</artifactId>
+  <version>3.0.0-SNAPSHOT</version>
   <packaging>pom</packaging>
 
+  <!-- One body and separately loadable plugin jars (ProviderAndToolPlugins_260912_oo01).
+       plugin-api is what the body and every plugin compile against; app is the Quarkus uber-jar;
+       each plugin-* is a plain jar the body loads at start-up from chat-ui.plugins. -->
   <modules>
-    <module>core</module>
-    <module>provider-claude-code</module>
-    <module>provider-claude</module>
-    <module>provider-codex</module>
-    <module>provider-claude-tmux</module>
-    <module>provider-openai-compat</module>
-    <module>plugin-openai-compat-multiuser</module>
-    <module>plugin-openai-compat-agent</module>
-    <module>plugin-fs-tools</module>
-    <module>plugin-translate</module>
+    <module>plugin-api</module>
+    <module>agent-connector-kernel</module>
     <module>app</module>
+    <module>plugin-web-tools</module>
+    <module>plugin-shell</module>
+    <module>plugin-harness</module>
+    <module>ssh-tools</module>
+    <module>ssh-connector</module>
   </modules>
 
   <properties>
+    <!-- The shared streaming relay (~/works/llm-relay; tasks/todo.md, step 4a) -->
+    <llm-relay.version>0.1.0-SNAPSHOT</llm-relay.version>
     <compiler-plugin.version>3.14.0</compiler-plugin.version>
-    <jandex-plugin.version>3.2.7</jandex-plugin.version>
     <maven.compiler.release>25</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
     <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
-    <quarkus.platform.version>3.28.3</quarkus.platform.version>
+    <quarkus.platform.version>3.33.4.2</quarkus.platform.version>
     <surefire-plugin.version>3.5.4</surefire-plugin.version>
-    <failsafe-plugin.version>3.5.4</failsafe-plugin.version>
-    <playwright.version>1.52.0</playwright.version>
-    <!-- Bumped from 3.0.1 to 3.5.0 for the Turing Workflow engine (Phase 3). The pojo-actor API
-         surface this project uses is unchanged between 3.0.1 and 3.5.0, so this is a recompile. -->
-    <pojo-actor.version>4.2.0</pojo-actor.version>
-    <turing-workflow.version>4.2.0</turing-workflow.version>
+    <!-- Actor model + Turing Workflow engine (IIActorSystem / RootIIAR) for the Actors tab -->
+    <pojo-actor.version>4.8.0</pojo-actor.version>
+    <turing-workflow.version>4.8.0</turing-workflow.version>
+    <jsoup.version>1.18.3</jsoup.version>
+    <!-- fetch extracts PDFs to text (ScholarSearchAndPdfFetch_260913_oo01); same version as quarkus-english-toolkit -->
+    <pdfbox.version>3.0.3</pdfbox.version>
   </properties>
 
   <dependencyManagement>
@@ -51,74 +52,36 @@
       </dependency>
       <dependency>
         <groupId>com.scivicslab</groupId>
-        <artifactId>pojo-actor</artifactId>
-        <version>4.2.0</version>
+        <artifactId>chat-ui-with-audit-trail-plugin-api</artifactId>
+        <version>${project.version}</version>
       </dependency>
       <dependency>
         <groupId>com.scivicslab</groupId>
-        <artifactId>turing-workflow</artifactId>
-        <version>4.2.0</version>
+        <artifactId>agent-connector-kernel</artifactId>
+        <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>org.json</groupId>
-        <artifactId>json</artifactId>
-        <version>20240303</version>
+        <groupId>com.scivicslab</groupId>
+        <artifactId>ssh-tools</artifactId>
+        <version>${project.version}</version>
       </dependency>
       <dependency>
         <groupId>org.jsoup</groupId>
         <artifactId>jsoup</artifactId>
-        <version>1.18.3</version>
+        <version>${jsoup.version}</version>
       </dependency>
-      <!-- Internal modules -->
+      <!-- agent-connector-kernel's MCP server; app uses the same version -->
       <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-core</artifactId>
-        <version>${project.version}</version>
+        <groupId>io.quarkiverse.mcp</groupId>
+        <artifactId>quarkus-mcp-server-http</artifactId>
+        <version>2.0.4</version>
       </dependency>
+      <!-- Reaches the body through plugin-log-db; pinned here so a plugin compiled against it
+           (provided) sees the same version the body runs. -->
       <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-provider-claude-code</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-provider-claude</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-provider-codex</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-provider-claude-tmux</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-provider-openai-compat</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-plugin-openai-compat-multiuser</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-plugin-openai-compat-agent</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-plugin-fs-tools</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.scivicslab.chatui</groupId>
-        <artifactId>chat-ui-plugin-translate</artifactId>
-        <version>${project.version}</version>
+        <groupId>org.json</groupId>
+        <artifactId>json</artifactId>
+        <version>20240303</version>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -136,64 +99,8 @@
           </configuration>
         </plugin>
         <plugin>
-          <groupId>io.smallrye</groupId>
-          <artifactId>jandex-maven-plugin</artifactId>
-          <version>${jandex-plugin.version}</version>
-          <executions>
-            <execution>
-              <id>make-index</id>
-              <goals><goal>jandex</goal></goals>
-            </execution>
-          </executions>
-        </plugin>
-        <plugin>
-          <artifactId>maven-failsafe-plugin</artifactId>
-          <version>${failsafe-plugin.version}</version>
-          <executions>
-            <execution>
-              <goals>
-                <goal>integration-test</goal>
-                <goal>verify</goal>
-              </goals>
-            </execution>
-          </executions>
-          <configuration>
-            <systemPropertyVariables>
-              <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
-            </systemPropertyVariables>
-          </configuration>
-        </plugin>
-        <plugin>
-          <artifactId>maven-javadoc-plugin</artifactId>
-          <version>3.10.1</version>
-          <configuration>
-            <source>25</source>
-            <encoding>UTF-8</encoding>
-            <doclint>none</doclint>
-            <quiet>true</quiet>
-            <failOnError>false</failOnError>
-          </configuration>
-        </plugin>
-        <plugin>
           <artifactId>maven-surefire-plugin</artifactId>
           <version>${surefire-plugin.version}</version>
-          <dependencies>
-            <dependency>
-              <groupId>me.fabriciorby</groupId>
-              <artifactId>maven-surefire-junit5-tree-reporter</artifactId>
-              <version>1.2.1</version>
-            </dependency>
-          </dependencies>
-          <configuration>
-            <reportFormat>plain</reportFormat>
-            <systemPropertyVariables>
-              <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
-              <maven.home>${maven.home}</maven.home>
-            </systemPropertyVariables>
-            <statelessTestsetInfoReporter
-              implementation="org.apache.maven.plugin.surefire.extensions.junit5.JUnit5StatelessTestsetInfoTreeReporter">
-            </statelessTestsetInfoReporter>
-          </configuration>
         </plugin>
       </plugins>
     </pluginManagement>
