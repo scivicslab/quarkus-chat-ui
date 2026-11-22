@@ -977,6 +977,9 @@ public class ChatSession extends Interpreter {
         // blocking I/O must be dispatched to the managed pool.
         // This actor returns immediately and remains free for other messages (cancel, log).
         // whenComplete() queues onPromptComplete() back onto this actor when done.
+        // Call this only from this actor's own thread, never from a ManagedThreadPool thread.
+        // From a pool thread, POJO-actor 5.0.0 runs this ask inline, so the caller would block
+        // for the whole LLM call instead of returning at once.
         providerRef.ask(p -> {
             try {
                 if (model != null && !model.isBlank()) p.setModel(model);
@@ -3434,6 +3437,9 @@ public class ChatSession extends Interpreter {
         final long ioSession = (ioLog != null) ? ioLog.ensureSession(myChatName()) : -1;
         ActorRef<LlmProvider> providerRef = providerRef();
 
+        // Call this only from this actor's own thread, never from a ManagedThreadPool thread.
+        // From a pool thread, POJO-actor 5.0.0 runs this ask inline, so the caller would block
+        // for the whole LLM call instead of returning at once.
         providerRef.ask(p -> {
             StringBuilder assistantBuf = new StringBuilder();
             StringBuilder thinkingBuf = new StringBuilder();
