@@ -3,8 +3,8 @@
     xmlns="http://maven.apache.org/POM/4.0.0"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>com.scivicslab</groupId>
-  <artifactId>chat-ui-with-audit-trail-parent</artifactId>
+  <groupId>com.scivicslab.chatui</groupId>
+  <artifactId>quarkus-chat-ui-parent</artifactId>
   <version>3.0.0-SNAPSHOT</version>
   <packaging>pom</packaging>
 
@@ -51,17 +51,17 @@
         <scope>import</scope>
       </dependency>
       <dependency>
-        <groupId>com.scivicslab</groupId>
-        <artifactId>chat-ui-with-audit-trail-plugin-api</artifactId>
+        <groupId>com.scivicslab.chatui</groupId>
+        <artifactId>quarkus-chat-ui-plugin-api</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>com.scivicslab</groupId>
+        <groupId>com.scivicslab.chatui</groupId>
         <artifactId>agent-connector-kernel</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>com.scivicslab</groupId>
+        <groupId>com.scivicslab.chatui</groupId>
         <artifactId>ssh-tools</artifactId>
         <version>${project.version}</version>
       </dependency>

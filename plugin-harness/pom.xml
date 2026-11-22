@@ -4,11 +4,11 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>com.scivicslab</groupId>
-    <artifactId>chat-ui-with-audit-trail-parent</artifactId>
+    <groupId>com.scivicslab.chatui</groupId>
+    <artifactId>quarkus-chat-ui-parent</artifactId>
     <version>3.0.0-SNAPSHOT</version>
   </parent>
-  <artifactId>chat-ui-with-audit-trail-plugin-harness</artifactId>
+  <artifactId>quarkus-chat-ui-plugin-harness</artifactId>
   <version>3.0.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
@@ -17,13 +17,13 @@
        either CLI. The api and org.json are provided by the body and must not be bundled. -->
   <dependencies>
     <dependency>
-      <groupId>com.scivicslab</groupId>
-      <artifactId>chat-ui-with-audit-trail-plugin-api</artifactId>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>quarkus-chat-ui-plugin-api</artifactId>
       <scope>provided</scope>
     </dependency>
     <!-- HarnessLaunch is agent-connector-kernel's (stage 11); the body ships the kernel, so it is not bundled -->
     <dependency>
-      <groupId>com.scivicslab</groupId>
+      <groupId>com.scivicslab.chatui</groupId>
       <artifactId>agent-connector-kernel</artifactId>
       <scope>provided</scope>
     </dependency>

@@ -75,7 +75,7 @@ public final class ScholarSearchTool {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(30))
-                    .header("User-Agent", "chat-ui-with-audit-trail/2.0 (scholar_search)")
+                    .header("User-Agent", "quarkus-chat-ui/3.0 (scholar_search)")
                     .header("Accept", "application/json")
                     .GET()
                     .build();

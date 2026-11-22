@@ -4,13 +4,13 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>com.scivicslab</groupId>
-    <artifactId>chat-ui-with-audit-trail-parent</artifactId>
+    <groupId>com.scivicslab.chatui</groupId>
+    <artifactId>quarkus-chat-ui-parent</artifactId>
     <version>3.0.0-SNAPSHOT</version>
   </parent>
   <!-- The body. Keeps the artifactId the product has always had, so the uber-jar is still
-       chat-ui-with-audit-trail-<version>.jar (ProviderAndToolPlugins_260912_oo01). -->
-  <artifactId>chat-ui-with-audit-trail</artifactId>
+       quarkus-chat-ui-<version>.jar (ProviderAndToolPlugins_260912_oo01). -->
+  <artifactId>quarkus-chat-ui</artifactId>
   <version>3.0.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
@@ -23,13 +23,13 @@
   <dependencies>
     <!-- The provider/tool contract shared with the plugin jars -->
     <dependency>
-      <groupId>com.scivicslab</groupId>
-      <artifactId>chat-ui-with-audit-trail-plugin-api</artifactId>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>quarkus-chat-ui-plugin-api</artifactId>
     </dependency>
     <!-- The headless side the body is built on: the plain tools, the docs sources and the plugin registry
          (tasks/todo.md, stage 3). -->
     <dependency>
-      <groupId>com.scivicslab</groupId>
+      <groupId>com.scivicslab.chatui</groupId>
       <artifactId>agent-connector-kernel</artifactId>
     </dependency>
     <!-- REST + Qute templating for the server-rendered console shell -->

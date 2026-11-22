@@ -1,4 +1,4 @@
-// Console script for chat-ui-with-audit-trail.
+// Console script for quarkus-chat-ui.
 //   - right-pane menu (#right-tab-select): which section the right pane shows
 //   - Actors tab: fetch GET /api/actors and render the actor tree
 //   - Sessions tab: GET /api/sessions?conversationSquadId=<active ConversationSquad>, trace view unchanged (ported from

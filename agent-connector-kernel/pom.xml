@@ -4,23 +4,23 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>com.scivicslab</groupId>
-    <artifactId>chat-ui-with-audit-trail-parent</artifactId>
+    <groupId>com.scivicslab.chatui</groupId>
+    <artifactId>quarkus-chat-ui-parent</artifactId>
     <version>3.0.0-SNAPSHOT</version>
   </parent>
   <artifactId>agent-connector-kernel</artifactId>
   <version>3.0.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
-  <!-- agent-connector-kernel: the headless side of chat-ui-with-audit-trail (the tool registry, the
+  <!-- agent-connector-kernel: the headless side of quarkus-chat-ui (the tool registry, the
        tool runner, the MCP server and the plain tools), which nigsc-connector will ship without the
        screen and the record. It is a library of CDI beans for the Quarkus applications that use it
        (app, and later ssh-connector): it has no Quarkus build of its own, and the Jandex index below
        lets Quarkus discover its beans (tasks/todo.md, plan change 2026-11-22, Decision 12). -->
   <dependencies>
     <dependency>
-      <groupId>com.scivicslab</groupId>
-      <artifactId>chat-ui-with-audit-trail-plugin-api</artifactId>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>quarkus-chat-ui-plugin-api</artifactId>
     </dependency>
     <!-- search_docs and list_references read html-saurus's JSON answers as trees, and DocSearchTool reads its HTML
          pages with jsoup -->

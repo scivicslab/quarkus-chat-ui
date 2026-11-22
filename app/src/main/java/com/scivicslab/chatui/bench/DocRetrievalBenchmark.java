@@ -25,9 +25,9 @@ import java.util.Set;
  * TestingStandard_260404_oo01}). Run it against a deployed jar:</p>
  *
  * <pre>{@code
- * javac -cp ~/works/chat-ui-with-audit-trail.jar \
+ * javac -cp ~/works/quarkus-chat-ui.jar \
  *     src/main/java/com/scivicslab/chatui/bench/DocRetrievalBenchmark.java -d /tmp/bench
- * java -cp /tmp/bench:~/works/chat-ui-with-audit-trail.jar \
+ * java -cp /tmp/bench:~/works/quarkus-chat-ui.jar \
  *     com.scivicslab.chatui.bench.DocRetrievalBenchmark [baseline|prompt]
  * }</pre>
  *

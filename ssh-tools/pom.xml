@@ -4,8 +4,8 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>com.scivicslab</groupId>
-    <artifactId>chat-ui-with-audit-trail-parent</artifactId>
+    <groupId>com.scivicslab.chatui</groupId>
+    <artifactId>quarkus-chat-ui-parent</artifactId>
     <version>3.0.0-SNAPSHOT</version>
   </parent>
   <artifactId>ssh-tools</artifactId>
@@ -17,7 +17,7 @@
        agent-connector-kernel's tool types; no CDI beans of its own. -->
   <dependencies>
     <dependency>
-      <groupId>com.scivicslab</groupId>
+      <groupId>com.scivicslab.chatui</groupId>
       <artifactId>agent-connector-kernel</artifactId>
     </dependency>
     <!-- One SshRunner per host, run as an actor, so calls to one host go one at a time -->

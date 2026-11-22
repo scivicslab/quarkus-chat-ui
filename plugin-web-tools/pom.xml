@@ -4,11 +4,11 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>com.scivicslab</groupId>
-    <artifactId>chat-ui-with-audit-trail-parent</artifactId>
+    <groupId>com.scivicslab.chatui</groupId>
+    <artifactId>quarkus-chat-ui-parent</artifactId>
     <version>3.0.0-SNAPSHOT</version>
   </parent>
-  <artifactId>chat-ui-with-audit-trail-plugin-web-tools</artifactId>
+  <artifactId>quarkus-chat-ui-plugin-web-tools</artifactId>
   <version>3.0.0-SNAPSHOT</version>
   <packaging>jar</packaging>
 
@@ -17,8 +17,8 @@
        network. The api and jsoup are provided by the body and must not be bundled. -->
   <dependencies>
     <dependency>
-      <groupId>com.scivicslab</groupId>
-      <artifactId>chat-ui-with-audit-trail-plugin-api</artifactId>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>quarkus-chat-ui-plugin-api</artifactId>
       <scope>provided</scope>
     </dependency>
     <dependency>

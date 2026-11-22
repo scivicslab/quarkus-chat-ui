@@ -5,7 +5,7 @@
   <!-- A test-only Quarkus application for the 5.14 confinement checks and harness runs (tasks/todo.md, steps 5
        and 6). It is agent-connector-kernel's MCP server and LLM proxy with one keyed scope, on the domain socket.
        Not part of the reactor and not shipped; ssh-connector (stage 11) will be the real application. -->
-  <groupId>com.scivicslab</groupId>
+  <groupId>com.scivicslab.chatui</groupId>
   <artifactId>ack-confinement-host</artifactId>
   <version>0.0.1-SNAPSHOT</version>
 
@@ -31,7 +31,7 @@
 
   <dependencies>
     <dependency>
-      <groupId>com.scivicslab</groupId>
+      <groupId>com.scivicslab.chatui</groupId>
       <artifactId>agent-connector-kernel</artifactId>
       <version>3.0.0-SNAPSHOT</version>
     </dependency>

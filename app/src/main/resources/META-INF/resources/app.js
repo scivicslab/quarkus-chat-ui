@@ -1,4 +1,4 @@
-// Chat pane wiring for chat-ui-with-audit-trail (adapted from quarkus-chat-ui3's app.js).
+// Chat pane wiring for quarkus-chat-ui.
 //   - one persistent EventSource per conversation tab
 //   - POST /api/projects/{projectId}/chats/{chatId}/chat only acknowledges; content streams over SSE
 //   - renders delta/thinking/result/error/status ChatEvents into #chat-area
