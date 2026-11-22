@@ -64,6 +64,11 @@ public class Project {
     public static final String CLAUDE_FILE = "CLAUDE.md";
 
     private Path workingDir;
+    /**
+     * Where this project's jobs may read workflow files when it has no working directory: the write root, set by the
+     * generating side; the directory the process was started in until then.
+     */
+    private Path fallbackWorkflowBaseDir = Path.of("").toAbsolutePath();
     private Path instructionsFile;
     private String instructions;
     private String name;
@@ -304,6 +309,20 @@ public class Project {
         return workingDir;
     }
 
+    /** @param dir where this project's jobs may read workflow files when it has no working directory */
+    public void setFallbackWorkflowBaseDir(Path dir) {
+        if (dir != null) fallbackWorkflowBaseDir = dir.toAbsolutePath();
+    }
+
+    /**
+     * The base directory of this project's jobs: the files their workflows read by path ({@code runWorkflow},
+     * {@code readYaml}) must be under it. The working directory when the project has one, else the write root; never
+     * none, since an interpreter with no base directory reads any file.
+     */
+    public Path workflowBaseDir() {
+        return workingDir != null ? workingDir : fallbackWorkflowBaseDir;
+    }
+
     /** @return the file the instructions were read from, or {@code null} if there are none */
     public Path getInstructionsFile() {
         return instructionsFile;
@@ -507,6 +526,7 @@ public class Project {
         String name = queued.actorName();
         try {
             PlanRunner runner = new PlanRunner(name, system);
+            runner.setWorkflowBaseDir(workflowBaseDir().toString());
             PlanRunnerIIAR runnerRef = new PlanRunnerIIAR(name, runner, system);
             runnerRef.setParentName(projectId);
             self.getNamesOfChildren().add(name);

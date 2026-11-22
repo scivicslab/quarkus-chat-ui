@@ -986,6 +986,9 @@ public class ChatUiActorSystem implements ConversationControls {
         com.scivicslab.chatui.core.iolog.SessionEntries own =
                 com.scivicslab.chatui.core.iolog.SessionEntries.ofProject(ioLogStore, ioLogView, projectId);
         ref.tell(p -> p.bind(projectId, actorSystem, ref, SYSTEM_LOG_ACTOR, ioLogStore));
+        // A job reads workflow files only under the project's working directory, else the write root.
+        java.nio.file.Path writeRootNow = fileScope == null ? null : fileScope.writeRoot();
+        ref.tell(p -> p.setFallbackWorkflowBaseDir(writeRootNow));
         // The project records its own name and working directory (EachActorRecordsItsOwnState_261118_oo01).
         ref.tell(p -> p.recordsTo(own));
         ref.tell(Project::startWatching);
@@ -1296,6 +1299,8 @@ public class ChatUiActorSystem implements ConversationControls {
         chatSessionIIAR.tell(a -> ((ChatSession) a).setConversationControls(this));
         chatSessionIIAR.tell(a -> ((ChatSession) a).setSkillRegistryRef(skillRegistryRef));
         chatSessionIIAR.tell(a -> ((ChatSession) a).setFileScope(fileScope));
+        // The agent loop reads workflow files only under the directory a harness of this conversation works in.
+        chatSessionIIAR.tell(a -> ((ChatSession) a).setWorkflowBaseDirSource(() -> providerWorkingDir(projectId)));
         chatSessionIIAR.tell(a -> ((ChatSession) a).setMaxObservationChars(maxObservationChars));
         chatSessionIIAR.tell(a -> ((ChatSession) a).setPluginTools(pluginRegistry.tools()));
         // A conversation created after its project's working directory was set must still receive

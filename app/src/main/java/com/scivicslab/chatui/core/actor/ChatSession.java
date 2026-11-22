@@ -181,6 +181,13 @@ public class ChatSession extends Interpreter {
      */
     private FileAccessScope fileScope = FileAccessScope.processDirectory();
 
+    /**
+     * Where this conversation's agent loop may read workflow files by path ({@code runWorkflow}, {@code readYaml}),
+     * asked at the start of every turn: the generating side names the project's working directory, else the write
+     * root, the directory a harness of this conversation works in. Until then, the write root.
+     */
+    private java.util.function.Supplier<java.nio.file.Path> workflowBaseDirSource = () -> fileScope.writeRoot();
+
     /** The tool a conversation calls to ask the person and end its turn ({@code AskThePersonEndsTheTurn_261119_oo01}). */
     public static final String ASK_PERSON = "ask_person";
 
@@ -660,6 +667,23 @@ public class ChatSession extends Interpreter {
     public void setRoleTableRef(ActorRef<RoleTable> roleTableRef) {
         this.roleTableRef = roleTableRef;
         renewToolRunner();
+    }
+
+    /** @param source where the agent loop may read workflow files, asked at the start of every turn */
+    public void setWorkflowBaseDirSource(java.util.function.Supplier<java.nio.file.Path> source) {
+        if (source != null) this.workflowBaseDirSource = source;
+    }
+
+    /** Sets the interpreter's base directory from {@link #workflowBaseDirSource}; the write root when it names none. */
+    private void applyWorkflowBaseDir() {
+        java.nio.file.Path dir = null;
+        try {
+            dir = workflowBaseDirSource.get();
+        } catch (RuntimeException e) {
+            logger.log(Level.WARNING, "Could not tell this turn's workflow base directory; using the write root", e);
+        }
+        if (dir == null) dir = fileScope.writeRoot();
+        setWorkflowBaseDir(dir.toAbsolutePath().toString());
     }
 
     /** @param fileScope the range of the file system {@code read}/{@code write} may touch */
@@ -1197,6 +1221,7 @@ public class ChatSession extends Interpreter {
         }
 
         busy = true;
+        applyWorkflowBaseDir();
         this.turnSource = source;
         this.ioSession = (ioLog != null) ? ioLog.ensureSession(myChatName()) : -1;
         this.ioTurnNo = ++ioTurn;
