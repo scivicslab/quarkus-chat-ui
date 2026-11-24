@@ -97,6 +97,8 @@ public class CodexProvider implements LlmProvider {
         String model;
         String effort;
         String threadId;
+        /** The turn's image files, kept while its run goes on, also while it is parked on calls; the cancel closes them too. */
+        PreparedImages heldImages;
 
         CompletableFuture<String> park(String name, String argumentsJson) {
             CompletableFuture<String> result = new CompletableFuture<>();
@@ -126,8 +128,6 @@ public class CodexProvider implements LlmProvider {
     private final List<String> runErrors = new ArrayList<>();
     private BlockingJob<Void> stderrReader;
     private long turnStartedAt;
-    /** The turn's image files, kept while its run goes on, also while it is parked on calls. */
-    private PreparedImages heldImages;
 
     private void putModel(String value) {
         model = value;
@@ -331,7 +331,8 @@ public class CodexProvider implements LlmProvider {
         boolean mayRetryModel = model != null;
         closeImages();
         try {
-            heldImages = PreparedImages.from(ctx.imageDataUrls());
+            PreparedImages prepared = PreparedImages.from(ctx.imageDataUrls());
+            state.run(s -> s.heldImages = prepared);
         } catch (IOException e) {
             logger.log(Level.WARNING, "codex image could not be prepared", e);
             finishTurn(RunEnd.failed("Codex image could not be prepared: " + e.getMessage()), emitter);
@@ -365,7 +366,7 @@ public class CodexProvider implements LlmProvider {
      * @return how the run ended, or {@code null} when it is parked on calls to the conversation's tools
      */
     private RunEnd startRun(String prompt, ProviderContext ctx, Consumer<ChatEvent> emitter) {
-        List<String> cmd = buildCommand(heldImages == null ? List.of() : heldImages.paths());
+        List<String> cmd = buildCommand(state.ask(s -> s.heldImages == null ? List.<Path>of() : s.heldImages.paths()));
         logger.fine(() -> "Starting codex: " + String.join(" ", cmd));
         ProcessBuilder pb = launch(cmd, ctx.apiKey()).processBuilder();
 
@@ -487,8 +488,11 @@ public class CodexProvider implements LlmProvider {
     }
 
     private void closeImages() {
-        PreparedImages images = heldImages;
-        heldImages = null;
+        PreparedImages images = state.ask(s -> {
+            PreparedImages held = s.heldImages;
+            s.heldImages = null;
+            return held;
+        });
         if (images != null) images.close();
     }
 

@@ -41,7 +41,6 @@ public class CliProcess {
     private final StreamEventParser parser = new StreamEventParser();
 
     private CliConfig config;
-    private String lastSessionId;
     /**
      * What several threads share of the process: the events of the prompt's turn and the autonomous ones, the calls
      * the CLI is parked on, and the flags that route them. It is a plain object for one owner, an actor: the reader of the
@@ -71,6 +70,8 @@ public class CliProcess {
         OutputStream stdin;
         /** Counted up by each {@link CliProcess#cancel()}: a start that began before a cancel sees it and gives up. */
         long cancels;
+        /** The session id of the latest event that carried one: written by the output reader, read by the provider. */
+        String lastSessionId;
 
         void route(StreamEvent event) {
             boolean isResult = "result".equals(event.type());
@@ -172,13 +173,13 @@ public class CliProcess {
      *
      * @return the last known session ID
      */
-    public String getLastSessionId() { return lastSessionId; }
+    public String getLastSessionId() { return state.ask(s -> s.lastSessionId); }
 
     /**
      * Clears the last known session ID. Called on /clear so the UI shows no session
      * until the next prompt establishes a new one.
      */
-    public void clearLastSessionId() { this.lastSessionId = null; }
+    public void clearLastSessionId() { state.run(s -> s.lastSessionId = null); }
 
     /**
      * Checks whether the underlying OS process is still running.
@@ -229,7 +230,8 @@ public class CliProcess {
                         // (TimekeeperPausesATurnForAnUrgentRequest_261107_oo01).
                         if (("result".equals(event.type()) || "system".equals(event.type()))
                                 && event.sessionId() != null) {
-                            lastSessionId = event.sessionId();
+                            String sessionId = event.sessionId();
+                            state.tell(s -> s.lastSessionId = sessionId);
                         }
                         routeEvent(event);
                     }
@@ -718,6 +720,7 @@ public class CliProcess {
      */
     public void restartBeforeNextPrompt() {
         if (currentProcess() == null) return;
+        String lastSessionId = getLastSessionId();
         if (lastSessionId != null) config = config.withSessionId(lastSessionId);
         cancel();
     }
