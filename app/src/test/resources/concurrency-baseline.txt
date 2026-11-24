@@ -33,14 +33,11 @@ app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java v
 app/src/main/java/com/scivicslab/chatui/openaicompat/client/OpenAiCompatClient.java volatile 3
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/ClaudeCodeProvider.java concurrent-class 3
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CliProcess.java concurrent-class 4
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CliProcess.java thread-start 2
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CliProcess.java volatile 8
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexModelCatalog.java synchronized 1
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexModelCatalog.java thread-start 1
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexModelCatalog.java volatile 2
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java concurrent-class 4
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java synchronized 5
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java thread-start 2
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java volatile 7
 plugin-web-tools/src/main/java/com/scivicslab/chatui/agent/ScholarSearchTool.java sleep 1
 plugin-web-tools/src/main/java/com/scivicslab/chatui/agent/ScholarSearchTool.java synchronized 1

@@ -4,6 +4,7 @@ import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.provider.ProviderCapabilities;
 import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
+import com.scivicslab.chatui.kernel.BlockingJob;
 import com.scivicslab.chatui.plugin.ConversationMcp;
 
 import java.io.BufferedReader;
@@ -22,8 +23,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.logging.Level;
@@ -88,7 +91,7 @@ public class CodexProvider implements LlmProvider {
     /** The errors the run reported, shown when the turn ends unless the run is retried. */
     private final List<String> runErrors = new ArrayList<>();
     private StringBuilder runStderr = new StringBuilder();
-    private Thread stderrReader;
+    private BlockingJob<Void> stderrReader;
     private long turnStartedAt;
     /** The turn's image files, kept while its run goes on, also while it is parked on calls. */
     private PreparedImages heldImages;
@@ -326,9 +329,9 @@ public class CodexProvider implements LlmProvider {
         runStderr = stderr;
         currentProcess = process;
 
-        stderrReader = Thread.ofVirtual().name("codex-stderr").start(() -> readStderr(process, stderr));
+        stderrReader = BlockingJob.start("codex-stderr", () -> { readStderr(process, stderr); return null; }, process::destroy);
         // The run's output, and the calls it parks, reach the turn through one queue, in the order they happen.
-        Thread.ofVirtual().start(() -> {
+        BlockingJob.start("codex-stdout", () -> {
             try (BufferedReader out = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = out.readLine()) != null) {
@@ -338,7 +341,8 @@ public class CodexProvider implements LlmProvider {
                 logger.log(Level.FINE, "codex stdout closed", e);
             }
             events.offer(StreamEvent.text(OUTPUT_CLOSED, null));
-        });
+            return null;
+        }, process::destroy);
 
         try (OutputStream stdin = process.getOutputStream()) {
             stdin.write(prompt.getBytes(StandardCharsets.UTF_8));
@@ -389,8 +393,14 @@ public class CodexProvider implements LlmProvider {
         int exit;
         try {
             exit = process == null ? -1 : process.waitFor();
-            Thread reader = stderrReader;
-            if (reader != null) reader.join(1_000);
+            BlockingJob<Void> reader = stderrReader;
+            if (reader != null) {
+                try {
+                    reader.result().get(1_000, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException | ExecutionException ignored) {
+                    // The run's stderr is only what is shown with its failure; what was read so far is used.
+                }
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             if (process != null) process.destroy();

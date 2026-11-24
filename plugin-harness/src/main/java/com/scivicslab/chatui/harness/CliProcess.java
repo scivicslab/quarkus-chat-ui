@@ -1,5 +1,7 @@
 package com.scivicslab.chatui.harness;
 
+import com.scivicslab.chatui.kernel.BlockingJob;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
@@ -41,7 +43,8 @@ public class CliProcess {
     private String lastSessionId;
     private Process currentProcess;
     private OutputStream stdinStream;
-    private volatile Thread readerThread;
+    /** The job that reads the process's stdout; it ends when the output closes. */
+    private volatile BlockingJob<Void> readerJob;
     private volatile Thread sendingThread;
     // Events produced while a prompt turn is in flight (between writeUserMessage and the turn's
     // result event) go to turnQueue and are consumed by sendPrompt. Events produced while no
@@ -135,7 +138,7 @@ public class CliProcess {
         // autonomous queue. Keeps running while the process is alive, picking up both prompted and
         // autonomous (background-job / ScheduleWakeup) turns.
         final Process started = currentProcess;
-        readerThread = Thread.ofVirtual().start(() -> {
+        readerJob = BlockingJob.start("cli-stdout", () -> {
             try {
                 String line;
                 while ((line = stdoutReader.readLine()) != null) {
@@ -160,10 +163,12 @@ public class CliProcess {
             // rather than at its next 60-second poll (TurnWithoutAnAnswerTellsTheAsker_261119_oo01).
             // Only for the process this reader reads: a process cancelled earlier must not end a later prompt.
             if (turnActive && currentProcess == started) turnQueue.offer(StreamEvent.text(OUTPUT_CLOSED, null));
-        });
+            return null;
+        }, started::destroy);
 
+        // stderr is only logged; its job ends with the process and nobody waits for it.
         Process proc = currentProcess;
-        Thread.ofVirtual().start(() -> {
+        BlockingJob.start("cli-stderr", () -> {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(proc.getErrorStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
@@ -171,7 +176,8 @@ public class CliProcess {
                     logger.fine(() -> "stderr: " + msg);
                 }
             } catch (IOException ignored) {}
-        });
+            return null;
+        }, proc::destroy);
     }
 
     /**
@@ -483,9 +489,10 @@ public class CliProcess {
      * Destroys the running CLI process and resets all I/O handles.
      */
     public void cancel() {
-        if (readerThread != null) {
-            readerThread.interrupt();
-            readerThread = null;
+        BlockingJob<Void> reader = readerJob;
+        if (reader != null) {
+            reader.cancel();
+            readerJob = null;
         }
         Thread t = sendingThread;
         if (t != null) t.interrupt();

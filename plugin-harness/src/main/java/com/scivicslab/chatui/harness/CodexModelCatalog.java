@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scivicslab.chatui.core.provider.LlmProvider.ModelEntry;
+import com.scivicslab.chatui.kernel.BlockingJob;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -14,7 +15,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -69,12 +69,13 @@ final class CodexModelCatalog {
         Process process = new ProcessBuilder(command)
                 .redirectError(ProcessBuilder.Redirect.DISCARD)
                 .start();
-        FutureTask<Snapshot> exchange = new FutureTask<>(() -> exchange(process));
-        Thread.ofVirtual().name("codex-model-list").start(exchange);
+        // The exchange is one BlockingJob; its canceller (and the end of this call) destroys the process, which is
+        // what wakes a read blocked in it.
+        BlockingJob<Snapshot> exchange = BlockingJob.start("codex-model-list", () -> exchange(process), process::destroy);
         try {
-            return exchange.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            return exchange.result().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } finally {
-            exchange.cancel(true);
+            exchange.cancel();
             process.destroy();
             if (!process.waitFor(1, TimeUnit.SECONDS)) process.destroyForcibly();
         }
