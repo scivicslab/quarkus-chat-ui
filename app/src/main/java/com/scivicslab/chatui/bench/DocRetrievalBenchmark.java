@@ -133,12 +133,16 @@ public final class DocRetrievalBenchmark {
 
     /** @return {@code false} if the conversation was still busy when we gave up waiting */
     private static boolean waitUntilIdle(String chatBase) throws Exception {
+        // A poll every 5 s: the slots of one owner, the first of them used up before the loop, so the first poll waits too.
+        try (com.scivicslab.chatui.kernel.RateSlots polls = new com.scivicslab.chatui.kernel.RateSlots("bench-poll", 5000)) {
+            polls.awaitSlot();
         for (int i = 0; i < TASK_TIMEOUT_SECONDS / 5; i++) {
-            Thread.sleep(5000);
+            polls.awaitSlot();
             JSONObject status = new JSONObject(get(chatBase + "/status"));
             if (!status.optBoolean("busy", false)) return true;
         }
         return false;
+        }
     }
 
     /** @return the conversation's most recent assistant message, or {@code ""} */

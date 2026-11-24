@@ -1,5 +1,7 @@
 package com.scivicslab.chatui.agent;
 
+import com.scivicslab.chatui.kernel.RateSlots;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -52,8 +54,8 @@ public final class ScholarSearchTool {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
 
-    private static final Object PACE = new Object();
-    private static long lastCallAt = 0;
+    /** Spaces the calls to OpenAlex: its owner holds the next time a call may start, and a caller gets the message when its slot is due. */
+    private static final RateSlots PACE = new RateSlots("scholar-pace", MIN_INTERVAL_MS);
 
     /**
      * Searches OpenAlex and formats the result for the model.
@@ -219,10 +221,6 @@ public final class ScholarSearchTool {
 
     /** Waits so that consecutive calls to OpenAlex are at least {@link #MIN_INTERVAL_MS} apart. */
     private static void pace() throws InterruptedException {
-        synchronized (PACE) {
-            long wait = lastCallAt + MIN_INTERVAL_MS - System.currentTimeMillis();
-            if (wait > 0) Thread.sleep(wait);
-            lastCallAt = System.currentTimeMillis();
-        }
+        PACE.awaitSlot();
     }
 }

@@ -6,7 +6,6 @@ app/src/main/java/com/scivicslab/chatui/agent/AskChatTool.java concurrent-class 
 app/src/main/java/com/scivicslab/chatui/agent/AskChatTool.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/audittrail/BuildInfo.java volatile 1
 app/src/main/java/com/scivicslab/chatui/audittrail/StallDiagnostics.java synchronized 1
-app/src/main/java/com/scivicslab/chatui/bench/DocRetrievalBenchmark.java sleep 1
 app/src/main/java/com/scivicslab/chatui/core/actor/ActorNotes.java concurrent-class 1
 app/src/main/java/com/scivicslab/chatui/core/actor/ConversationToolRunner.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/core/actor/SseConnection.java volatile 1
@@ -24,6 +23,4 @@ plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexModelCatalog.jav
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java concurrent-class 4
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java synchronized 5
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java volatile 7
-plugin-web-tools/src/main/java/com/scivicslab/chatui/agent/ScholarSearchTool.java sleep 1
-plugin-web-tools/src/main/java/com/scivicslab/chatui/agent/ScholarSearchTool.java synchronized 1
 ssh-tools/src/main/java/com/scivicslab/sshtools/SshRunner.java concurrent-class 2
