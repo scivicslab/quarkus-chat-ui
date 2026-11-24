@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.llm;
 
+import com.scivicslab.chatui.kernel.StateOwner;
 import com.scivicslab.pojoactor.core.ActorSystem;
 import io.vertx.core.Vertx;
 import io.vertx.ext.web.Router;
@@ -44,31 +45,38 @@ public class LlmProxyRoutes {
     Optional<String> credential;
 
     private ActorSystem system;
-    private volatile LlmProxy proxy;
+    /** The mounted proxy, held by one owner, an actor: it is set at start-up and read by whoever opens or closes a scope. */
+    private static final class Mounted {
+        LlmProxy proxy;
+    }
+
+    private final StateOwner<Mounted> mounted = new StateOwner<>("llm-proxy-routes", new Mounted());
 
     void mount(@Observes Router router) {
         if (upstream.isEmpty()) return;
         system = new ActorSystem("agent-connector-kernel-llm-proxy");
-        proxy = new LlmProxy(vertx, system, upstream.get(), credentialHeader, credential.orElse(""));
+        LlmProxy proxy = new LlmProxy(vertx, system, upstream.get(), credentialHeader, credential.orElse(""));
+        mounted.run(m -> m.proxy = proxy);
         proxy.mount(router);
         LOG.info("LLM proxy at " + LlmProxy.PREFIX + " in front of " + upstream.get());
     }
 
     /** @return the throw-away key of the newly opened scope; the proxy must be mounted */
     public String register(String scope) {
-        LlmProxy p = proxy;
+        LlmProxy p = mounted.ask(m -> m.proxy);
         if (p == null) throw new IllegalStateException("no LLM proxy: agent-connector-kernel.llm.upstream is not set");
         return p.register(scope);
     }
 
     /** Closes a scope. */
     public void unregister(String scope) {
-        LlmProxy p = proxy;
+        LlmProxy p = mounted.ask(m -> m.proxy);
         if (p != null) p.unregister(scope);
     }
 
     @PreDestroy
     void close() {
+        LlmProxy proxy = mounted.ask(m -> m.proxy);
         if (proxy != null) proxy.close();
         if (system != null) system.terminate();
     }

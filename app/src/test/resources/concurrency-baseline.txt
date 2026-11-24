@@ -1,9 +1,6 @@
 # path primitive count; may only shrink (ConcurrencyPrimitiveRatchetTest)
 agent-connector-kernel/src/main/java/com/scivicslab/chatui/agent/DocSearchTool.java synchronized 2
 agent-connector-kernel/src/main/java/com/scivicslab/chatui/agent/DocSearchTool.java volatile 2
-agent-connector-kernel/src/main/java/com/scivicslab/chatui/llm/LlmProxyRoutes.java volatile 1
-app/src/main/java/com/scivicslab/chatui/core/remote/WorkspaceNodeDiscovery.java synchronized 1
-app/src/main/java/com/scivicslab/chatui/core/remote/WorkspaceNodeDiscovery.java volatile 2
 app/src/main/java/com/scivicslab/chatui/openaicompat/McpToolClient.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java concurrent-class 1
 app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java volatile 2

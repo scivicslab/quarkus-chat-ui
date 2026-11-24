@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.core.remote;
 
+import com.scivicslab.chatui.kernel.StateOwner;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -44,8 +45,16 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
     private final URI peersUri;
     private final URI nodesUri;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
-    private volatile List<NodeInfo> peers = List.of();
-    private volatile List<RemoteNodes.ToolNode> toolNodes = List.of();
+    /**
+     * The last lists read, and the reading of them: one owner, an actor, so a refresh and a read of the lists never
+     * interleave, and two refreshes never run at once.
+     */
+    private static final class Lists {
+        List<NodeInfo> peers = List.of();
+        List<RemoteNodes.ToolNode> toolNodes = List.of();
+    }
+
+    private final StateOwner<Lists> lists = new StateOwner<>("workspace-node-lists", new Lists());
 
     /**
      * @param me           this instance's node
@@ -63,7 +72,12 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
      *
      * @return whether the list was read
      */
-    public synchronized boolean refresh() {
+    public boolean refresh() {
+        return lists.ask(l -> refreshInto(l));
+    }
+
+    /** {@link #refresh()}, run as a message of the owner. */
+    private boolean refreshInto(Lists l) {
         try {
             HttpResponse<String> r = http.send(HttpRequest.newBuilder(peersUri).timeout(Duration.ofSeconds(3)).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
@@ -71,8 +85,8 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
                 LOG.warning("The workspace answered " + r.statusCode() + " at " + peersUri + "; the last peer list stays");
                 return false;
             }
-            peers = parse(r.body(), me.getNodeId());
-            readToolNodes();
+            l.peers = parse(r.body(), me.getNodeId());
+            readToolNodes(l);
             return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -85,16 +99,16 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
     }
 
     /** Reads {@code /api/nodes}; keeps the last tool nodes when it cannot, and has none when the workspace has no such list. */
-    private void readToolNodes() throws InterruptedException {
+    private void readToolNodes(Lists l) throws InterruptedException {
         try {
             HttpResponse<String> r = http.send(HttpRequest.newBuilder(nodesUri).timeout(Duration.ofSeconds(3)).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
             if (r.statusCode() == 404) {
-                toolNodes = List.of();
+                l.toolNodes = List.of();
             } else if (r.statusCode() != 200) {
                 LOG.warning("The workspace answered " + r.statusCode() + " at " + nodesUri + "; the last tool nodes stay");
             } else {
-                toolNodes = parseToolNodes(r.body(), me.getNodeId());
+                l.toolNodes = parseToolNodes(r.body(), me.getNodeId());
             }
         } catch (InterruptedException e) {
             throw e;
@@ -120,7 +134,7 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
 
     /** @return the tool nodes in the last node list read: the AI-workspace and the html-saurus portals */
     public List<RemoteNodes.ToolNode> toolNodes() {
-        return toolNodes;
+        return lists.ask(l -> l.toolNodes);
     }
 
     /** @return the nodes in the workspace's answer, without {@code myName} */
@@ -138,7 +152,7 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
 
     /** @return the other instances in the last list read */
     public List<NodeInfo> peers() {
-        return peers;
+        return lists.ask(l -> l.peers);
     }
 
     @Override public String getMyNodeId() { return me.getNodeId(); }
@@ -149,7 +163,7 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
     public List<NodeInfo> getAllNodes() {
         List<NodeInfo> all = new ArrayList<>();
         all.add(me);
-        all.addAll(peers);
+        all.addAll(peers());
         return all;
     }
 
