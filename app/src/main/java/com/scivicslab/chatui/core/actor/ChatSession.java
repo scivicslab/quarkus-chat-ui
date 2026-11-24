@@ -2442,6 +2442,12 @@ public class ChatSession extends Interpreter {
     void closeCancelScope() {
         cancelScope.close();
         board.close();
+        calculator.close();   // its JShell is a child JVM
+    }
+
+    /** For a test: this conversation's {@code calc} evaluator. */
+    ConversationToolRunner.Calculator calculatorForTest() {
+        return calculator;
     }
 
     /** The state other threads read, as it is now; only the turn's own thread calls this. */

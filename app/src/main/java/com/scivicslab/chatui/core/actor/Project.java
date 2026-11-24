@@ -744,6 +744,12 @@ public class Project {
     }
 
     /** @return a job's log lines, oldest first, or {@code null} when there is no such job */
+    /** Stops the owners of the jobs' log buffers, when the project is deleted. */
+    public void closeJobLogs() {
+        jobLogs.values().forEach(RecentEntriesAccumulator::close);
+        jobLogs.clear();
+    }
+
     public List<RecentEntriesAccumulator.Entry> jobLog(String jobId) {
         RecentEntriesAccumulator buffer = jobLogs.get(jobId);
         return buffer == null ? null : buffer.recent();

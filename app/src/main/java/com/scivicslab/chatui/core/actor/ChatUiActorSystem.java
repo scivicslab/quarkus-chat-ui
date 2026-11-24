@@ -805,7 +805,7 @@ public class ChatUiActorSystem implements ConversationControls {
         chats.remove(name);
         chatSessions.remove(name);
         toolRunners.remove(name);
-        chatLogBuffers.remove(name);
+        closeLogBuffer(chatLogBuffers.remove(name));
         organizationOf(projectId).tell(o -> o.remove(chatId));
         // Its role edges, and every edge that names it in any project, go with it (CollaborationGraph_260828_oo01).
         forgetInEveryRoleTable(t -> t.forgetConversation(name));
@@ -904,12 +904,20 @@ public class ChatUiActorSystem implements ConversationControls {
             LOG.log(Level.WARNING, "Could not end the conversations of " + projectId, e);
         }
         projectRef.tell(Project::stopWatching);
+        try {
+            projectRef.ask(p -> {
+                p.closeJobLogs();
+                return null;
+            }).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.FINE, "Could not close the job logs of " + projectId, e);
+        }
         actorSystem.removeActorRecursively(projectId);
         for (String name : conversations) {
             chats.remove(name);
             chatSessions.remove(name);
             toolRunners.remove(name);
-            chatLogBuffers.remove(name);
+            closeLogBuffer(chatLogBuffers.remove(name));
         }
         projects.remove(projectId);
         // The project's role edges went with its role table; edges of other projects that name its conversations go too.
@@ -1046,6 +1054,16 @@ public class ChatUiActorSystem implements ConversationControls {
                 LOG.log(Level.FINE, "Could not stop the job watch of " + ref.getName(), e);
             }
         }
+    }
+
+    /** Stops the owner of a deleted conversation's log buffer. */
+    private static void closeLogBuffer(RecentEntriesAccumulator buffer) {
+        if (buffer != null) buffer.close();
+    }
+
+    /** For a test: the log buffer of a conversation. */
+    RecentEntriesAccumulator chatLogBufferForTest(String projectId, String chatId) {
+        return chatLogBuffers.get(chatActorName(projectId, chatId));
     }
 
     /** @return the ids of all projects created so far */

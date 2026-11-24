@@ -89,6 +89,23 @@ public final class ConversationToolRunner implements ToolCallRecorder {
                 return calculator.evaluate(expression);
             });
         }
+
+        /** @return whether a JShell (a child JVM) is running for this conversation */
+        boolean isOpen() {
+            if (!owner.isAlive()) return false;
+            return owner.ask(o -> calculator != null);
+        }
+
+        /** Closes the JShell, if one was made, and stops the owner: called when the conversation is deleted. */
+        void close() {
+            owner.run(o -> {
+                if (calculator != null) {
+                    calculator.close();
+                    calculator = null;
+                }
+            });
+            owner.close();
+        }
     }
 
     private final IIActorSystem system;
