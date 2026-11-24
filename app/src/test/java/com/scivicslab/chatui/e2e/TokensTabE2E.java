@@ -26,9 +26,9 @@ import java.util.List;
  *
  * <pre>
  * java e2e/ScriptedModelServer.java 28978 &amp;
- * PATH=$HOME/works/chat-ui-with-audit-trail/e2e/fake-claude:$PATH java \
+ * PATH=$HOME/works/quarkus-chat-ui/e2e/fake-claude:$PATH java \
  *     -Dquarkus.http.port=28979 -Dchat-ui.servers=http://127.0.0.1:28978 -Dchat-ui.default-model=fake \
- *     -Dchat-ui.plugins=chat-ui-with-audit-trail-plugin-harness.jar -jar app/target/quarkus-app/quarkus-run.jar &amp;
+ *     -Dchat-ui.plugins=plugin-harness/target/quarkus-chat-ui-plugin-harness-3.0.0-SNAPSHOT.jar -jar app/target/quarkus-chat-ui-3.0.0-SNAPSHOT.jar &amp;
  * CHAT_UI_URL=http://localhost:28979/ java -cp ... com.scivicslab.chatui.e2e.TokensTabE2E
  * </pre>
  *
