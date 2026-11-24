@@ -2238,6 +2238,45 @@ public class ChatUiActorSystem implements ConversationControls {
     }
 
     /**
+     * Sets how many steps one turn of a conversation may make, for a provider that takes a step budget.
+     *
+     * @return {@code false} when there is no such conversation
+     */
+    public boolean setStepLimit(String projectId, String chatId, int value) {
+        ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
+        if (session == null) return false;
+        session.tell(a -> {
+            ChatSession c = (ChatSession) a;
+            c.setStepLimit(value);
+            c.recordSettings(null);
+        }).join();
+        return true;
+    }
+
+    /**
+     * Sets how many minutes one turn of a conversation may run, for a provider that takes a step budget; {@code 0}
+     * sets no limit.
+     *
+     * @return {@code false} when there is no such conversation
+     */
+    public boolean setTimeLimitMinutes(String projectId, String chatId, int value) {
+        ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
+        if (session == null) return false;
+        session.tell(a -> {
+            ChatSession c = (ChatSession) a;
+            c.setTimeLimitMinutes(value);
+            c.recordSettings(null);
+        }).join();
+        return true;
+    }
+
+    /** Puts a conversation's recorded step and time limits back; one that is missing or invalid stays at its default. */
+    static void restoreLimits(ChatSession c, Integer stepLimit, Integer timeLimitMinutes) {
+        if (stepLimit != null && stepLimit >= 1) c.setStepLimit(stepLimit);
+        if (timeLimitMinutes != null && timeLimitMinutes >= 0) c.setTimeLimitMinutes(timeLimitMinutes);
+    }
+
+    /**
      * Sets how hard one conversation's provider should work on an answer, where it has such a
      * setting ({@code ThinkingAndEffortAreConversationSettings_260917_oo01}).
      *
@@ -2396,6 +2435,12 @@ public class ChatUiActorSystem implements ConversationControls {
             ChatSessionIIAR session = chatSessions.get(conversationSquadName);
             boolean noThink = s.noThink();
             if (session != null) session.tell(a -> ((ChatSession) a).setNoThink(noThink));
+        }
+        ChatSessionIIAR limited = chatSessions.get(conversationSquadName);
+        if (limited != null && (s.stepLimit() != null || s.timeLimitMinutes() != null)) {
+            Integer steps = s.stepLimit();
+            Integer minutes = s.timeLimitMinutes();
+            limited.tell(a -> restoreLimits((ChatSession) a, steps, minutes));
         }
         if (s.effort() != null && !s.effort().isBlank()) {
             ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
