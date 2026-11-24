@@ -99,6 +99,19 @@ public class CodexProvider implements LlmProvider {
         String threadId;
         /** The turn's image files, kept while its run goes on, also while it is parked on calls; the cancel closes them too. */
         PreparedImages heldImages;
+        /** Counted up by each cancel: a run whose start began before a cancel sees it and is stopped. */
+        long cancels;
+        /** The number of the latest run; what an output reader of an older run tells is dropped. */
+        long runId;
+
+        /** Queues an event of run {@code run}, unless a later run has begun. */
+        void offerOfRun(long run, StreamEvent event) {
+            if (run == runId) events.offer(event);
+        }
+
+        void appendStderrOfRun(long run, String line) {
+            if (run == runId) appendStderr(line);
+        }
 
         CompletableFuture<String> park(String name, String argumentsJson) {
             CompletableFuture<String> result = new CompletableFuture<>();
@@ -128,6 +141,10 @@ public class CodexProvider implements LlmProvider {
     private final List<String> runErrors = new ArrayList<>();
     private BlockingJob<Void> stderrReader;
     private long turnStartedAt;
+    /** The cancels counted when this turn began: a cancel after that is one that came during the turn's start. */
+    private long turnCancels;
+    /** For a test: run when the turn has counted the cancels so far. */
+    Runnable startBegan;
 
     private void putModel(String value) {
         model = value;
@@ -151,6 +168,12 @@ public class CodexProvider implements LlmProvider {
             s.effort = e;
             s.threadId = id;
         });
+    }
+
+    /** For a test: whether a codex process is held. */
+    boolean processAlive() {
+        Process p = state.ask(s -> s.process);
+        return p != null && p.isAlive();
     }
 
     private boolean isCancelled() {
@@ -252,12 +275,13 @@ public class CodexProvider implements LlmProvider {
 
     @Override
     public void cancel() {
-        state.run(s -> {
+        Process p = state.ask(s -> {
+            s.cancels++;
             s.cancelled = true;
             s.suspended = false;
+            return s.process;
         });
         closeImages();
-        Process p = state.ask(s -> s.process);
         if (p != null && p.isAlive()) {
             p.destroy();
             logger.info("codex process cancelled");
@@ -325,7 +349,11 @@ public class CodexProvider implements LlmProvider {
             if (end != null) finishTurn(end, emitter);
             return;
         }
-        state.run(s -> s.cancelled = false);
+        turnCancels = state.ask(s -> {
+            s.cancelled = false;
+            return s.cancels;
+        });
+        if (startBegan != null) startBegan.run();
         turnStartedAt = System.nanoTime();
         boolean mayRetrySession = threadId != null;
         boolean mayRetryModel = model != null;
@@ -379,24 +407,34 @@ public class CodexProvider implements LlmProvider {
         }
         sawResult = false;
         runErrors.clear();
-        state.run(s -> {
+        // The process is the owner's from now on. A cancel that came while it was being started is not lost: the owner counts
+        // cancels, and a start that began before one stops the process here instead of keeping it.
+        long cancelsAtStart = turnCancels;
+        long run = state.ask(s -> {
+            if (s.cancels != cancelsAtStart) return -1L;
             s.events.clear();
             s.stderr = new StringBuilder();
             s.process = process;
+            return ++s.runId;
         });
+        if (run < 0) {
+            process.destroy();
+            logger.info("codex process cancelled while it started");
+            return RunEnd.failed("codex run cancelled while it started");
+        }
 
-        stderrReader = BlockingJob.start("codex-stderr", () -> { readStderr(process, state); return null; }, process::destroy);
+        stderrReader = BlockingJob.start("codex-stderr", () -> { readStderr(process, state, run); return null; }, process::destroy);
         // The run's output, and the calls it parks, reach the turn through one queue, in the order they happen.
         BlockingJob.start("codex-stdout", () -> {
             try (BufferedReader out = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = out.readLine()) != null) {
-                    for (StreamEvent event : parser.parse(line)) state.tell(s -> s.events.offer(event));
+                    for (StreamEvent event : parser.parse(line)) state.tell(s -> s.offerOfRun(run, event));
                 }
             } catch (IOException e) {
                 logger.log(Level.FINE, "codex stdout closed", e);
             }
-            state.tell(s -> s.events.offer(StreamEvent.text(OUTPUT_CLOSED, null)));
+            state.tell(s -> s.offerOfRun(run, StreamEvent.text(OUTPUT_CLOSED, null)));
             return null;
         }, process::destroy);
 
@@ -704,14 +742,14 @@ public class CodexProvider implements LlmProvider {
         }
     }
 
-    private static void readStderr(Process process, StateOwner<CodexState> state) {
+    private static void readStderr(Process process, StateOwner<CodexState> state, long run) {
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String message = line;
                 logger.fine(() -> "codex stderr: " + message);
-                state.tell(s -> s.appendStderr(message));
+                state.tell(s -> s.appendStderrOfRun(run, message));
             }
         } catch (IOException ignored) { }
     }
