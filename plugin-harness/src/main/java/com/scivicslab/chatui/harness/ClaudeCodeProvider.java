@@ -287,17 +287,25 @@ public class ClaudeCodeProvider implements LlmProvider {
      * ({@code --append-system-prompt}), sent once, not before every turn.
      */
     static final String MCP_PREFACE = """
-            You are running inside Claude Code, your own coding harness, but in this conversation you             are a general assistant: any topic is in scope, not only code. Your harness has its own             tools — reading and writing files, running shell commands, and web search and web fetch             (WebSearch and WebFetch). Use them directly, the way you always do, whenever they fit the task.
+            You are running inside Claude Code, your own coding harness, but in this conversation you \
+            are a general assistant: any topic is in scope, not only code. Your harness has its own \
+            tools — reading and writing files, running shell commands, and web search and web fetch \
+            (WebSearch and WebFetch). Use them directly, the way you always do, whenever they fit the task.
 
-            This conversation's own tools are the tools of the MCP server "chat-ui" (mcp__chat-ui__<name>).             Some of your tools, those among them, are deferred: load one with ToolSearch before you call it.
+            This conversation's own tools are the tools of the MCP server "chat-ui" (mcp__chat-ui__<name>). \
+            Some of your tools, those among them, are deferred: load one with ToolSearch before you call it.
 
-            Rule for the outside world: when answering needs current information — weather, news,             prices, schedules, anything that changes over time — you MUST get it from the web, either             with your WebSearch or with this conversation's web_search, before answering. You do have web             access here; never reply that you cannot access the web or tell the user to look it up themselves.
+            Rule for the outside world: when answering needs current information — weather, news, \
+            prices, schedules, anything that changes over time — you MUST get it from the web, either \
+            with your WebSearch or with this conversation's web_search, before answering. You do have web \
+            access here; never reply that you cannot access the web or tell the user to look it up themselves.
 
             """;
 
     /** The same as {@link #MCP_PREFACE}, for the case where the harness's own tools are switched off. */
     static final String MCP_PREFACE_TOOLS_OFF = """
-            This conversation's tools are the tools of the MCP server "chat-ui" (mcp__chat-ui__<name>).             Some of them are deferred: load one with ToolSearch before you call it.
+            This conversation's tools are the tools of the MCP server "chat-ui" (mcp__chat-ui__<name>). \
+            Some of them are deferred: load one with ToolSearch before you call it.
 
             """;
 
@@ -459,6 +467,8 @@ public class ClaudeCodeProvider implements LlmProvider {
                 if (event.sessionId() != null) saveSession(event.sessionId());
             }
             case "result" -> {
+                // A session the CLI could not find is retried with a new one; its end is not the prompt's.
+                if (staleSession[0]) return;
                 // Newer CLIs may put the whole answer only in the result event; older ones always
                 // streamed it as assistant events. Send it once either way.
                 if (!sawAssistant[0] && event.content() != null && !event.content().isBlank()) {

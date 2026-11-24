@@ -74,8 +74,9 @@ public class HarnessMcpCheck {
         String q1 = "Use this conversation's set_chat_name tool to give conversation chat-" + id + " the name " + name
                 + ". Then reply with the single word DONE.";
         turn(chat, q1);
-        String orgs = get(base + "/api/projects/project1/organization");
-        check(orgs.contains(name), "turn 1: set_chat_name ran through MCP and named the conversation", orgs);
+        String project = get(base + "/api/projects/project1");
+        check(project.contains("\"" + id + "\":\"" + name + "\""),
+                "turn 1: set_chat_name ran through MCP and named the conversation", project);
 
         String sessions = get(base + "/api/sessions?conversationSquadId=" + conversation);
         Matcher m = Pattern.compile("\"sessionId\"\\s*:\\s*(\\d+)").matcher(sessions);
@@ -91,7 +92,8 @@ public class HarnessMcpCheck {
         check(conversationJson.toLowerCase().contains("blue"), "turn 2: the turn ended with the question to the person",
                 conversationJson.substring(Math.max(0, conversationJson.length() - 1500)));
         String trace2 = session == null ? "" : get(base + "/api/sessions/" + session + "/trace/2");
-        check(trace2.contains("ask-person"), "turn 2: ask_person was recorded as the turn's end", trace2);
+        check(trace2.contains("\"toolCalls\":\"ask_person") && !trace2.contains("turn2/step2/"),
+                "turn 2: the step that called ask_person was the turn's last", trace2);
 
         turn(chat, "Reply with the single word THIRD.");
         conversationJson = get(chat + "/conversation");

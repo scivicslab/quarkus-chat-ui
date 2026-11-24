@@ -37,8 +37,10 @@ public class StreamEventParser {
                 case "system" -> List.of(parseSystem(json, jsonLine));
                 case "assistant" -> parseAssistant(json, jsonLine);
                 case "user" -> parseUser(json, jsonLine);
-                case "result" -> List.of(parseResult(json, jsonLine));
+                case "result" -> parseResult(json, jsonLine);
                 case "error" -> List.of(parseError(json, jsonLine));
+                // The CLI's answer to a control request, such as the interrupt at the end of a turn: nothing to show.
+                case "control_response" -> List.of();
                 case "rate_limit_event" -> List.of(new StreamEvent("rate_limit_event", null, null, -1, -1, false, jsonLine));
                 default -> {
                     logger.warning("Unknown CLI event type: " + type + " | " + jsonLine);
@@ -278,19 +280,25 @@ public class StreamEventParser {
         return String.valueOf(content);
     }
 
-    private StreamEvent parseResult(JSONObject json, String rawJson) {
+    /**
+     * A turn's {@code result} line. A failed one ({@code is_error}: the turn failed, ran out of turns, or was
+     * interrupted) is an {@code error} event with the message, then a {@code result} event with no text: the result
+     * is still the end of the turn, and the reader and {@link CliProcess#sendPrompt} wait for it.
+     */
+    private List<StreamEvent> parseResult(JSONObject json, String rawJson) {
         String sessionId = json.optString("session_id", null);
         double costUsd = json.optDouble("total_cost_usd", -1);
         long durationMs = json.optLong("duration_ms", -1);
         boolean isError = json.optBoolean("is_error", false);
         if (isError) {
-            return new StreamEvent("error", resultErrorText(json), sessionId, costUsd, durationMs, true, rawJson);
+            return List.of(new StreamEvent("error", resultErrorText(json), sessionId, costUsd, durationMs, true, rawJson),
+                    new StreamEvent("result", null, sessionId, costUsd, durationMs, true, rawJson));
         }
         // Carry the final text so the dispatcher can fall back to it when the CLI emitted
         // no assistant event for this turn.
         String finalText = json.optString("result", "");
-        return new StreamEvent("result", finalText.isEmpty() ? null : finalText,
-                sessionId, costUsd, durationMs, false, rawJson);
+        return List.of(new StreamEvent("result", finalText.isEmpty() ? null : finalText,
+                sessionId, costUsd, durationMs, false, rawJson));
     }
 
     /**

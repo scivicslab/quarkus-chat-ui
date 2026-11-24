@@ -41,6 +41,10 @@ class ParkedCallTest {
     private static final String INIT = "echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}'\n";
     private static final String RESULT = "echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"\",\"session_id\":\"s1\"}'\n";
 
+    /** What Claude Code writes at the end of an interrupted turn (observed with claude 2.1.331). */
+    private static final String INTERRUPTED_RESULT = "echo '{\"type\":\"result\",\"subtype\":\"error_during_execution\","
+            + "\"is_error\":true,\"stop_reason\":\"tool_use\",\"session_id\":\"s1\"}'\n";
+
     private static String assistant(String textExpression) {
         return "echo \"{\\\"type\\\":\\\"assistant\\\",\\\"message\\\":{\\\"role\\\":\\\"assistant\\\",\\\"content\\\":"
                 + "[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"" + textExpression + "\\\"}]}}\"\n";
@@ -93,7 +97,7 @@ class ParkedCallTest {
     void theEndOfTheTurnAnswersTheParkedCallAndInterruptsTheCli(@TempDir Path dir) throws Exception {
         Path control = dir.resolve("control");
         Path cli = script(dir, "fake-claude", "read line\n" + INIT
-                + "read ctl\necho \"$ctl\" > '" + control + "'\n" + RESULT
+                + "read ctl\necho \"$ctl\" > '" + control + "'\n" + INTERRUPTED_RESULT
                 + "read line\n" + assistant("second") + RESULT + "read line\n");
         CliProcess process = new CliProcess(cli.toString(), "UNUSED_KEY", CliConfig.defaults(null));
         List<StreamEvent> events = new CopyOnWriteArrayList<>();
@@ -109,7 +113,10 @@ class ParkedCallTest {
         CompletableFuture<String> call = process.park("ask_person", "{\"question\":\"which?\"}");
         assertEquals(CliProcess.SUSPENDED, first.get(10, TimeUnit.SECONDS));
 
+        long ending = System.currentTimeMillis();
         process.endTurn(5_000);
+        assertTrue(System.currentTimeMillis() - ending < 4_000,
+                "the interrupted turn's failed result ends it; endTurn does not wait out its limit");
 
         assertEquals(CliProcess.TURN_ENDED, call.get(1, TimeUnit.SECONDS));
         assertTrue(Files.readString(control).contains("\"subtype\":\"interrupt\""), Files.readString(control));
@@ -193,6 +200,7 @@ class ParkedCallTest {
                 new ConversationMcp("http://127.0.0.1:28030/mcp", "project1/chat-01", "secret-key"));
         assertTrue(claude.parksToolCalls() && claude.callsToolsByDefinition());
         assertFalse(claude.promptPreface().contains("<invoke>"), claude.promptPreface());
+        assertFalse(claude.promptPreface().contains("  "), "no runs of spaces inside a sentence: " + claude.promptPreface());
         Path file = settings.sessionFile("project1", "01", "claude").resolveSibling(
                 settings.sessionFile("project1", "01", "claude").getFileName() + ".mcp.json");
         org.json.JSONObject server = new org.json.JSONObject(Files.readString(file))
