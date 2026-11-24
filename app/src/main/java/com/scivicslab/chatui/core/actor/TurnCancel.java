@@ -26,11 +26,13 @@ public final class TurnCancel implements CancelScope {
     /** The plain state the owner runs. */
     static final class State {
         private boolean cancelled;
+        private boolean pauseRequested;
         private long nextId = 1;
         private final Map<Long, Runnable> cancellers = new HashMap<>();
 
         void begin() {
             cancelled = false;
+            pauseRequested = false;
             cancellers.clear();
         }
 
@@ -62,6 +64,12 @@ public final class TurnCancel implements CancelScope {
         boolean isCancelled() {
             return cancelled;
         }
+
+        void requestPause() { pauseRequested = true; }
+
+        void clearPause() { pauseRequested = false; }
+
+        boolean isPauseRequested() { return pauseRequested; }
     }
 
     private final ActorRef<State> owner;
@@ -92,6 +100,26 @@ public final class TurnCancel implements CancelScope {
     public boolean isCancelled() {
         try {
             return owner.ask(State::isCancelled).join();
+        } catch (RuntimeException e) {
+            if (e.getCause() instanceof ActorClosedException) return false;
+            throw e;
+        }
+    }
+
+    /** Marks the turn as paused for an urgent request; the loop reads it with {@link #isPauseRequested()}. */
+    public void requestPause() {
+        ask(State::requestPause);
+    }
+
+    /** Clears the pause mark. */
+    public void clearPause() {
+        ask(State::clearPause);
+    }
+
+    /** @return whether the turn was marked as paused for an urgent request */
+    public boolean isPauseRequested() {
+        try {
+            return owner.ask(State::isPauseRequested).join();
         } catch (RuntimeException e) {
             if (e.getCause() instanceof ActorClosedException) return false;
             throw e;

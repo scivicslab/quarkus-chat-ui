@@ -40,7 +40,6 @@ import java.util.HashSet;
 import java.util.HashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -72,7 +71,7 @@ public class ChatSession extends Interpreter {
     /** The conversation's provider. Not final: setProvider replaces it when the conversation's
  *  provider kind changes (CliHarnessProvider_260912_oo01). */
     // volatile: isCommand() is read from a request thread while a turn occupies this actor's thread.
-    private volatile LlmProvider provider;
+    private LlmProvider provider;
     private AuthMode authMode;
 
     /** Complete I/O log (Sessions tab). May be null (logging disabled / not yet ported). */
@@ -112,14 +111,13 @@ public class ChatSession extends Interpreter {
     // chatSessionRef.tell(...)), but BusyStateReadableSnapshot_260828_oo01's isBusyDirect() reads it
     // from any thread — safe publication of a single-writer/multi-reader flag, not a loosening of
     // the actor-thread-exclusivity rule (writes stay exactly where they always were).
-    private volatile boolean busy;
+    private boolean busy;
     private String apiKey;
     private final LinkedList<HistoryEntry> conversationHistory = new LinkedList<>();
     // Same safe-publication pattern as `busy`, for the same reason (BusyStateReadableSnapshot_260828_oo01):
     // written only by recordHistory()/history-clear, both always on this actor's own thread; read from
     // any thread via getHistorySnapshotDirect() without going through the actor's mailbox.
-    private final java.util.concurrent.atomic.AtomicReference<List<HistoryEntry>> historySnapshot =
-            new java.util.concurrent.atomic.AtomicReference<>(List.of());
+    private List<HistoryEntry> historySnapshot = List.of();
 
     private final ChatEvent[] logBuffer = new ChatEvent[LOG_BUFFER_SIZE];
     private int logHead = 0;
@@ -198,7 +196,7 @@ public class ChatSession extends Interpreter {
     /** How many broken tool calls in a row a turn repairs when the agent loop names no number. */
     static final int DEFAULT_MAX_REPAIRS_IN_A_ROW = 3;
     /** When the running turn began, for the duration reported with its answer. */
-    private volatile long turnStartedAt;
+    private long turnStartedAt;
     /** Ceiling on the observation size a workflow may ask for; set from configuration. */
     private int maxObservationChars = ContextBudget.OBS_THRESHOLD;
     /**
@@ -388,7 +386,7 @@ public class ChatSession extends Interpreter {
      * {@link #ioTurnNo} and {@link #stepCount}: chat-ui's MCP server reads all three from its own thread to label
      * the calls it records ({@link ConversationToolRunner.IoPosition}).
      */
-    private volatile long ioSession = -1;
+    private long ioSession = -1;
     /** Which tools this conversation is shown and may call; every conversation starts with all of them. */
     private ToolSet toolSet = ToolSet.FULL;
     /**
@@ -400,7 +398,7 @@ public class ChatSession extends Interpreter {
     /** Tools a plugin jar added (ProviderAndToolPlugins_260912_oo01), by name, in registration order. */
     private final Map<String, ConversationTool> pluginTools = new LinkedHashMap<>();
     /** This turn's number, for turn{N}/step{M}/... I/O-log labels. Set in start(). */
-    private volatile int ioTurnNo;
+    private int ioTurnNo;
 
     /**
      * The {@code ask_chat} request the current turn's prompt is, or answers, or {@code null}
@@ -453,15 +451,14 @@ public class ChatSession extends Interpreter {
      * Set by {@link #pauseForUrgent} from the timekeeper's thread while a turn runs: the turn is to
      * stop so that an urgent request can be answered, and the work is to go on afterwards.
      */
-    private volatile boolean pauseRequested;
 
     /**
      * The child requests still out, published after every change so the timekeeper can read them
      * while a turn holds this actor's thread (as {@link #isBusy()} is read).
      */
-    private volatile List<OpenRequests.Outstanding> outstandingSnapshot = List.of();
+    private List<OpenRequests.Outstanding> outstandingSnapshot = List.of();
     /** The sent requests with a promised report pending, for the timekeeper to read without waiting for a turn. */
-    private volatile java.util.Set<String> promisedSnapshot = java.util.Set.of();
+    private java.util.Set<String> promisedSnapshot = java.util.Set.of();
 
     /** @return the sent requests whose promised report is pending, read without waiting for a running turn */
     public java.util.Set<String> promisedRequests() { return promisedSnapshot; }
@@ -511,9 +508,15 @@ public class ChatSession extends Interpreter {
     private String answerBeforeDecision;
     private List<ToolCall> pendingCalls;
     private String finalAnswer;
-    private volatile int stepCount;
+    private int stepCount;
     /** The turn's cancel state and what ends its in-flight model requests and tool calls; one actor owns it. */
     private final TurnCancel cancelScope = new TurnCancel("turn-cancel");
+    /**
+     * What other threads read of this conversation while its turn runs, told by the turn at every change
+     * ({@link ChatBoard}); one actor owns it.
+     */
+    private final com.scivicslab.pojoactor.core.ActorRef<ChatBoard> board =
+            new com.scivicslab.pojoactor.core.ActorRef<>("chat-board", new ChatBoard());
 
     // ---- Babysitter loop (BabysitterLoopWorkflowShape_260828_oo01, made phase-agnostic by
     // GenericBabysitterPhases_260829_oo01) — per-turn, reset in start() ----
@@ -613,6 +616,7 @@ public class ChatSession extends Interpreter {
 
     private void bindProvider(LlmProvider provider, Optional<String> configApiKey) {
         this.provider = provider;
+        publishStatus();
         if (provider.capabilities().supportsWatchdog()) {
             // CLI-based provider: no API key needed, CLI binary handles auth
             this.authMode = AuthMode.CLI;
@@ -867,7 +871,7 @@ public class ChatSession extends Interpreter {
      *
      * @return an immutable snapshot of the conversation history
      */
-    public List<HistoryEntry> historySnapshot() { return historySnapshot.get(); }
+    public List<HistoryEntry> historySnapshot() { return historySnapshot; }
 
     /**
      * Returns the model identifier currently selected by the provider.
@@ -999,6 +1003,7 @@ public class ChatSession extends Interpreter {
         }
 
         busy = true;
+        publishStatus();
         // Open (lazily) the conversation's I/O-log session and number this turn for the Sessions tab.
         final long ioSession = (ioLog != null) ? ioLog.ensureSession(myChatName()) : -1;
         final int ioTurnNo = ++ioTurn;
@@ -1011,7 +1016,7 @@ public class ChatSession extends Interpreter {
         cancelScope.begin();
         this.turnError = null;
         this.turnTranscript.setLength(0);
-        this.pauseRequested = false;
+        cancelScope.clearPause();
         recordHistory("user", prompt);
         if (resultKey != null) {
             pendingResultKeys.remove(resultKey);
@@ -1102,7 +1107,7 @@ public class ChatSession extends Interpreter {
         // of every turn that worked for the request go in it, each under its turn's id
         // (ReportReachesTheAskerAfterDelegation_261107_oo01).
         CompletableFuture<TurnReply> originalDone = null;
-        boolean paused = pauseRequested;
+        boolean paused = cancelScope.isPauseRequested();
         if (turnOriginal != null) {
             originalDone = openRequests.doneOf(turnOriginal);
             // A paused turn has not finished the work: the request waits for the turn that resumes it.
@@ -1122,9 +1127,10 @@ public class ChatSession extends Interpreter {
         if (paused) queueResume(emitter, self);
         turnReminder = null;
         turnFollowUp = null;
-        pauseRequested = false;
+        cancelScope.clearPause();
         publishOutstanding();
         busy = false;
+        publishStatus();
         activeResultKey = null;
 
         ActorRef<PromptQueue> promptQueue = getPromptQueue();
@@ -1250,6 +1256,7 @@ public class ChatSession extends Interpreter {
         }
 
         busy = true;
+        publishStatus();
         applyWorkflowBaseDir();
         this.turnSource = source;
         this.ioSession = (ioLog != null) ? ioLog.ensureSession(myChatName()) : -1;
@@ -1279,7 +1286,7 @@ public class ChatSession extends Interpreter {
             recordOpenRequests();
         }
         this.turnTranscript.setLength(0);
-        this.pauseRequested = false;
+        cancelScope.clearPause();
         publishOutstanding();
         recordHistory("user", prompt, originOf(source), null, null);
         // The prompt is already on the screen (the queue echoed it at dispatch); this puts the turn's
@@ -1322,6 +1329,7 @@ public class ChatSession extends Interpreter {
         // Either side may ask for it: the conversation's own setting, or this one prompt.
         this.turnNoThink = noThink || noThinkAlways;
         this.turnStartedAt = clock.getAsLong();
+        publishStatus();
         if (byDefinition()) handSystemMessage();
         this.pendingCalls = null;
         this.finalAnswer = null;
@@ -1534,11 +1542,12 @@ public class ChatSession extends Interpreter {
      * This conversation's external MCP servers, by name ({@code ExternalMcpServersOfAConversation_261120_oo01}). Kept
      * here rather than by the provider, which another provider replaces. Volatile: the REST view reads it.
      */
-    private volatile Map<String, String> mcpServers = Map.of();
+    private Map<String, String> mcpServers = Map.of();
 
     /** @param servers the external MCP servers, checked by {@link McpServerList#check}; recorded by the caller */
     public void setMcpServers(Map<String, String> servers) {
         this.mcpServers = McpServerList.check(servers);
+        publishStatus();
     }
 
     /** @return the external MCP servers, by name */
@@ -1949,8 +1958,8 @@ public class ChatSession extends Interpreter {
     private LlmStepOutcome callLlmStep(String promptToSend, List<String> stepImages) throws Exception {
         // The body the provider sends is kept so the I/O log can record it as it was sent
         // (RequestMessagesControl_261018_oo01); a provider with no request body leaves it null.
-        java.util.concurrent.atomic.AtomicReference<String> sentBody = new java.util.concurrent.atomic.AtomicReference<>();
-        ProviderContext ctx = new ProviderContext(apiKey, stepImages, turnNoThink, () -> {}, sentBody::set, true,
+        String[] sentBody = {null};   // written by the provider's thread during the step, read after the step's call returned
+        ProviderContext ctx = new ProviderContext(apiKey, stepImages, turnNoThink, () -> {}, body -> sentBody[0] = body, true,
                 finalRequest != FinalRequest.NONE).withCancel(cancelScope);
         boolean[] cutOff = {false};
         StringBuilder assistantBuf = new StringBuilder();
@@ -1979,8 +1988,8 @@ public class ChatSession extends Interpreter {
         String stepLabel = "turn" + ioTurnNo + "/step" + stepCount + "/llm";
         logToConversationSquad("INFO", stepLabel + " start: model=" + (turnModel == null ? "(server default)" : turnModel)
                 + ", promptChars=" + promptToSend.length());
-        AtomicLong streamedChars = new AtomicLong();
-        AtomicLong progressLoggedAt = new AtomicLong(System.currentTimeMillis());
+        long[] streamedChars = {0};   // the step's events come from the provider's one streaming thread, in order
+        long[] progressLoggedAt = {System.currentTimeMillis()};
         StepAnswerStream answerStream = new StepAnswerStream(e -> turnEmitter.accept(e));
 
         java.util.concurrent.CompletableFuture<Object> call = providerRef.ask(p -> {
@@ -2085,7 +2094,7 @@ public class ChatSession extends Interpreter {
         // model's plan is not what it meant to send.
         List<ToolCall> calls = analysis.broken() ? List.of() : analysis.calls();
         answerStream.finish(cutOff[0] || failed || !calls.isEmpty() || analysis.broken());
-        recordStepIo(promptToSend, sentBody.get(), text, thinkingBuf.toString(), calls, stepUsage[0]);
+        recordStepIo(promptToSend, sentBody[0], text, thinkingBuf.toString(), calls, stepUsage[0]);
         turnTranscript.append("You wrote:\n").append(text).append("\n\n");
         return new LlmStepOutcome(text, calls, cutOff[0], analysis, failed);
     }
@@ -2224,7 +2233,7 @@ public class ChatSession extends Interpreter {
      * entry in the System Log tab and make the tab log actor the bottleneck of the turn.
      *
      * <p>Runs on whichever thread the provider streams on, not this actor's thread. That is safe
-     * because the counters are atomic and {@code logToConversationSquad} only enqueues into the ConversationSquad log actor's
+     * because the step's events arrive from the provider's one streaming thread, one after another, and {@code logToConversationSquad} only enqueues into the ConversationSquad log actor's
      * mailbox.</p>
      *
      * @param stepLabel    the step this progress belongs to, e.g. {@code turn3/step2/llm}
@@ -2232,16 +2241,14 @@ public class ChatSession extends Interpreter {
      * @param loggedAt     when a progress line was last written for this step
      * @param chunk        the chunk just received; blank chunks are counted as nothing
      */
-    private void noteStreamProgress(String stepLabel, AtomicLong charsSoFar, AtomicLong loggedAt,
+    private void noteStreamProgress(String stepLabel, long[] charsSoFar, long[] loggedAt,
                                     String chunk) {
         if (chunk == null || chunk.isEmpty()) return;
-        long total = charsSoFar.addAndGet(chunk.length());
+        charsSoFar[0] += chunk.length();
+        long total = charsSoFar[0];
         long now = System.currentTimeMillis();
-        long previous = loggedAt.get();
-        if (now - previous < STREAM_PROGRESS_INTERVAL_MS) return;
-        // Only the thread that wins the swap writes the line, so two chunks arriving at once do
-        // not produce two lines for the same instant.
-        if (!loggedAt.compareAndSet(previous, now)) return;
+        if (now - loggedAt[0] < STREAM_PROGRESS_INTERVAL_MS) return;
+        loggedAt[0] = now;
         logToConversationSquad("INFO", stepLabel + " streaming: " + total + " chars");
     }
 
@@ -2382,7 +2389,7 @@ public class ChatSession extends Interpreter {
      */
     public ActionResult timeLimitReached() {
         if (!provider.takesStepBudget() || timeLimitMinutes <= 0) return new ActionResult(false, "no time limit");
-        if (finalRequest != FinalRequest.NONE || cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "not now");
+        if (finalRequest != FinalRequest.NONE || cancelScope.isCancelled() || cancelScope.isPauseRequested()) return new ActionResult(false, "not now");
         long limitMs = timeLimitMinutes * 60_000L;
         if (clock.getAsLong() - turnStartedAt < limitMs) return new ActionResult(false, "within the time limit");
         askForAnAnswerInText(FinalRequest.TIME_LIMIT,
@@ -2396,7 +2403,7 @@ public class ChatSession extends Interpreter {
      */
     public ActionResult stepBudgetWarning() {
         if (!provider.takesStepBudget() || stepWarningGiven || finalRequest != FinalRequest.NONE
-                || cancelScope.isCancelled() || pauseRequested) {
+                || cancelScope.isCancelled() || cancelScope.isPauseRequested()) {
             return new ActionResult(false, "no warning to give");
         }
         int max = stepLimit;
@@ -2431,9 +2438,28 @@ public class ChatSession extends Interpreter {
         publishLimits();
     }
 
-    /** Stops the cancel state's owner with the conversation. */
+    /** Stops the cancel state's owner and the board with the conversation. */
     void closeCancelScope() {
         cancelScope.close();
+        board.close();
+    }
+
+    /** The state other threads read, as it is now; only the turn's own thread calls this. */
+    private ChatBoard.Status currentStatus() {
+        return new ChatBoard.Status(busy, turnStartedAt, historySnapshot, outstandingSnapshot, promisedSnapshot,
+                unansweredSnapshot, mcpServers, lastReplyWatchLines, lastReminderDecision, provider, entries, toolSet,
+                noThinkAlways);
+    }
+
+    /** Tells the board the state other threads read. Called by the turn after each change of one of its values. */
+    private void publishStatus() {
+        ChatBoard.Status status = currentStatus();
+        board.tell(b -> b.set(status));
+    }
+
+    /** What other threads may read of this conversation, as the turn last told it; does not wait for a running turn. */
+    ChatBoard.Status status() {
+        return board.ask(ChatBoard::status).join();
     }
 
     /** Gives the limits a board other threads read them from, and tells it the current ones. */
@@ -2462,7 +2488,7 @@ public class ChatSession extends Interpreter {
      */
     public ActionResult repeatedCallReached() {
         if (finalRequest != FinalRequest.NONE) return new ActionResult(false, "already asked for an answer in text");
-        if (cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "paused or cancelled");
+        if (cancelScope.isCancelled() || cancelScope.isPauseRequested()) return new ActionResult(false, "paused or cancelled");
         // A CLI harness (Claude Code, Codex) runs its own tool loop and takes no tool choice; it is left alone.
         if (provider.parksToolCalls()) return new ActionResult(false, "the provider's CLI runs the tool loop");
         if (!repeatedCalls.repeated()) return new ActionResult(false, "no repeated call");
@@ -2509,6 +2535,7 @@ public class ChatSession extends Interpreter {
      */
     public void setToolSet(ToolSet toolSet) {
         if (toolSet != null) this.toolSet = toolSet;
+        publishStatus();
         renewToolRunner();
     }
 
@@ -2795,7 +2822,7 @@ public class ChatSession extends Interpreter {
             String restore = requestMessagesToRestore;
             requestMessagesToRestore = null;
             if (restore != null) providerRef().tell(p -> p.replaceRequestMessages(restore));
-            if (pauseRequested && finalAnswer == null) {
+            if (cancelScope.isPauseRequested() && finalAnswer == null) {
                 // Paused, not finished: what the turn did so far stands as its answer in the history,
                 // so the turn that resumes the work reads it, and the urgent request's turn in between
                 // does not wipe it out when its own steps are collapsed.
@@ -3013,7 +3040,7 @@ public class ChatSession extends Interpreter {
      * Whether the end-of-turn step runs. On unless {@code -Dchat-ui.reminder-decision=false}, which turns the
      * model call off for an instance that must not pay it (the test suite does, except where it tests the step).
      */
-    private volatile boolean reminderDecisionEnabled =
+    private boolean reminderDecisionEnabled =
             !"false".equalsIgnoreCase(System.getProperty("chat-ui.reminder-decision", "true"));
 
     /** @param enabled whether the end-of-turn step runs on this conversation */
@@ -3022,7 +3049,7 @@ public class ChatSession extends Interpreter {
     }
 
     /** What the end-of-turn reply-watch step did last, one line per open request; empty before it first runs. */
-    private volatile List<String> lastReplyWatchLines = List.of();
+    private List<String> lastReplyWatchLines = List.of();
 
     /** @return what the end-of-turn reply-watch step did last, one line per open request */
     public List<String> lastReplyWatchLines() {
@@ -3044,12 +3071,14 @@ public class ChatSession extends Interpreter {
             ActorRef<Timekeeper> keeper = system == null ? null : system.getActor(myChatName() + ".timekeeper");
             if (keeper == null) {
                 lastReplyWatchLines = List.of();
+                publishStatus();
                 if (!open.isEmpty()) logToConversationSquad("WARNING", "turn" + ioTurnNo + ": reply watch: no timekeeper");
                 return new ActionResult(true, "no timekeeper");
             }
             long now = System.currentTimeMillis();
             List<String> lines = keeper.ask(k -> k.rearmReplyWatches(open, now)).get(5, TimeUnit.SECONDS);
             lastReplyWatchLines = lines;
+            publishStatus();
             for (String line : lines) logToConversationSquad("INFO", "turn" + ioTurnNo + ": " + line);
             return new ActionResult(true, lines.size() + " open request(s)");
         } catch (Exception e) {
@@ -3060,7 +3089,7 @@ public class ChatSession extends Interpreter {
     }
 
     /** What the end-of-turn step decided last, for the record and for tests; {@code null} before the first turn ends. */
-    private volatile String lastReminderDecision;
+    private String lastReminderDecision;
 
     /** @return the line the end-of-turn step last wrote to the log, or {@code null} */
     public String lastReminderDecision() {
@@ -3099,7 +3128,7 @@ public class ChatSession extends Interpreter {
 
     private void decideReminderNow() throws Exception {
         if (!reminderDecisionEnabled) return;
-        if (cancelScope.isCancelled() || pauseRequested || turnError != null || finalAnswer == null || finalAnswer.isBlank()) {
+        if (cancelScope.isCancelled() || cancelScope.isPauseRequested() || turnError != null || finalAnswer == null || finalAnswer.isBlank()) {
             noteReminderDecision("SKIPPED | the turn has no final answer", null, null);
             return;
         }
@@ -3162,6 +3191,7 @@ public class ChatSession extends Interpreter {
      */
     private void noteReminderDecision(String decision, String prompt, String reply) {
         lastReminderDecision = decision;
+        publishStatus();
         logToConversationSquad("INFO", "turn" + ioTurnNo + ": reminder decision: " + decision);
         turnEmitter.accept(ChatEvent.thinking("\n→ reminder: " + decision + "\n"));
         if (prompt != null) stepCount++;   // a model call was made: it is counted like the others
@@ -3404,7 +3434,7 @@ public class ChatSession extends Interpreter {
     public ActionResult continueAfterCutOff(String maxInARow) {
         if (!cutOffPending) return new ActionResult(false, "not cut off");
         cutOffPending = false;
-        if (cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "paused or cancelled");
+        if (cancelScope.isCancelled() || cancelScope.isPauseRequested()) return new ActionResult(false, "paused or cancelled");
         int max = parsePositiveOr(maxInARow, DEFAULT_MAX_CUT_OFFS_IN_A_ROW);
         if (cutOffRun > max) {
             String kept = cutOffText.toString().strip();
@@ -3444,7 +3474,7 @@ public class ChatSession extends Interpreter {
     public ActionResult repairBrokenCall(String maxInARow) {
         if (!repairPending) return new ActionResult(false, "no broken tool call");
         repairPending = false;
-        if (cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "paused or cancelled");
+        if (cancelScope.isCancelled() || cancelScope.isPauseRequested()) return new ActionResult(false, "paused or cancelled");
         int max = parsePositiveOr(maxInARow, DEFAULT_MAX_REPAIRS_IN_A_ROW);
         if (repairRun > max) {
             String kept = repairText == null ? "" : repairText.strip();
@@ -3503,7 +3533,7 @@ public class ChatSession extends Interpreter {
      */
     public ActionResult replyLeftUndecided() {
         // A turn being paused or cancelled is not ending: the decision, if still owed, is asked for when it resumes.
-        if (cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "paused or cancelled");
+        if (cancelScope.isCancelled() || cancelScope.isPauseRequested()) return new ActionResult(false, "paused or cancelled");
         // Asking the person is how this turn ends; the decision on the reply follows the person's answer.
         if (personQuestion != null) return new ActionResult(false, "asked the person");
         // A turn that ended on a repeated call is not asked for more: the decision is left open at its end.
@@ -3561,7 +3591,7 @@ public class ChatSession extends Interpreter {
         replyDecisionSettled = true;
         if (undecidedRequest == null) return new ActionResult(true, "no reply waiting for a decision");
         // A paused turn is not ending: the turn that resumes it decides.
-        if (pauseRequested) return new ActionResult(true, "paused: the resumed turn decides");
+        if (cancelScope.isPauseRequested()) return new ActionResult(true, "paused: the resumed turn decides");
         String request = undecidedRequest;
         String replier = undecidedReplier;
         String leftOpen = personQuestion != null ? "this turn ended by asking the person"
@@ -3754,6 +3784,7 @@ public class ChatSession extends Interpreter {
 
         // Reserve the session so a user prompt cannot start while the autonomous turn streams.
         busy = true;
+        publishStatus();
         emitToSse(ChatEvent.status(provider.getCurrentModel(), provider.getSessionId(), true));
         final long ioSession = (ioLog != null) ? ioLog.ensureSession(myChatName()) : -1;
         ActorRef<LlmProvider> providerRef = providerRef();
@@ -3790,6 +3821,7 @@ public class ChatSession extends Interpreter {
      */
     public void onAutonomousComplete(ActorRef<ChatSession> self) {
         busy = false;
+        publishStatus();
         // A user prompt may have queued while we held the session — let the queue dispatch it now.
         ActorRef<PromptQueue> promptQueue = getPromptQueue();
         if (promptQueue != null) promptQueue.tell(q -> q.onPromptComplete(self));
@@ -3866,8 +3898,9 @@ public class ChatSession extends Interpreter {
      * this actor's thread. Does nothing when no turn is running.
      */
     public void pauseForUrgent() {
-        if (!busy || pauseRequested) return;
-        pauseRequested = true;
+        // Called from the timekeeper's thread with tellNow: the running turn holds this actor, so busy is read from the board.
+        if (!status().busy() || cancelScope.isPauseRequested()) return;
+        cancelScope.requestPause();
         logToConversationSquad("INFO", "paused " + turnId() + " for an urgent request");
         cancel();
     }
@@ -3896,7 +3929,9 @@ public class ChatSession extends Interpreter {
     /** Publishes the child requests still out for the timekeeper to read. */
     private void publishOutstanding() {
         outstandingSnapshot = List.copyOf(openRequests.outstandingChildren());
+        publishStatus();
         promisedSnapshot = openRequests.promisedRequests();
+        publishStatus();
         recordOpenRequests();
     }
 
@@ -3947,7 +3982,8 @@ public class ChatSession extends Interpreter {
         if (content == null || content.isBlank()) return;
         conversationHistory.addLast(new HistoryEntry(role, content, null, at, model, durationMs));
         while (conversationHistory.size() > MAX_HISTORY) conversationHistory.removeFirst();
-        historySnapshot.set(List.copyOf(conversationHistory));
+        historySnapshot = List.copyOf(conversationHistory);
+        publishStatus();
     }
 
     /**
@@ -3959,7 +3995,8 @@ public class ChatSession extends Interpreter {
         conversationHistory.addLast(new HistoryEntry(role, content, origin, System.currentTimeMillis(), model, durationMs,
                 busy ? turnId() : null, busy ? turnRequestId : null));
         while (conversationHistory.size() > MAX_HISTORY) conversationHistory.removeFirst();
-        historySnapshot.set(List.copyOf(conversationHistory));
+        historySnapshot = List.copyOf(conversationHistory);
+        publishStatus();
     }
 
     /**
@@ -4053,6 +4090,7 @@ public class ChatSession extends Interpreter {
      */
     public void setNoThink(boolean value) {
         this.noThinkAlways = value;
+        publishStatus();
     }
 
     /** @return whether this conversation asks its model to skip the thinking phase */
@@ -4068,11 +4106,12 @@ public class ChatSession extends Interpreter {
     public static final String AGENT_LOOP_YAML = "yaml:\n";
 
     /** This conversation's own session of the I/O log; {@code null} records nothing. */
-    private volatile com.scivicslab.chatui.core.iolog.SessionEntries entries;
+    private com.scivicslab.chatui.core.iolog.SessionEntries entries;
 
     /** Records this conversation's settings and agent loop, from now on, to its own session. */
     public void recordsTo(com.scivicslab.chatui.core.iolog.SessionEntries entries) {
         this.entries = entries;
+        publishStatus();
     }
 
     /**
@@ -4085,22 +4124,32 @@ public class ChatSession extends Interpreter {
      * @param model the model just set, when the provider may not be on it yet; {@code null} reads the provider's
      */
     public void recordSettings(String model) {
-        com.scivicslab.chatui.core.iolog.SessionEntries e = entries;
+        recordSettings(currentStatus(), stepLimit, timeLimitMinutes, model);
+    }
+
+    /**
+     * Writes a conversation's settings from the state other threads read, as {@link #recordSettings(String)} does for the
+     * turn's own state; it reads nothing of a running turn, so another thread may call it
+     * (see {@link ChatSessionIIAR#recordSettingsDirect}).
+     */
+    static void recordSettings(ChatBoard.Status s, int stepLimit, int timeLimitMinutes, String model) {
+        com.scivicslab.chatui.core.iolog.SessionEntries e = s.entries();
         if (e == null) return;
         org.json.JSONObject o = new org.json.JSONObject();
-        String kind = getProviderId();
-        String m = model != null ? model : getModel();
+        LlmProvider provider = s.provider();
+        String kind = provider.id();
+        String m = model != null ? model : provider.getCurrentModel();
         Double temperature = provider.getTemperature();
-        String effort = getEffort();
+        String effort = provider.getEffort();
         o.put("provider", kind == null ? org.json.JSONObject.NULL : kind);
-        o.put("tools", toolSet == null ? org.json.JSONObject.NULL : toolSet.id());
+        o.put("tools", s.toolSet() == null ? org.json.JSONObject.NULL : s.toolSet().id());
         o.put("model", m == null ? org.json.JSONObject.NULL : m);
         o.put("temperature", temperature == null ? org.json.JSONObject.NULL : temperature);
-        o.put("noThink", noThinkAlways);
+        o.put("noThink", s.noThink());
         o.put("stepLimit", stepLimit);
         o.put("timeLimitMinutes", timeLimitMinutes);
         o.put("effort", effort == null ? org.json.JSONObject.NULL : effort);
-        o.put("mcpServers", new org.json.JSONObject(mcpServers));
+        o.put("mcpServers", new org.json.JSONObject(s.mcpServers()));
         e.write(com.scivicslab.chatui.core.iolog.IoLogView.SETTINGS_LABEL, o.toString());
     }
 
@@ -4134,7 +4183,7 @@ public class ChatSession extends Interpreter {
      * one {@code open-requests} entry ({@code EachActorRecordsItsOwnState_261118_oo01}). All of them every time.
      */
     /** The received requests not yet answered and who asked each, readable from any thread (a cancel from another instance). */
-    private volatile java.util.Map<String, String> unansweredSnapshot = java.util.Map.of();
+    private java.util.Map<String, String> unansweredSnapshot = java.util.Map.of();
 
     /**
      * @return whether a request this conversation received from {@code asker} is still being worked on: started and not
@@ -4146,6 +4195,7 @@ public class ChatSession extends Interpreter {
 
     private void recordOpenRequests() {
         unansweredSnapshot = openRequests.unanswered();
+        publishStatus();
         com.scivicslab.chatui.core.iolog.SessionEntries e = entries;
         if (e != null) e.write(OPEN_REQUESTS_LABEL, openRequests.toJson().toString());
     }
@@ -4178,8 +4228,11 @@ public class ChatSession extends Interpreter {
             return;
         }
         outstandingSnapshot = List.copyOf(openRequests.outstandingChildren());
+        publishStatus();
         promisedSnapshot = openRequests.promisedRequests();
+        publishStatus();
         unansweredSnapshot = openRequests.unanswered();
+        publishStatus();
     }
 
     /** @return the agent loop this conversation last recorded, or {@code null} when it recorded none */
@@ -4211,7 +4264,8 @@ public class ChatSession extends Interpreter {
      */
     public void clearHistory() {
         conversationHistory.clear();
-        historySnapshot.set(List.of());
+        historySnapshot = List.of();
+        publishStatus();
         onProvider(p -> { p.clearHistory(); return null; });
         // New conversation: end the current I/O-log session and renumber turns from 1.
         if (ioLog != null) ioLog.resetSession(myChatName());
@@ -4247,6 +4301,12 @@ public class ChatSession extends Interpreter {
      */
     public com.scivicslab.chatui.core.provider.OneShotReply completeOneShot(
             String messagesJson, String model, Boolean noThink) {
+        return completeOneShot(provider, messagesJson, model, noThink);
+    }
+
+    /** As {@link #completeOneShot(String, String, Boolean)}, through the given provider, as another thread gets it from the board. */
+    public com.scivicslab.chatui.core.provider.OneShotReply completeOneShot(
+            LlmProvider provider, String messagesJson, String model, Boolean noThink) {
         com.scivicslab.chatui.core.provider.OneShotReply reply =
                 provider.completeFromMessages(messagesJson, model, noThink);
         if (ioLog != null && reply.requestBody() != null) {

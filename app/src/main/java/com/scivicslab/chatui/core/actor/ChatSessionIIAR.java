@@ -153,17 +153,20 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      *
      * @return {@code true} if this ConversationSquad is currently processing a turn
      */
-    public boolean isBusyDirect() { return chatSession().isBusy(); }
+    public boolean isBusyDirect() { return chatSession().status().busy(); }
 
     /** When the running turn started, or {@code null} when none runs, read without waiting like {@link #isBusyDirect()}. */
-    public Long runningSinceDirect() { return chatSession().runningSince(); }
+    public Long runningSinceDirect() {
+        ChatBoard.Status s = chatSession().status();
+        return s.busy() ? s.turnStartedAt() : null;
+    }
 
     /** The sent requests with a promised report pending, read without waiting for a running turn. */
-    public java.util.Set<String> promisedRequestsDirect() { return chatSession().promisedRequests(); }
+    public java.util.Set<String> promisedRequestsDirect() { return chatSession().status().promised(); }
 
     /** The child requests still out, read without waiting for a running turn, as {@link #isBusyDirect()} is. */
     public java.util.List<OpenRequests.Outstanding> outstandingChildrenDirect() {
-        return chatSession().outstandingChildren();
+        return chatSession().status().outstanding();
     }
 
     /**
@@ -171,7 +174,7 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      * the actor's mailbox. It is a read of the line alone, so it can be answered while a turn is
      * running, when a question put to the actor would wait behind the turn.
      */
-    public boolean isCommandDirect(String input) { return chatSession().isCommand(input); }
+    public boolean isCommandDirect(String input) { return chatSession().status().provider().isCommand(input); }
 
     /**
      * One completion from exactly the given messages, bypassing the actor's mailbox: it works while
@@ -180,7 +183,7 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      */
     public com.scivicslab.chatui.core.provider.OneShotReply completeOneShotDirect(
             String messagesJson, String model, Boolean noThink) {
-        return chatSession().completeOneShot(messagesJson, model, noThink);
+        return chatSession().completeOneShot(chatSession().status().provider(), messagesJson, model, noThink);
     }
 
     /**
@@ -190,7 +193,7 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      * @return an immutable snapshot of the conversation history as of the last recorded turn
      */
     public java.util.List<ChatSession.HistoryEntry> getHistorySnapshotDirect() {
-        return chatSession().historySnapshot();
+        return chatSession().status().history();
     }
 
     /**
@@ -200,10 +203,12 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      *
      * @return the model name, or {@code null} when none has been settled on yet
      */
-    public String getModelDirect() { return chatSession().getModel(); }
+    public String getModelDirect() { return chatSession().status().provider().getCurrentModel(); }
 
     /** @return whether the conversation is working on that received request now; does not wait for a running turn */
-    public boolean isWorkingOnDirect(String requestId, String asker) { return chatSession().isWorkingOn(requestId, asker); }
+    public boolean isWorkingOnDirect(String requestId, String asker) {
+        return asker != null && asker.equals(chatSession().status().unanswered().get(requestId));
+    }
 
     /**
      * Has the conversation write its settings now, without waiting for a running turn: a change made on the provider
@@ -211,10 +216,15 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      *
      * @param model the model just set, which the provider may not be on yet, or {@code null}
      */
-    public void recordSettingsDirect(String model) { chatSession().recordSettings(model); }
+    public void recordSettingsDirect(String model) {
+        ChatSession.recordSettings(chatSession().status(), getStepLimitDirect(), getTimeLimitMinutesDirect(), model);
+    }
 
     /** Has the conversation write the agent loop just put on it, without waiting for a running turn. */
-    public void recordAgentLoopDirect(String entry) { chatSession().recordAgentLoop(entry); }
+    public void recordAgentLoopDirect(String entry) {
+        com.scivicslab.chatui.core.iolog.SessionEntries e = chatSession().status().entries();
+        if (e != null) e.write(com.scivicslab.chatui.core.iolog.IoLogView.AGENT_LOOP_LABEL, entry);
+    }
 
     /**
      * Reads the conversation's history from its provider's own record, without waiting for a running turn
@@ -223,17 +233,17 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      * @return the entries, or {@code null} when the provider keeps no record and the I/O log is to be read
      */
     public com.scivicslab.chatui.core.provider.PersistedLog persistedLogDirect(int limit, long before) {
-        return chatSession().persistedLog(limit, before);
+        return chatSession().status().provider().persistedLog(limit, before);
     }
 
     /** The conversation's provider kind ({@code openai-compat}, {@code claude}, {@code codex}), read directly. */
-    public String getProviderIdDirect() { return chatSession().getProviderId(); }
+    public String getProviderIdDirect() { return chatSession().status().provider().id(); }
 
     /** The conversation's tool set, read directly ({@code CliHarnessProvider_260912_oo01}). */
-    public String getToolSetDirect() { return chatSession().getToolSet().id(); }
+    public String getToolSetDirect() { return chatSession().status().toolSet().id(); }
 
     /** Whether this conversation asks its model to skip the thinking phase, read directly. */
-    public boolean isNoThinkDirect() { return chatSession().isNoThink(); }
+    public boolean isNoThinkDirect() { return chatSession().status().noThink(); }
 
     /** Closes the conversation's limits board with the conversation. */
     @Override
@@ -250,7 +260,7 @@ public class ChatSessionIIAR extends InterpreterIIAR {
     public int getTimeLimitMinutesDirect() { return limits.ask(ChatLimits::timeLimitMinutes).join(); }
 
     /** How hard this conversation's provider was told to work, read directly; null when it has no such setting. */
-    public String getEffortDirect() { return chatSession().getEffort(); }
+    public String getEffortDirect() { return chatSession().status().provider().getEffort(); }
 
     private ChatSession chatSession() { return (ChatSession) object; }
 

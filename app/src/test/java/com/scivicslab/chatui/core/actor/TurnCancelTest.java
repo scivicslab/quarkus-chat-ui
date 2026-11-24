@@ -111,4 +111,22 @@ class TurnCancelTest {
         scope.cancel();
         assertFalse(scope.isCancelled());
     }
+
+    @Test
+    void aPauseMarkIsAskedAfterItWasToldAndIsClearedByTheNextTurn() {
+        TurnCancel scope = new TurnCancel("t7");
+        try {
+            scope.begin();
+            assertFalse(scope.isPauseRequested());
+            scope.requestPause();
+            assertTrue(scope.isPauseRequested());
+            scope.clearPause();
+            assertFalse(scope.isPauseRequested());
+            scope.requestPause();
+            scope.begin();   // the next turn
+            assertFalse(scope.isPauseRequested());
+        } finally {
+            scope.close();
+        }
+    }
 }

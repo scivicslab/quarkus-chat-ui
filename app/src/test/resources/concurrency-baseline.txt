@@ -8,8 +8,6 @@ app/src/main/java/com/scivicslab/chatui/audittrail/BuildInfo.java volatile 1
 app/src/main/java/com/scivicslab/chatui/audittrail/StallDiagnostics.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/bench/DocRetrievalBenchmark.java sleep 1
 app/src/main/java/com/scivicslab/chatui/core/actor/ActorNotes.java concurrent-class 1
-app/src/main/java/com/scivicslab/chatui/core/actor/ChatSession.java concurrent-class 6
-app/src/main/java/com/scivicslab/chatui/core/actor/ChatSession.java volatile 15
 app/src/main/java/com/scivicslab/chatui/core/actor/ConversationToolRunner.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/core/actor/SseConnection.java volatile 1
 app/src/main/java/com/scivicslab/chatui/core/remote/WorkspaceNodeDiscovery.java synchronized 1
