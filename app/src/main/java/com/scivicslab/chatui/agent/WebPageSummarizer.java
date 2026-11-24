@@ -1,5 +1,7 @@
 package com.scivicslab.chatui.agent;
 
+import com.scivicslab.chatui.core.actor.TurnCancel;
+import com.scivicslab.chatui.core.provider.CancelScope;
 import com.scivicslab.chatui.kernel.BlockingJob;
 
 import java.util.ArrayList;
@@ -29,13 +31,21 @@ public final class WebPageSummarizer {
     /** Pages shorter than this are already short enough to pass through untouched. */
     static final int SUMMARIZE_ABOVE_CHARS = 1200;
 
-    private final UnaryOperator<String> summarizeOne;
+    private final java.util.function.BiFunction<String, CancelScope, String> summarizeOne;
 
     /**
      * @param summarizeOne one LLM call: takes a page's text, returns its summary. Injected rather
      *                     than built here so a test can drive this class without a server.
      */
     public WebPageSummarizer(UnaryOperator<String> summarizeOne) {
+        this.summarizeOne = (page, scope) -> summarizeOne.apply(page);
+    }
+
+    /**
+     * @param summarizeOne one LLM call that ends when the scope it is given is cancelled (it registers what closes its
+     *                     request there): takes a page's text, returns its summary
+     */
+    public WebPageSummarizer(java.util.function.BiFunction<String, CancelScope, String> summarizeOne) {
         this.summarizeOne = summarizeOne;
     }
 
@@ -58,6 +68,15 @@ public final class WebPageSummarizer {
      * @return the same blocks with summarised bodies
      */
     public String summarize(String observation) {
+        return summarize(observation, CancelScope.NEVER);
+    }
+
+    /**
+     * As {@link #summarize(String)}; the page calls end at once, their requests closed, when {@code turnScope} is cancelled, when
+     * the calling thread is interrupted, or when one of them fails (the observation is passed through then, so the others'
+     * answers would be thrown away).
+     */
+    public String summarize(String observation, CancelScope turnScope) {
         List<String> blocks = splitBlocks(observation);
         // Leave anything that is not a result list alone ("No results found.", "error: ..."). One
         // result is still a result list — counting blocks instead of looking at the first one
@@ -67,9 +86,19 @@ public final class WebPageSummarizer {
         }
         // One job (an actor of its own) per page, so the calls run in parallel; the blocks keep their order.
         List<BlockingJob<String>> summarised = new ArrayList<>();
+        // The calls of this one observation end together: a cancel of this scope (from the turn, an interrupt or a failed
+        // sibling) reaches every request that registered on it.
+        TurnCancel scope = new TurnCancel("web-page-summaries");
+        scope.begin();
+        CancelScope.Registration inTurn = turnScope.register(scope::cancel);
         try {
+            if (inTurn == null) return observation;   // the turn was cancelled already
             for (String block : blocks) {
-                summarised.add(BlockingJob.start("web-page-summary", () -> summarizeBlock(block), null));
+                BlockingJob<String> job = BlockingJob.start("web-page-summary", () -> summarizeBlock(block, scope), scope::cancel);
+                job.result().whenComplete((summary, failure) -> {
+                    if (failure != null) scope.cancel();
+                });
+                summarised.add(job);
             }
             StringBuilder out = new StringBuilder();
             for (BlockingJob<String> job : summarised) {
@@ -78,11 +107,15 @@ public final class WebPageSummarizer {
             return out.toString().stripTrailing();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            summarised.forEach(BlockingJob::cancel);
+            scope.cancel();
             return observation;
         } catch (Exception e) {
+            scope.cancel();
             LOG.log(Level.WARNING, "summarising a web_search observation failed; passing it through", e);
             return observation;
+        } finally {
+            if (inTurn != null) inTurn.close();
+            scope.close();
         }
     }
 
@@ -108,7 +141,7 @@ public final class WebPageSummarizer {
     }
 
     /** Keeps a block's first two lines (number/title, URL) and summarises the rest. */
-    private String summarizeBlock(String block) {
+    private String summarizeBlock(String block, CancelScope scope) {
         String[] lines = block.split("\n", -1);
         int bodyStart = (lines.length > 1 && lines[1].strip().startsWith("URL:")) ? 2 : 1;
         String head = String.join("\n", java.util.Arrays.copyOfRange(lines, 0, bodyStart));
@@ -117,7 +150,7 @@ public final class WebPageSummarizer {
         if (body.length() <= SUMMARIZE_ABOVE_CHARS) {
             return block;
         }
-        String summary = summarizeOne.apply(body);
+        String summary = summarizeOne.apply(body, scope);
         if (summary == null || summary.isBlank()) {
             return block;   // a failed call must not lose the page
         }

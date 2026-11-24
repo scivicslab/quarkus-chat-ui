@@ -205,6 +205,22 @@ public class OpenAiCompatClient {
                                                  boolean noThink, int maxTokens,
                                                  List<ToolDefinition> tools,
                                                  java.util.function.Consumer<String> requestBodyListener) {
+        return sendNonStreaming(model, messages, noThink, maxTokens, tools, requestBodyListener, CancelScope.NEVER);
+    }
+
+    /**
+     * As above, ended by {@code scope} when it is cancelled: the request closes (the server stops generating) and the
+     * answer is {@code error:cancelled}. A scope that is already cancelled sends nothing.
+     */
+    public NonStreamingResponse sendNonStreaming(String model, List<ChatMessage> messages,
+                                                 boolean noThink, int maxTokens,
+                                                 List<ToolDefinition> tools,
+                                                 java.util.function.Consumer<String> requestBodyListener,
+                                                 CancelScope scope) {
+        CompletableFuture<Void> stop = new CompletableFuture<>();
+        CancelScope.Registration registration = scope.register(() -> stop.complete(null));
+        if (registration == null) return new NonStreamingResponse("Cancelled", List.of(), "error:cancelled");
+        CompletableFuture<HttpResponse<String>> call = null;
         try {
             String requestBody = buildRequestBody(model, messages, noThink, maxTokens, false, tools,
                     learned.ask(l -> l.temperature));
@@ -215,17 +231,24 @@ public class OpenAiCompatClient {
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .timeout(Duration.ofMinutes(5))
                     .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            call = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+            CompletableFuture<HttpResponse<String>> sent = call;
+            stop.thenRun(() -> sent.cancel(true));
+            HttpResponse<String> response = call.get();
             if (response.statusCode() != 200) {
                 return new NonStreamingResponse(null, List.of(), "error:" + response.statusCode());
             }
             return parseNonStreamingResponse(response.body());
         } catch (InterruptedException e) {
+            if (call != null) call.cancel(true);   // the request must not stay open behind an interrupted caller
             Thread.currentThread().interrupt();
             return new NonStreamingResponse("Cancelled", List.of(), "error:interrupted");
         } catch (Exception e) {
+            if (stop.isDone()) return new NonStreamingResponse("Cancelled", List.of(), "error:cancelled");
             logger.warning("Non-streaming request failed: " + e.getMessage());
             return new NonStreamingResponse("Error: " + e.getMessage(), List.of(), "error:exception");
+        } finally {
+            registration.close();
         }
     }
 

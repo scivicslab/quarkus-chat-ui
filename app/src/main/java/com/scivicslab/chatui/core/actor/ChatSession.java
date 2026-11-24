@@ -2682,7 +2682,7 @@ public class ChatSession extends Interpreter {
             }
             repeatedCalls.record(tc.name(), tc.argumentsJson(), fullObservation);
             String fitted = (summarizePages && returnsPages(tc.name()))
-                    ? pageSummarizer().summarize(fullObservation)
+                    ? pageSummarizer().summarize(fullObservation, cancelScope)
                     : fullObservation;
             String forModel = ContextBudget.truncateObservation(fitted,
                     Math.min(parsePositiveOr(observationChars, ContextBudget.OBS_THRESHOLD),
@@ -3785,8 +3785,8 @@ public class ChatSession extends Interpreter {
     private com.scivicslab.chatui.agent.WebPageSummarizer pageSummarizer() {
         var openAi = (com.scivicslab.chatui.openaicompat.OpenAiCompatProvider) provider;
         return new com.scivicslab.chatui.agent.WebPageSummarizer(
-                page -> openAi.completeOutsideConversation(
-                        com.scivicslab.chatui.agent.WebPageSummarizer.promptFor(page)));
+                (page, scope) -> openAi.completeOutsideConversation(
+                        com.scivicslab.chatui.agent.WebPageSummarizer.promptFor(page), scope));
     }
 
     // ---- Autonomous turns (idle monitor) ----

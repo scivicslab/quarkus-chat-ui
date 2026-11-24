@@ -875,13 +875,21 @@ public class OpenAiCompatProvider implements LlmProvider {
      * @return the reply text, or {@code null} when the call failed
      */
     public String completeOutsideConversation(String prompt) {
+        return completeOutsideConversation(prompt, CancelScope.NEVER);
+    }
+
+    /**
+     * As {@link #completeOutsideConversation(String)}, ended by {@code scope} when it is cancelled: the request is closed, and
+     * the answer is {@code null}.
+     */
+    public String completeOutsideConversation(String prompt, CancelScope scope) {
         OpenAiCompatClient client = clientForCompletionOutsideConversation();
         if (client == null) {
             return null;
         }
         List<ChatMessage> oneShot = List.of(new ChatMessage.User(prompt));
         OpenAiCompatClient.NonStreamingResponse response = client.sendNonStreaming(
-                currentModel(), oneShot, true, maxTokensFor(client, currentModel(), oneShot), List.of());
+                currentModel(), oneShot, true, maxTokensFor(client, currentModel(), oneShot), List.of(), null, scope);
         String reason = response.finishReason();
         if (reason != null && reason.startsWith("error")) {
             return null;
