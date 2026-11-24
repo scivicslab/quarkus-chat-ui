@@ -15,7 +15,6 @@ app/src/main/java/com/scivicslab/chatui/core/actor/ChatUiActorSystem.java concur
 app/src/main/java/com/scivicslab/chatui/core/actor/ChatUiActorSystem.java synchronized 11
 app/src/main/java/com/scivicslab/chatui/core/actor/ConversationToolRunner.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/core/actor/SseConnection.java volatile 1
-app/src/main/java/com/scivicslab/chatui/core/iolog/IoLogStore.java synchronized 15
 app/src/main/java/com/scivicslab/chatui/core/remote/RemoteNodes.java concurrent-class 1
 app/src/main/java/com/scivicslab/chatui/core/remote/RemoteNodes.java synchronized 2
 app/src/main/java/com/scivicslab/chatui/core/remote/WorkspaceNodeDiscovery.java synchronized 1

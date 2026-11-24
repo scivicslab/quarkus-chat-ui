@@ -1,0 +1,512 @@
+package com.scivicslab.chatui.core.iolog;
+
+import com.scivicslab.turingworkflow.plugins.logdb.DistributedLogStore;
+import com.scivicslab.turingworkflow.plugins.logdb.H2LogStore;
+import com.scivicslab.turingworkflow.plugins.logdb.SessionStatus;
+import com.scivicslab.turingworkflow.plugins.logdb.SessionSummary;
+
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.logging.Level;
+import java.util.function.Supplier;
+import java.util.logging.Logger;
+
+/**
+ * The session book of the I/O log, as a plain object: which H2 session each conversation, job and project writes to, and
+ * the opened store behind them. It has no lock and no thread of its own; {@link IoLogStore} runs it as the one message
+ * loop of an actor, so every call here is one message after another and the maps need no guard.
+ *
+ * <p>One H2 "session" = one ConversationSquad: opened on first use and reused across turns for that
+ * ConversationSquad; {@link #resetSession(String)} (a "new conversation" / {@code /clear}) ends it. Each ConversationSquad's
+ * session id is tracked separately (keyed by ConversationSquad id) so ConversationSquads never share one H2 session — the
+ * ConversationSquad id is also encoded into the session's {@code workflowName}
+ * ({@code "chat-ui-conversation-" + conversationSquadId}) so the Sessions view can filter by ConversationSquad without a
+ * schema change.</p>
+ *
+ * <p>Logging is best-effort: if the DB cannot be opened, the rest of the app keeps working and the complete log is simply
+ * unavailable.</p>
+ */
+final class IoLogSessions {
+
+    private static final Logger LOG = Logger.getLogger(IoLogSessions.class.getName());
+
+    /**
+     * What opening the database needs; read when the store is first opened, not when this object is made, because the
+     * configuration is injected and {@link IoLogStore#useDatabaseAt} may change the path after construction.
+     *
+     * @param dbPathForPort the database path with the instance's HTTP port appended, without the {@code .mv.db} suffix
+     * @param compress      lossless MVStore compression of newly written data
+     * @param appVersion    recorded on every conversation session
+     */
+    record Settings(String dbPathForPort, boolean compress, String appVersion) {}
+
+    private final Supplier<Settings> settings;
+
+    IoLogSessions(Supplier<Settings> settings) {
+        this.settings = settings;
+    }
+
+    /**
+     * This process's own command line, recorded on every conversation session, cut to the column's width.
+     *
+     * <p>Several programs write conversations into files named {@code chat-ui-iolog-<port>.mv.db}, and the file name says
+     * nothing about which one. Once several such files are merged into one database, the command line is what still
+     * distinguishes a {@code chat-ui-with-audit-trail} conversation from a {@code quarkus-chat-ui} conversation, and says
+     * which port it was held on. The column holds 2000 characters; a longer line (a long class path) made
+     * {@code startSession} fail, and with it every write of the conversation.</p>
+     *
+     * @return the command line, or {@code null} when the operating system does not expose it
+     */
+    private static String currentCommandLine() {
+        String line = ProcessHandle.current().info().commandLine().orElse(null);
+        return line != null && line.length() > COMMAND_LINE_LIMIT ? line.substring(0, COMMAND_LINE_LIMIT) : line;
+    }
+
+    private static final int COMMAND_LINE_LIMIT = 2000;
+
+    /** How far back to look for a ConversationSquad's resumable session; the Sessions view uses the same depth. */
+    private static final int SESSION_SCAN_LIMIT = 200;
+
+    private DistributedLogStore store;
+    private final Map<String, Long> sessionIds = new HashMap<>();
+    /** One per job, keyed by the job's actor name; see ensureJobSession. */
+    private final Map<String, Long> jobSessionIds = new HashMap<>();
+    /** One per project, keyed by the project's id; see ensureProjectSession. */
+    private final Map<String, Long> projectSessionIds = new HashMap<>();
+    private boolean failed = false;
+
+    private void ensureStore() {
+        if (store != null || failed) {
+            return;
+        }
+        try {
+            Settings s = settings.get();
+            store = new ActorBackedLogStore(new H2LogStore(Path.of(s.dbPathForPort()), s.compress()));
+            LOG.info("I/O log DB opened: " + Path.of(s.dbPathForPort()).toAbsolutePath() + ".mv.db"
+                    + " (compress=" + s.compress() + ")");
+        } catch (Exception e) {
+            failed = true;
+            LOG.log(Level.SEVERE, "Failed to open I/O log DB; complete logging disabled", e);
+        }
+    }
+
+    /**
+     * The session this process has already opened for a conversation. Only looks: it never opens
+     * one, so a caller that wants to read what was written cannot create an empty session by
+     * asking, and a write that did not happen shows as {@code -1} instead of as an empty session
+     * ({@code LookupThatCreates_260914_oo01}). {@link #ensureSession} is the one that opens.
+     *
+     * @return the session id, or -1 when this process has opened none for that conversation
+     */
+    public long sessionIdOf(String conversationSquadId) {
+        Long id = sessionIds.get(conversationSquadId);
+        return id == null ? -1 : id;
+    }
+
+    /**
+     * The session this process has already opened for a job; like {@link #sessionIdOf}, it only
+     * looks. {@link #ensureJobSession} is the one that opens.
+     *
+     * @return the session id, or -1 when this process has opened none for that job
+     */
+    public long jobSessionIdOf(String jobActorName) {
+        Long id = jobSessionIds.get(jobActorName);
+        return id == null ? -1 : id;
+    }
+
+    /**
+     * Returns the given ConversationSquad's session id, opening a session on first use; -1 if unavailable. Each ConversationSquad
+     * gets its own session id (ConversationSquads never share one), tagged via {@code workflowName} so the Sessions
+     * view can filter by ConversationSquad.
+     */
+    public long ensureSession(String conversationSquadId) {
+        ensureStore();
+        if (store == null) {
+            return -1;
+        }
+        Long existing = sessionIds.get(conversationSquadId);
+        if (existing != null) {
+            return existing;
+        }
+        // After a restart this map is empty although the ConversationSquad's session is still in the DB. Continue
+        // that session instead of opening another one, so the conversation can be restored from it
+        // and so a restart does not leave one more orphan session behind
+        // (ConversationRestoreOnRestart_260904_oo01).
+        long resumable = findResumableSession(conversationSquadId);
+        if (resumable >= 0) {
+            sessionIds.put(conversationSquadId, resumable);
+            LOG.info("I/O log session resumed for ConversationSquad " + conversationSquadId + ": " + resumable);
+            return resumable;
+        }
+        try {
+            long sid = store.startSession("chat-ui-conversation-" + conversationSquadId, null, null, 1,
+                    System.getProperty("user.dir"), null, null,
+                    currentCommandLine(), settings.get().appVersion(), null);
+            sessionIds.put(conversationSquadId, sid);
+            LOG.info("I/O log session started for ConversationSquad " + conversationSquadId + ": " + sid);
+            return sid;
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "startSession failed", e);
+            return -1;
+        }
+    }
+
+    /** What a job's session is named after, so a conversation view never picks one up. */
+    private static final String JOB_PREFIX = "chat-ui-job-";
+    private static final String PROJECT_PREFIX = "chat-ui-project-";
+
+    /**
+     * Returns the given job's session id, opening one on first use; -1 if unavailable.
+     *
+     * <p>A job's lines went to two ring buffers in memory: the Job Log tab's and the system log's.
+     * A restart lost them and a long run pushed out its own beginning, so what a run could not
+     * settle could only be read while it was still on the screen. Written here, it is in the same
+     * database the conversations are in, which the log search reads
+     * ({@code JobRunsInTheLog_260915_oo01}).</p>
+     *
+     * <p>Named apart from a conversation's session so that {@link #resumableConversationSquads()} does not build
+     * a ConversationSquad out of a job at the next start-up.</p>
+     *
+     * @param jobActorName the job's actor name, e.g. {@code project1/job-01}
+     */
+    public long ensureJobSession(String jobActorName) {
+        ensureStore();
+        if (store == null) {
+            return -1;
+        }
+        Long existing = jobSessionIds.get(jobActorName);
+        if (existing != null) {
+            return existing;
+        }
+        try {
+            long sid = store.startSession(JOB_PREFIX + jobActorName, null, null, 1,
+                    System.getProperty("user.dir"), null, null,
+                    currentCommandLine(), settings.get().appVersion(), null);
+            jobSessionIds.put(jobActorName, sid);
+            LOG.info("I/O log session started for job " + jobActorName + ": " + sid);
+            return sid;
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "startSession failed for job " + jobActorName, e);
+            return -1;
+        }
+    }
+
+    /**
+     * The session a project's own properties are written to, opening one on first use; -1 when
+     * logging is unavailable.
+     *
+     * <p>A project's name and working directory are one current value each, which is the shape the
+     * conversations' provider and model already have: the last {@code settings} entry of the
+     * session is the value, and the entries before it are its history
+     * ({@code ProjectProperty_260929_oo01}).</p>
+     *
+     * <p>Named apart from a conversation's session, for the reason {@link #ensureJobSession} gives:
+     * {@link #resumableConversationSquads()} must not build a ConversationSquad out of a project.
+     * Unlike a job's session, this one is resumed rather than opened afresh — the properties
+     * written before the last restart are read back from it.</p>
+     *
+     * @param projectId the project's id, e.g. {@code project1}
+     */
+    public long ensureProjectSession(String projectId) {
+        ensureStore();
+        if (store == null) {
+            return -1;
+        }
+        Long existing = projectSessionIds.get(projectId);
+        if (existing != null) {
+            return existing;
+        }
+        long resumable = findProjectSession(projectId);
+        if (resumable >= 0) {
+            projectSessionIds.put(projectId, resumable);
+            return resumable;
+        }
+        try {
+            long sid = store.startSession(PROJECT_PREFIX + projectId, null, null, 1,
+                    System.getProperty("user.dir"), null, null,
+                    currentCommandLine(), settings.get().appVersion(), null);
+            projectSessionIds.put(projectId, sid);
+            LOG.info("I/O log session started for project " + projectId + ": " + sid);
+            return sid;
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "startSession failed for project " + projectId, e);
+            return -1;
+        }
+    }
+
+    /**
+     * The project's still-open session, or {@code -1} when the log holds none.
+     *
+     * @param projectId the project's id
+     */
+    public long findProjectSession(String projectId) {
+        ensureStore();
+        if (store == null) {
+            return -1;
+        }
+        String workflowName = PROJECT_PREFIX + projectId;
+        try {
+            // listSessions returns most recent first, so the first match is the one to continue.
+            for (SessionSummary s : store.listSessions(SESSION_SCAN_LIMIT)) {
+                if (workflowName.equals(s.getWorkflowName()) && s.getStatus() == SessionStatus.RUNNING) {
+                    return s.getSessionId();
+                }
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not look for the session of project " + projectId, e);
+        }
+        return -1;
+    }
+
+    /**
+     * Every ConversationSquad the log still holds an unfinished session for, most recent first.
+     *
+     * <p>This is what the ConversationSquad-to-actor structure is rebuilt from after a restart. The actor tree
+     * lives only in memory, so a process that starts with one project and one conversation shows
+     * exactly that, however many were open when it stopped. The ConversationSquads are not lost — their sessions
+     * are in the database, and {@link #ensureSession} resumes one by name as soon as a ConversationSquad of that
+     * name exists again — but nothing was creating the ConversationSquads, so a conversation stayed invisible
+     * until someone happened to recreate a project with the same generated name.</p>
+     *
+     * <p>Only {@code RUNNING} sessions count, for the reason {@link #findResumableSession} gives:
+     * a conversation the user cleared has had its session ended, and must stay cleared.</p>
+     *
+     * @return the ConversationSquad ids, e.g. {@code "project2/chat-01"}, without duplicates
+     */
+    public List<String> resumableConversationSquads() {
+        return conversationSquads(true);
+    }
+
+    /**
+     * Every ConversationSquad the log holds a session for, whether or not it was ended, most recent
+     * first. Ended ones are not reopened, but their names stay on the sessions, so a new project
+     * must not be given one of them ({@code ProjectDeletion_261011_oo01}).
+     *
+     * @return the ConversationSquad ids, e.g. {@code "project2/chat-01"}, without duplicates
+     */
+    public List<String> recordedConversationSquads() {
+        return conversationSquads(false);
+    }
+
+    private List<String> conversationSquads(boolean runningOnly) {
+        ensureStore();
+        if (store == null) {
+            return List.of();
+        }
+        String prefix = "chat-ui-conversation-";
+        java.util.LinkedHashSet<String> conversationSquads = new java.util.LinkedHashSet<>();
+        try {
+            for (SessionSummary s : store.listSessions(SESSION_SCAN_LIMIT)) {
+                String name = s.getWorkflowName();
+                if (name == null || !name.startsWith(prefix)) continue;
+                if (runningOnly && s.getStatus() != SessionStatus.RUNNING) continue;
+                String conversationSquadId = name.substring(prefix.length());
+                if (!conversationSquadId.isBlank()) conversationSquads.add(conversationSquadId);
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not list the recorded ConversationSquads", e);
+        }
+        return List.copyOf(conversationSquads);
+    }
+
+    /**
+     * The ConversationSquad's most recent session that was never ended, or {@code -1} when it has none.
+     *
+     * <p>Only a {@code RUNNING} session qualifies. {@link #resetSession(String)} ends a session when
+     * the user starts a new conversation, and an ended session must stay ended across a restart —
+     * otherwise "new conversation" would be undone by restarting.</p>
+     *
+     * @param conversationSquadId the ConversationSquad's name
+     * @return the session id to continue, or {@code -1} when none can be
+     */
+    public long findResumableSession(String conversationSquadId) {
+        ensureStore();
+        if (store == null) {
+            return -1;
+        }
+        String workflowName = "chat-ui-conversation-" + conversationSquadId;
+        try {
+            // listSessions returns most recent first, so the first match is the one to continue.
+            for (SessionSummary s : store.listSessions(SESSION_SCAN_LIMIT)) {
+                if (workflowName.equals(s.getWorkflowName()) && s.getStatus() == SessionStatus.RUNNING) {
+                    return s.getSessionId();
+                }
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not look for a resumable session for ConversationSquad " + conversationSquadId, e);
+        }
+        return -1;
+    }
+
+    /** The given ConversationSquad's current log session id, or -1 if none. */
+    public long currentSessionId(String conversationSquadId) {
+        Long sid = sessionIds.get(conversationSquadId);
+        return sid != null ? sid : -1;
+    }
+
+    /**
+     * Ends the given ConversationSquad's session (called on "new conversation" / clear).
+     *
+     * <p>The session this process opened for the ConversationSquad, or — when it opened none — the one the
+     * database still holds open for it. A ConversationSquad that came back at start-up through
+     * {@link #resumableConversationSquads()} and was never spoken to has no entry in this process's map, and
+     * ending nothing left its session running: the ConversationSquad was removed, and the next start-up built it
+     * again from that same session. Nothing is deleted here; the session is marked as ended and
+     * every line it wrote stays where it is.</p>
+     *
+     * @param conversationSquadId the ConversationSquad's name
+     */
+    public void resetSession(String conversationSquadId) {
+        Long opened = sessionIds.remove(conversationSquadId);
+        long toEnd = (opened != null && opened >= 0) ? opened : findResumableSession(conversationSquadId);
+        if (store != null && toEnd >= 0) {
+            try {
+                store.endSession(toEnd, SessionStatus.COMPLETED);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "endSession failed", e);
+            }
+        }
+    }
+
+    /** The shared store (read side for the Sessions view). May be null if logging is disabled. */
+    public DistributedLogStore store() {
+        ensureStore();
+        return store;
+    }
+
+    /**
+     * Writes one entry to the given session. Thread-safe: the store's single writer thread serializes
+     * all writes, so any caller (any thread) may call this directly. No-op if logging is off or the
+     * session id is invalid.
+     */
+    public void record(long sessionId, String node, String label, String content) {
+        if (sessionId < 0) {
+            return;
+        }
+        DistributedLogStore s = store();
+        if (s == null) {
+            return;
+        }
+        try {
+            s.logAction(sessionId, node, label, "output", 0, 0L, content);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "I/O log record failed", e);
+        }
+    }
+
+    // ---- Maintenance: prune old / unwanted log data ------------------------
+    //
+    // Deletes run over a short-lived, separate JDBC connection (H2 AUTO_SERVER mode allows multiple
+    // connections to the same DB), so they never touch the store's read/write connections. The active
+    // conversation session is always excluded, so a delete never contends with rows being written.
+
+    /**
+     * The same JDBC URL H2LogStore uses, for a short-lived connection of one's own.
+     *
+     * <p>Used by the deletes below and by {@link IoLogSearch}, which reads across every session in
+     * the file rather than through the store's one-conversation-at-a-time view.</p>
+     */
+    String jdbcUrl() {
+        return jdbcUrl(settings.get());
+    }
+
+    static String jdbcUrl(Settings s) {
+        return "jdbc:h2:" + Path.of(s.dbPathForPort()).toAbsolutePath() + ";AUTO_SERVER=TRUE"
+                + (s.compress() ? ";COMPRESS=TRUE" : "");
+    }
+
+    /**
+     * Deletes one session and all of its logs / node_results. Refuses to delete the active
+     * conversation session. Returns the number of sessions deleted (1 or 0), or -1 on error.
+     */
+    public int deleteSession(long id) {
+        if (id < 0) return 0;
+        if (sessionIds.containsValue(id)) {
+            LOG.warning("Refusing to delete the active conversation session " + id);
+            return 0;
+        }
+        try (Connection c = DriverManager.getConnection(jdbcUrl())) {
+            c.setAutoCommit(false);
+            try {
+                update(c, "DELETE FROM logs WHERE session_id = ?", id);
+                update(c, "DELETE FROM node_results WHERE session_id = ?", id);
+                int n = update(c, "DELETE FROM sessions WHERE id = ?", id);
+                c.commit();
+                LOG.info("Deleted log session " + id + " (" + n + " row)");
+                return n;
+            } catch (Exception e) {
+                c.rollback();
+                throw e;
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "deleteSession failed for " + id, e);
+            return -1;
+        }
+    }
+
+    /**
+     * Deletes every session started more than {@code days} days ago (and its logs / node_results),
+     * excluding the active conversation session. Returns the number of sessions deleted, or -1 on error.
+     */
+    public int deleteSessionsOlderThan(int days) {
+        if (days < 0) return 0;
+        // Excludes every ConversationSquad's currently active session, not just one.
+        Long[] active = sessionIds.values().toArray(new Long[0]);
+        String placeholders = String.join(",", java.util.Collections.nCopies(active.length, "?"));
+        String pred = "started_at < DATEADD('DAY', ?, CURRENT_TIMESTAMP)"
+                + (active.length > 0 ? " AND id NOT IN (" + placeholders + ")" : "");
+        Object[] params = new Object[1 + active.length];
+        params[0] = -days;
+        System.arraycopy(active, 0, params, 1, active.length);
+        try (Connection c = DriverManager.getConnection(jdbcUrl())) {
+            c.setAutoCommit(false);
+            try {
+                update(c, "DELETE FROM logs WHERE session_id IN (SELECT id FROM sessions WHERE " + pred + ")",
+                        params);
+                update(c, "DELETE FROM node_results WHERE session_id IN (SELECT id FROM sessions WHERE " + pred + ")",
+                        params);
+                int n = update(c, "DELETE FROM sessions WHERE " + pred, params);
+                c.commit();
+                LOG.info("Deleted " + n + " session(s) older than " + days + " day(s)");
+                return n;
+            } catch (Exception e) {
+                c.rollback();
+                throw e;
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "deleteSessionsOlderThan failed", e);
+            return -1;
+        }
+    }
+
+    /** Runs one parameterized update/delete and returns the affected-row count. */
+    private static int update(Connection c, String sql, Object... params) throws Exception {
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
+            for (int i = 0; i < params.length; i++) {
+                ps.setObject(i + 1, params[i]);
+            }
+            return ps.executeUpdate();
+        }
+    }
+
+    /** Returns once every write told to the store before this call is in the database; a no-op when logging is off. */
+    void flush() {
+        if (store != null) store.flushWrites();
+    }
+
+    /** Closes the store after the writes told before; a store that is already closed is left alone. */
+    void close() {
+        if (store != null) {
+            try {
+                store.close();
+            } catch (Exception e) {
+                // shutting down; ignore
+            }
+        }
+    }
+}
