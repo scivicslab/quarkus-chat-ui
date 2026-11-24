@@ -89,23 +89,49 @@ class ProjectsComeBackAfterClearTest {
     void aProjectDeletedBeforeThisChangeStaysGone(@TempDir Path dir) throws Exception {
         try (SystemsOnOneLog systems = new SystemsOnOneLog(dir.resolve("old-deleted"))) {
             IoLogStore log = systems.log;
-            // The state the earlier code left: the project's session still open, its list of conversations emptied.
-            ChatUiActorSystem first = systems.start();
-            String listed = first.createProject();
-            String legacy = first.createProject();
-            first.deleteProject(listed);
-            first.deleteProject(legacy);
-            long a = log.ensureProjectSession(listed);            // reopened as the old code left it
-            long b = log.ensureProjectSession(legacy);
-            assertTrue(a >= 0 && b >= 0 && log.findProjectSession(listed) == a);
-            // listed: the empty list entry the earlier delete wrote; legacy: no list entry at all, only a name.
+            // The state the earlier delete left: the project's session still open, its list of conversations emptied.
+            long a = log.ensureProjectSession("project7");
+            log.record(a, "agent", Project.CONVERSATIONS_LABEL, "{\"conversations\":[{\"id\":\"01\"}]}");
             log.record(a, "agent", Project.CONVERSATIONS_LABEL, "{\"conversations\":[]}");
-            log.record(b, "agent", "settings", "{\"name\":\"gone\",\"workingDir\":null}");
 
             ChatUiActorSystem second = systems.start();
 
-            assertFalse(second.getProjectIds().contains(listed), "empty list = deleted");
-            assertFalse(second.getProjectIds().contains(legacy), "no list entry: never reopened from the project session");
+            assertFalse(second.getProjectIds().contains("project7"), "empty list = deleted");
+        }
+    }
+
+    /** The shape of the live project4: its session open with one entry that is no list, its only conversation cleared. */
+    @Test
+    void aProjectWithNoListComesBackWithItsRecordedConversation(@TempDir Path dir) throws Exception {
+        try (SystemsOnOneLog systems = new SystemsOnOneLog(dir.resolve("no-list"))) {
+            IoLogStore log = systems.log;
+            long p = log.ensureProjectSession("project4");
+            log.record(p, "agent", "settings", "{\"name\":null,\"workingDir\":null}");
+            long c = log.ensureSession(chat("project4"));
+            log.record(c, "agent", "turn1/conversation", "QUESTION: hello ANSWER: hi");
+            log.resetSession(chat("project4"));                   // /clear: the session is ended, its history stays
+            assertFalse(log.resumableConversationSquads().contains(chat("project4")));
+
+            ChatUiActorSystem second = systems.start();
+
+            assertTrue(second.getProjectIds().contains("project4"));
+            assertNotNull(second.getChatSession("project4", "01"), "its conversation is back, empty");
+            assertTrue(log.store().listSessions(50).stream().anyMatch(s -> s.getSessionId() == c),
+                    "the ended session stays in the log");
+            assertFalse(second.createProject().equals("project4"));
+        }
+    }
+
+    @Test
+    void aProjectWithNoListAndNoRecordedConversationGetsChat01(@TempDir Path dir) throws Exception {
+        try (SystemsOnOneLog systems = new SystemsOnOneLog(dir.resolve("bare"))) {
+            long p = systems.log.ensureProjectSession("project5");
+            systems.log.record(p, "agent", "settings", "{\"name\":\"x\",\"workingDir\":null}");
+
+            ChatUiActorSystem second = systems.start();
+
+            assertTrue(second.getProjectIds().contains("project5"));
+            assertNotNull(second.getChatSession("project5", "01"));
         }
     }
 }
