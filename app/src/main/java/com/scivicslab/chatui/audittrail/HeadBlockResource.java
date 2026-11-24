@@ -93,7 +93,8 @@ public class HeadBlockResource {
                         HeadBlock.CONVERSATION_SETTING)));
             }
         }
-        return Response.ok(HeadBlock.body(parts, measuredFirstRequestTotal(id))).build();
+        String tokens = tokensOf(id);
+        return Response.ok(HeadBlock.body(parts, HeadBlock.firstRequestTotal(tokens), HeadBlock.firstMeasuredTurn(tokens))).build();
     }
 
     private static Response notFound(String id) {
@@ -203,15 +204,15 @@ public class HeadBlockResource {
         }
     }
 
-    /** The first request's input tokens, read from {@code GET /api/sessions/{id}/tokens} of this instance; null when it has none. */
-    private Integer measuredFirstRequestTotal(String conversation) {
+    /** The answer of {@code GET /api/sessions/{id}/tokens} of this instance for the conversation; null when it has none. */
+    private String tokensOf(String conversation) {
         long sessionId = ioLog.sessionIdOf(conversation);
         if (sessionId < 0) return null;
         try {
             HttpResponse<String> r = HTTP.send(HttpRequest.newBuilder(
                             URI.create("http://127.0.0.1:" + httpPort + "/api/sessions/" + sessionId + "/tokens"))
                     .timeout(Duration.ofSeconds(10)).GET().build(), HttpResponse.BodyHandlers.ofString());
-            return r.statusCode() == 200 ? HeadBlock.firstRequestTotal(r.body()) : null;
+            return r.statusCode() == 200 ? r.body() : null;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return null;

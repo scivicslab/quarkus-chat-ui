@@ -54,9 +54,13 @@ public final class HeadBlock {
      *
      * @param parts                      the parts, in the order the CLI reads them
      * @param estimatedTotal             the sum of the parts' estimated tokens
-     * @param measuredFirstRequestTotal  the first request's input tokens as the provider reported them, or null
+     * @param measuredFirstRequestTotal  the first measured request's input tokens as the provider reported them, or null
+     * @param measuredFirstTurn          the number of the turn that request belongs to, or null when none is recorded
+     * @param comparisonNote             what is said instead of comparing the measured request with the parts, or null
+     *                                   when it may be compared ({@link #comparisonNote})
      */
-    public record Body(List<Part> parts, int estimatedTotal, Integer measuredFirstRequestTotal) {}
+    public record Body(List<Part> parts, int estimatedTotal, Integer measuredFirstRequestTotal, Integer measuredFirstTurn,
+                       String comparisonNote) {}
 
     private HeadBlock() {}
 
@@ -87,10 +91,25 @@ public final class HeadBlock {
     }
 
     /** @return the parts with their estimated total and the measured first-request total, which may be null */
-    public static Body body(List<Part> parts, Integer measuredFirstRequestTotal) {
+    public static Body body(List<Part> parts, Integer measuredFirstRequestTotal, Integer measuredFirstTurn) {
         int sum = 0;
         for (Part p : parts) sum += p.estimatedTokens();
-        return new Body(List.copyOf(parts), sum, measuredFirstRequestTotal);
+        return new Body(List.copyOf(parts), sum, measuredFirstRequestTotal, measuredFirstTurn,
+                comparisonNote(measuredFirstTurn));
+    }
+
+    /**
+     * Whether the first measured request may be compared with the parts: only when it is the conversation's first turn.
+     * Usage recording began at a restart, so an older conversation's first measured request holds the whole earlier
+     * history, and the difference to the parts would be that history.
+     *
+     * @param firstMeasuredTurn the number of the first turn that has a recorded request, or null for none
+     * @return null when the comparison is meaningful (turn 1) or there is nothing to compare; otherwise the line to show
+     */
+    public static String comparisonNote(Integer firstMeasuredTurn) {
+        if (firstMeasuredTurn == null || firstMeasuredTurn == 1) return null;
+        return "This conversation was already running when the measurement began: its first measured request (turn "
+                + firstMeasuredTurn + ") holds the earlier history, so it is not compared with the parts.";
     }
 
     /**
@@ -189,13 +208,24 @@ public final class HeadBlock {
      * @return {@code turns[0].firstRequestTotal}, or null when the answer has no first turn or no number there
      */
     public static Integer firstRequestTotal(String tokensJson) {
+        JSONObject first = firstTurn(tokensJson);
+        if (first == null || first.isNull("firstRequestTotal") || !first.has("firstRequestTotal")) return null;
+        return first.getInt("firstRequestTotal");
+    }
+
+    /** @return {@code turns[0].turn}, the number of the first turn that has a recorded request, or null when there is none */
+    public static Integer firstMeasuredTurn(String tokensJson) {
+        JSONObject first = firstTurn(tokensJson);
+        if (first == null || first.isNull("turn") || !first.has("turn")) return null;
+        return first.getInt("turn");
+    }
+
+    private static JSONObject firstTurn(String tokensJson) {
         if (tokensJson == null) return null;
         try {
             JSONArray turns = new JSONObject(tokensJson).optJSONArray("turns");
             if (turns == null || turns.isEmpty()) return null;
-            JSONObject first = turns.optJSONObject(0);
-            if (first == null || first.isNull("firstRequestTotal") || !first.has("firstRequestTotal")) return null;
-            return first.getInt("firstRequestTotal");
+            return turns.optJSONObject(0);
         } catch (JSONException e) {
             return null;
         }

@@ -55,10 +55,10 @@ class HeadBlockTest {
                 new Part("a", 35, 10, true, HeadBlock.PERSON_EDITED_FILE),
                 new Part("b", 0, 0, false, HeadBlock.FIXED_BY_THE_CLI),
                 new Part("c", 70, 20, true, HeadBlock.CONVERSATION_SETTING));
-        HeadBlock.Body body = HeadBlock.body(parts, 41_900);
+        HeadBlock.Body body = HeadBlock.body(parts, 41_900, 1);
         assertEquals(30, body.estimatedTotal());
         assertEquals(41_900, body.measuredFirstRequestTotal());
-        assertNull(HeadBlock.body(parts, null).measuredFirstRequestTotal());
+        assertNull(HeadBlock.body(parts, null, null).measuredFirstRequestTotal());
     }
 
     @Test
@@ -155,5 +155,43 @@ class HeadBlockTest {
         assertNull(HeadBlock.firstRequestTotal("{\"requests\":[],\"turns\":[]}"));
         assertNull(HeadBlock.firstRequestTotal("{\"turns\":[{\"turn\":1,\"firstRequestTotal\":null,\"growth\":null}]}"));
         assertNull(HeadBlock.firstRequestTotal("{\"error\":\"no such session\"}"));
+    }
+
+    /** Usage recording began at a restart: an older conversation's first measured turn is not its turn 1. */
+    private static final String TOKENS_FROM_TURN_109 = new JSONObject()
+            .put("requests", new org.json.JSONArray())
+            .put("turns", new org.json.JSONArray()
+                    .put(new JSONObject().put("turn", 109).put("firstRequestTotal", 513_878).put("growth", 0))
+                    .put(new JSONObject().put("turn", 110).put("firstRequestTotal", 514_100).put("growth", 222)))
+            .toString();
+
+    @Test
+    void firstMeasuredTurnOne_isComparedWithTheParts() {
+        assertEquals(1, HeadBlock.firstMeasuredTurn(TOKENS));
+        assertNull(HeadBlock.comparisonNote(1));
+        HeadBlock.Body body = HeadBlock.body(List.of(new Part("a", 35, 10, true, HeadBlock.PERSON_EDITED_FILE)),
+                HeadBlock.firstRequestTotal(TOKENS), HeadBlock.firstMeasuredTurn(TOKENS));
+        assertNull(body.comparisonNote());
+        assertEquals(1, body.measuredFirstTurn());
+    }
+
+    @Test
+    void firstMeasuredTurn109_isNotComparedWithTheParts() {
+        assertEquals(109, HeadBlock.firstMeasuredTurn(TOKENS_FROM_TURN_109));
+        assertEquals(513_878, HeadBlock.firstRequestTotal(TOKENS_FROM_TURN_109));
+        String note = "This conversation was already running when the measurement began: its first measured request "
+                + "(turn 109) holds the earlier history, so it is not compared with the parts.";
+        assertEquals(note, HeadBlock.comparisonNote(109));
+        HeadBlock.Body body = HeadBlock.body(List.of(new Part("a", 35, 10, true, HeadBlock.PERSON_EDITED_FILE)),
+                HeadBlock.firstRequestTotal(TOKENS_FROM_TURN_109), HeadBlock.firstMeasuredTurn(TOKENS_FROM_TURN_109));
+        assertEquals(note, body.comparisonNote());
+        assertEquals(513_878, body.measuredFirstRequestTotal(), "the measured figure is still given");
+    }
+
+    @Test
+    void noMeasuredTurn_hasNothingToCompareAndNoNote() {
+        assertNull(HeadBlock.firstMeasuredTurn(null));
+        assertNull(HeadBlock.firstMeasuredTurn("{\"turns\":[]}"));
+        assertNull(HeadBlock.comparisonNote(null));
     }
 }

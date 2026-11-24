@@ -3151,7 +3151,9 @@
         var measured = hb.measuredFirstRequestTotal;
         var summary = [{ values: ["Estimated total of the parts above", String(hb.estimatedTotal)] },
                        { values: ["Measured first request", measured === null || measured === undefined ? "not recorded" : String(measured)] }];
-        if (measured !== null && measured !== undefined) {
+        // Compared only when the first measured request is the conversation's first turn; otherwise it holds the earlier
+        // history, and the server says so in comparisonNote instead.
+        if (measured !== null && measured !== undefined && !hb.comparisonNote) {
             var diff = measured - hb.estimatedTotal;
             summary.push({ total: true, values: ["Measured minus estimated (parts not counted here, and estimation error)",
                                                  (diff > 0 ? "+" : "") + diff] });
@@ -3160,6 +3162,12 @@
         gap.style.height = "10px";
         box.appendChild(gap);
         box.appendChild(tokensTable(["First request", "Tokens"], summary, 1));
+        if (hb.comparisonNote) {
+            var note = document.createElement("div");
+            note.className = "io-empty";
+            note.textContent = hb.comparisonNote;
+            box.appendChild(note);
+        }
     }
 
     function tokensShowTurns(t) {
