@@ -21,15 +21,16 @@ public final class BuildInfo {
     /** The resource the build writes. */
     static final String RESOURCE = "/chat-ui-build.properties";
 
-    private static volatile String current;
+    /** The label, read once, when it is first asked for: class initialisation of the holder makes it safe to share. */
+    private static final class Label {
+        static final String VALUE = label(read());
+    }
 
     private BuildInfo() {}
 
     /** @return the running build's label, read once from the resource the build wrote */
     public static String current() {
-        String c = current;
-        if (c == null) current = c = label(read());
-        return c;
+        return Label.VALUE;
     }
 
     /** @return what the build wrote, or nothing when the resource is not there */

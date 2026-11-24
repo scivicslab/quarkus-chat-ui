@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.core.actor;
 
+import com.scivicslab.chatui.kernel.StateOwner;
 import com.scivicslab.chatui.agent.ChatNameTool;
 import com.scivicslab.chatui.agent.CreateChatTool;
 import com.scivicslab.chatui.agent.DeleteChatTool;
@@ -77,12 +78,16 @@ public final class ConversationToolRunner implements ToolCallRecorder {
      */
     public static final class Calculator implements ExpressionEvaluator {
         private JShellCalculator calculator;
+        /** The one owner of the calculator: each evaluation is one message to it, so calls take turns. */
+        private final StateOwner<Object> owner = new StateOwner<>("calc", new Object());
 
         /** @return what JShell made of {@code expression} */
         @Override
-        public synchronized String evaluate(String expression) {
-            if (calculator == null) calculator = new JShellCalculator();
-            return calculator.evaluate(expression);
+        public String evaluate(String expression) {
+            return owner.ask(o -> {
+                if (calculator == null) calculator = new JShellCalculator();
+                return calculator.evaluate(expression);
+            });
         }
     }
 

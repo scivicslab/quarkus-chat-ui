@@ -1,5 +1,7 @@
 package com.scivicslab.chatui.audittrail;
 
+import com.scivicslab.chatui.kernel.StateOwner;
+
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
@@ -42,6 +44,8 @@ public final class StallDiagnostics {
     private final Dumper dumper;
     private long lastDumpMillis;
     private boolean dumpedBefore;
+    /** The one owner of the two fields above: each report of a stall is one message to it. */
+    private final StateOwner<Object> owner = new StateOwner<>("stall-diagnostics", new Object());
 
     /**
      * @param directory         where the dump files go; created when the first one is written
@@ -77,7 +81,12 @@ public final class StallDiagnostics {
      * @param what what stalled, e.g. {@code "project10/chat-01"}; goes into the file name and the log
      * @return the file written, or {@code null} when none was due or the dump failed
      */
-    public synchronized Path dumpIfDue(String what) {
+    public Path dumpIfDue(String what) {
+        return owner.ask(o -> dumpNow(what));
+    }
+
+    /** {@link #dumpIfDue}, run as a message of the owner, so two stalls reported together write one dump. */
+    private Path dumpNow(String what) {
         long now = nowMillis.getAsLong();
         if (dumpedBefore && now - lastDumpMillis < minIntervalMillis) return null;
         // Taken before the attempt, so a dump that keeps failing is not retried at every request.

@@ -30,7 +30,7 @@ public class SseConnection {
     /** How much of the turn's activity text is kept for a browser that opens the stream mid-turn. */
     static final int ACTIVITY_TAIL_CHARS = 8000;
 
-    private volatile UnicastProcessor<String> processor;
+    private UnicastProcessor<String> processor;   // used only inside this actor's messages
 
     /**
      * The "thinking" text emitted since the current turn began, whether or not a browser was

@@ -1,7 +1,9 @@
 package com.scivicslab.chatui.core.actor;
 
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+
+import com.scivicslab.chatui.kernel.StateOwner;
+import java.util.HashMap;
 
 /**
  * Remembers what a workflow said it was doing when it created an actor
@@ -28,7 +30,8 @@ public final class ActorNotes {
      */
     private static final ThreadLocal<String> CURRENT = new ThreadLocal<>();
 
-    private static final Map<String, String> NOTES = new ConcurrentHashMap<>();
+    /** The notes by actor name; one owner, an actor, holds them, and each use is a message to it. */
+    private static final StateOwner<Map<String, String>> NOTES = new StateOwner<>("actor-notes", new HashMap<>());
 
     /**
      * @param note the note of the transition about to run, or {@code null}
@@ -51,7 +54,7 @@ public final class ActorNotes {
      */
     public static void record(String actorName) {
         String note = CURRENT.get();
-        if (note != null && actorName != null) NOTES.put(actorName, note);
+        if (note != null && actorName != null) NOTES.run(m -> m.put(actorName, note));
     }
 
     /**
@@ -59,6 +62,6 @@ public final class ActorNotes {
      * @return what the workflow that created it said it was doing, or {@code null}
      */
     public static String noteOf(String actorName) {
-        return NOTES.get(actorName);
+        return NOTES.ask(m -> m.get(actorName));
     }
 }
