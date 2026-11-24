@@ -4,19 +4,14 @@ import com.scivicslab.chatui.plugin.ChatUiPlugin;
 import com.scivicslab.chatui.plugin.ConversationTool;
 import com.scivicslab.chatui.plugin.LlmProviderFactory;
 import com.scivicslab.chatui.plugin.ProviderChoice;
+import com.scivicslab.pojoactor.core.ActorRef;
 
-import java.net.URL;
-import java.net.URLClassLoader;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.ServiceLoader;
-import java.util.logging.Logger;
+import java.util.concurrent.CompletionException;
+import java.util.function.Function;
 
 /**
  * What this instance can offer a conversation beyond its built-in tools: the provider kinds and
@@ -24,33 +19,41 @@ import java.util.logging.Logger;
  *
  * <p>The body registers its own {@code openai-compat} factory first. Then each jar named in
  * {@code chat-ui.plugins} is put on a class loader whose parent is the body's, and the
- * {@link ChatUiPlugin} implementations that {@link ServiceLoader} finds there add their factories
+ * {@link ChatUiPlugin} implementations that {@link java.util.ServiceLoader} finds there add their factories
  * and tools. A jar that cannot be loaded stops start-up: an instance asked for a plugin must not
  * come up silently without it.</p>
  *
  * <p>Nothing is added after start-up. Which kinds and tools exist is therefore decided by the
  * command line, which is what makes "no way out to the network" a property of the process rather
  * than of a setting.</p>
+ *
+ * <p>The state is one owner's, an actor that runs {@link PluginBook}; this class holds no lock and no state of its own,
+ * and each method is a message to the owner, answered after every registration made before it.</p>
  */
 public class PluginRegistry {
-
-    private static final Logger LOG = Logger.getLogger(PluginRegistry.class.getName());
 
     /** One loaded plugin, as reported by {@code GET /api/plugins}. */
     public record LoadedPlugin(String id, String source, List<String> providerKinds, List<String> toolNames) {}
 
-    private final Map<String, LlmProviderFactory> factories = new LinkedHashMap<>();
-    private final Map<String, ConversationTool> tools = new LinkedHashMap<>();
-    private final List<LoadedPlugin> plugins = new ArrayList<>();
+    private final ActorRef<PluginBook> owner = new ActorRef<>("plugin-registry", new PluginBook());
+
+    private <R> R ask(Function<PluginBook, R> call) {
+        try {
+            return owner.ask(call).join();
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof RuntimeException cause) throw cause;
+            throw e;
+        }
+    }
 
     /** Registers one provider kind. A later registration of the same kind replaces the earlier. */
-    public synchronized void register(LlmProviderFactory factory) {
-        factories.put(factory.kind(), factory);
+    public void register(LlmProviderFactory factory) {
+        ask(b -> { b.register(factory); return null; });
     }
 
     /** Registers one tool. A later registration of the same name replaces the earlier. */
-    public synchronized void register(ConversationTool tool) {
-        tools.put(tool.name(), tool);
+    public void register(ConversationTool tool) {
+        ask(b -> { b.register(tool); return null; });
     }
 
     /**
@@ -59,19 +62,8 @@ public class PluginRegistry {
      * @param plugin the plugin
      * @param source where it came from (a jar path, or {@code built-in})
      */
-    public synchronized void register(ChatUiPlugin plugin, String source) {
-        List<String> kinds = new ArrayList<>();
-        for (LlmProviderFactory f : plugin.providerFactories()) {
-            register(f);
-            kinds.add(f.kind());
-        }
-        List<String> names = new ArrayList<>();
-        for (ConversationTool t : plugin.tools()) {
-            register(t);
-            names.add(t.name());
-        }
-        plugins.add(new LoadedPlugin(plugin.id(), source, kinds, names));
-        LOG.info("Plugin " + plugin.id() + " from " + source + ": providers " + kinds + ", tools " + names);
+    public void register(ChatUiPlugin plugin, String source) {
+        ask(b -> { b.register(plugin, source); return null; });
     }
 
     /**
@@ -81,76 +73,37 @@ public class PluginRegistry {
      * @param jars paths of plugin jars
      * @throws IllegalStateException when a jar is missing, unreadable, or holds no plugin
      */
-    public synchronized void loadJars(List<Path> jars) {
-        for (Path jar : jars) {
-            if (!Files.isRegularFile(jar)) {
-                throw new IllegalStateException("Plugin jar not found: " + jar);
-            }
-            URL url;
-            try {
-                url = jar.toUri().toURL();
-            } catch (Exception e) {
-                throw new IllegalStateException("Plugin jar path is not a URL: " + jar, e);
-            }
-            URLClassLoader loader = new URLClassLoader(new URL[] {url}, PluginRegistry.class.getClassLoader());
-            int found = 0;
-            for (ChatUiPlugin plugin : ServiceLoader.load(ChatUiPlugin.class, loader)) {
-                register(plugin, jar.toString());
-                found++;
-            }
-            if (found == 0) {
-                throw new IllegalStateException("No ChatUiPlugin service in " + jar
-                        + " (META-INF/services/" + ChatUiPlugin.class.getName() + " missing?)");
-            }
-        }
-        if (jars.isEmpty()) LOG.info("Plugins: none (chat-ui.plugins is unset)");
+    public void loadJars(List<Path> jars) {
+        ask(b -> { b.loadJars(jars); return null; });
     }
 
     /** @return the factory of the given kind, if registered */
-    public synchronized Optional<LlmProviderFactory> factory(String kind) {
-        return Optional.ofNullable(factories.get(kind));
+    public Optional<LlmProviderFactory> factory(String kind) {
+        return ask(b -> b.factory(kind));
     }
 
     /** @return the registered kinds, in registration order */
-    public synchronized List<String> kinds() {
-        return List.copyOf(factories.keySet());
+    public List<String> kinds() {
+        return ask(PluginBook::kinds);
     }
 
     /** @return every dropdown entry, in registration order of kinds */
-    public synchronized List<ProviderChoice> choices() {
-        List<ProviderChoice> all = new ArrayList<>();
-        for (LlmProviderFactory f : factories.values()) all.addAll(f.choices());
-        return Collections.unmodifiableList(all);
+    public List<ProviderChoice> choices() {
+        return ask(PluginBook::choices);
     }
 
     /** @return the registered tools, in registration order */
-    public synchronized List<ConversationTool> tools() {
-        return List.copyOf(tools.values());
+    public List<ConversationTool> tools() {
+        return ask(PluginBook::tools);
     }
 
     /** @return the loaded plugins, in load order */
-    public synchronized List<LoadedPlugin> plugins() {
-        return List.copyOf(plugins);
+    public List<LoadedPlugin> plugins() {
+        return ask(PluginBook::plugins);
     }
 
     /** @return what {@code GET /api/plugins} returns */
-    public synchronized Map<String, Object> describe() {
-        List<Map<String, Object>> choiceRows = new ArrayList<>();
-        for (LlmProviderFactory f : factories.values()) {
-            for (ProviderChoice c : f.choices()) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("kind", c.kind());
-                row.put("toolSet", c.toolSet().id());
-                row.put("label", c.label());
-                row.put("value", c.value(f.defaultToolSet()));
-                choiceRows.add(row);
-            }
-        }
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("plugins", plugins());
-        m.put("providerKinds", kinds());
-        m.put("providerChoices", choiceRows);
-        m.put("tools", tools.keySet().stream().toList());
-        return m;
+    public Map<String, Object> describe() {
+        return ask(PluginBook::describe);
     }
 }
