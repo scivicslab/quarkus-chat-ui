@@ -204,6 +204,7 @@ class TokenBreakdownTest {
         assertEquals("38.9%", topics.get("Share of the input served from the cache (all requests)"), "14000/36000");
         assertEquals("1", topics.get("Measured from turn"));
         assertEquals("33.3%", topics.get("Reasoning share of the output (all requests)"), "100/300");
-        assertEquals("10 topics", t.topics().size() + " topics");
+        assertEquals("11 topics", t.topics().size() + " topics");
+        assertEquals("28.6%", topics.get("Rows compared with the measured input (last request)"), "4000/14000");
     }
 }

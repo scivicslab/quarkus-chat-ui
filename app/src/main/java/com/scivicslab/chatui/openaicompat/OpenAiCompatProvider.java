@@ -718,7 +718,14 @@ public class OpenAiCompatProvider implements LlmProvider {
         String model = currentModel();
         if (model == null || model.isBlank()) return -1;
         OpenAiCompatClient client = selectClient(model);
-        return client == null ? -1 : client.getMaxModelLen(model);
+        if (client == null) return -1;
+        int window = client.getMaxModelLen(model);
+        if (window <= 0) {
+            // The server's list of models carries it; read the list once when nothing has asked for it yet.
+            client.fetchModels();
+            window = client.getMaxModelLen(model);
+        }
+        return window;
     }
 
     /** @return how many tokens the history may occupy, from the model's own reported context length */

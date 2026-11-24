@@ -487,6 +487,10 @@ public final class TokenBreakdown {
                 measuredCum == null || measuredCum <= 0 ? "n/a"
                         : String.format(java.util.Locale.ROOT, "%.1f%%", 100.0 * cacheReadCum / measuredCum),
                 "Cache read divided by the input reported; a low share means the head keeps changing."));
+        Integer rowsLast = t.rowsSum().lastRequest(), measuredLast = t.measured().lastRequest();
+        out.add(new Topic("Rows compared with the measured input (last request)",
+                rowsLast == null || measuredLast == null || measuredLast <= 0 ? "n/a" : percent(rowsLast, measuredLast),
+                "100% means the estimates are exact; the estimate divides characters by a fixed factor, the provider counts its own tokens."));
         Integer residual = t.rows().get(t.rows().size() - 1).lastRequest();
         out.add(new Topic("Residual of the last request",
                 residual == null ? "n/a" : residual + " tokens (" + (residual < 0 ? "estimates too high" : "not attributed") + ")",
