@@ -52,6 +52,22 @@ steps:
         method: finish
         execution: direct
 
+  - states: ["think", "think"]
+    label: repeated-call
+    note: |
+      The last three tool calls of this turn were the same call (same tool, same arguments) with the same
+      result: the model is going round in a circle, and another call would only repeat it. repeatedCallReached
+      queues a note saying so as the next step's prompt, and that step is the turn's last model request: it is
+      sent with tool_choice "none", so the model must answer in text, and a call it makes anyway is not run. The
+      turn then ends with the ending repeated-call. It succeeds once per turn, before the model is called, so the
+      call the model would have made next is never run; the number three is RepeatedCallDetector's. No LLM call
+      here. A provider that parks tool calls (Claude Code and Codex over MCP) runs its tool loop inside its CLI, which
+      takes no tool choice, so this transition fails for it and the turn goes on as before.
+    actions:
+      - actor: this
+        method: repeatedCallReached
+        execution: direct
+
   - states: ["think", "act"]
     label: think-action
     note: |

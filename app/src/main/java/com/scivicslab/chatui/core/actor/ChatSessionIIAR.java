@@ -458,6 +458,18 @@ public class ChatSessionIIAR extends InterpreterIIAR {
     }
 
     /**
+     * The repeated-call transition's guard: succeeds once, when the turn's last three tool calls were the same call
+     * with the same result, and queues the note that asks the model for an answer in text.
+     *
+     * @param arg unused
+     * @return successful when the note was queued
+     */
+    @Action("repeatedCallReached")
+    public ActionResult repeatedCallReachedAction(String arg) {
+        return chatSession().repeatedCallReached();
+    }
+
+    /**
      * The step at the end of a turn that decides whether the timekeeper must remind the conversation
      * ({@code ReminderDecidedAtTheEndOfTheTurn_261114_oo01}).
      *

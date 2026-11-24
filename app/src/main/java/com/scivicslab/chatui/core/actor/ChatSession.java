@@ -6,6 +6,7 @@ import com.scivicslab.chatui.agent.AskChatTool;
 import com.scivicslab.chatui.agent.ContextBudget;
 import com.scivicslab.chatui.agent.FileAccessScope;
 import com.scivicslab.chatui.agent.ChatInspection;
+import com.scivicslab.chatui.agent.RepeatedCallDetector;
 import com.scivicslab.chatui.agent.TextToolCallParser;
 import com.scivicslab.chatui.agent.ToolCall;
 import com.scivicslab.chatui.agent.ToolSet;
@@ -145,6 +146,12 @@ public class ChatSession extends Interpreter {
     private int turnToolCalls;
     /** Whether this turn stopped at the workflow's step limit. Reset in {@code start}. */
     private boolean stepLimitHit;
+    /** The run of identical tool calls this turn has made, ending at its last call. */
+    private final RepeatedCallDetector repeatedCalls = new RepeatedCallDetector();
+    /** Whether this turn has been told to answer in text after repeating a call: its next request carries no tool choice. */
+    private boolean repeatedCallFinal;
+    /** Whether this turn ended on a repeated call, whatever the model answered then. */
+    private boolean repeatedCallHit;
     /**
      * The question the latest step put to the person with {@code ask_person}, or {@code null}. Set by
      * {@code stepExpectingAction}, read by {@code askedThePerson}; once set, the turn ends
@@ -474,7 +481,7 @@ public class ChatSession extends Interpreter {
     private boolean decisionAsked;
     /**
      * How the message this turn decides on ended, read from its ended line: {@code answered}, {@code asked},
-     * {@code step-limit}, {@link #ENDED_WITHOUT_A_REPLY}, or {@code null} for a follow-up, which has no ended line
+     * {@code step-limit}, {@code repeated-call}, {@link #ENDED_WITHOUT_A_REPLY}, or {@code null} for a follow-up, which has no ended line
      * ({@code AutomaticReplyDecision_261119_oo01}).
      */
     private String undecidedEnding;
@@ -1301,6 +1308,9 @@ public class ChatSession extends Interpreter {
         this.stepCount = 0;
         this.turnToolCalls = 0;
         this.stepLimitHit = false;
+        this.repeatedCalls.reset();
+        this.repeatedCallFinal = false;
+        this.repeatedCallHit = false;
         this.personQuestion = null;
         this.cancelled = false;
         this.constructedPrompts.clear();
@@ -1694,7 +1704,8 @@ public class ChatSession extends Interpreter {
         // model's chain of thought ran to a stop token before it ever reached <invoke> or an
         // answer. Retried once, same prompt, as its own step — a second draw from the same model
         // most often lands on a tool call or an answer (EmptyStopRetry_261009_oo01).
-        if (!outcome.cutOff() && outcome.calls().isEmpty() && outcome.text().isBlank() && turnError == null) {
+        if (!outcome.cutOff() && outcome.calls().isEmpty() && outcome.text().isBlank() && turnError == null
+                && !repeatedCallFinal) {
             turnEmitter.accept(ChatEvent.thinking(
                     "\n→ retrying: the reply had no text and no tool call\n"));
             stepCount++;
@@ -1734,6 +1745,20 @@ public class ChatSession extends Interpreter {
         }
         cutOffRun = 0;
         cutOffText.setLength(0);
+
+        // Any text the model writes ends a run of identical calls. The one request made after a repeated call is
+        // the end of the turn: what it wrote is the answer, and a call it makes anyway is not run.
+        String writtenText = TextToolCallParser.stripToolCallBlocks(outcome.text()).strip();
+        if (repeatedCallFinal) {
+            finalAnswer = writtenText.isEmpty()
+                    ? "The model repeated the same call " + repeatedCalls.count() + " times and gave no answer"
+                    : writtenText;
+            logToConversationSquad(writtenText.isEmpty() ? "WARNING" : "INFO", "turn" + ioTurnNo + "/step" + stepCount
+                    + ": the request after the repeated call " + (writtenText.isEmpty() ? "returned no text" : "was answered in text")
+                    + (outcome.calls().isEmpty() ? "" : "; a call in it was not run"));
+            return new ActionResult(false, "answer after a repeated call");
+        }
+        if (!writtenText.isEmpty()) repeatedCalls.reset();
 
         // A reply that asks the person ends the turn, whatever else it calls: the other calls are work the
         // person has not decided on yet, so none of them runs (AskThePersonEndsTheTurn_261119_oo01).
@@ -1891,7 +1916,8 @@ public class ChatSession extends Interpreter {
         // The body the provider sends is kept so the I/O log can record it as it was sent
         // (RequestMessagesControl_261018_oo01); a provider with no request body leaves it null.
         java.util.concurrent.atomic.AtomicReference<String> sentBody = new java.util.concurrent.atomic.AtomicReference<>();
-        ProviderContext ctx = new ProviderContext(apiKey, stepImages, turnNoThink, () -> {}, sentBody::set, true);
+        ProviderContext ctx = new ProviderContext(apiKey, stepImages, turnNoThink, () -> {}, sentBody::set, true,
+                repeatedCallFinal);
         boolean[] cutOff = {false};
         StringBuilder assistantBuf = new StringBuilder();
         // The reasoning is kept for the record, not for the answer: it goes to the I/O log's
@@ -2255,6 +2281,43 @@ public class ChatSession extends Interpreter {
                                                  : stepCount + "/" + max + " steps used");
     }
 
+    /**
+     * The repeated-call transition's guard. When this turn's last {@link RepeatedCallDetector#REPEAT_LIMIT} tool calls
+     * were the same call with the same result, it queues a note as the next step's prompt, and that step is the turn's
+     * last request: it carries {@code tool_choice: "none"}, so the model must answer in text. It succeeds once per turn,
+     * before the model is called again, so the call the model would have made next is never run. Makes no model call.
+     *
+     * @return {@code success=true} when the note was queued
+     */
+    public ActionResult repeatedCallReached() {
+        if (repeatedCallFinal) return new ActionResult(false, "already asked for an answer in text");
+        if (cancelled || pauseRequested) return new ActionResult(false, "paused or cancelled");
+        // A CLI harness (Claude Code, Codex) runs its own tool loop and takes no tool choice; it is left alone.
+        if (provider.parksToolCalls()) return new ActionResult(false, "the provider's CLI runs the tool loop");
+        if (!repeatedCalls.repeated()) return new ActionResult(false, "no repeated call");
+        repeatedCallFinal = true;
+        repeatedCallHit = true;
+        String what = repeatedCalls.tool() + " " + repeatedCalls.arguments();
+        String note = "The same call (" + what + ") was made " + repeatedCalls.count() + " times in a row with the same"
+                + " result, so no further call is run. Do not call a tool again; give your answer in text now.";
+        pendingPrompt = note;
+        turnTranscript.append(note).append("\n\n");
+        turnEmitter.accept(ChatEvent.thinking("\n→ " + note + "\n"));
+        logToConversationSquad("WARNING", "turn" + ioTurnNo + "/step" + stepCount + ": " + repeatedCalls.tool()
+                + " was called " + repeatedCalls.count() + " times in a row with the same arguments and result;"
+                + " the turn asks the model for an answer in text");
+        if (ioLog != null && ioSession >= 0) {
+            try {
+                ioLog.record(ioSession, "agent", "turn" + ioTurnNo + "/step" + stepCount + "/repeated-call",
+                        "REPEATED CALL (" + repeatedCalls.count() + " in a row)\nTOOL: " + repeatedCalls.tool()
+                                + "\nINPUT:\n" + repeatedCalls.arguments() + "\nOBSERVATION:\n" + repeatedCalls.result());
+            } catch (Exception e) {
+                logger.log(Level.WARNING, "I/O log repeated-call record failed", e);
+            }
+        }
+        return new ActionResult(true, "asking for an answer in text");
+    }
+
     /** @param text a workflow argument; @param fallback used when it is blank or not a positive number */
     private static int parsePositiveOr(String text, int fallback) {
         if (text == null || text.isBlank()) return fallback;
@@ -2395,6 +2458,7 @@ public class ChatSession extends Interpreter {
             } catch (Exception e) {
                 fullObservation = "error: " + e.getMessage();
             }
+            repeatedCalls.record(tc.name(), tc.argumentsJson(), fullObservation);
             String fitted = (summarizePages && returnsPages(tc.name()))
                     ? pageSummarizer().summarize(fullObservation)
                     : fullObservation;
@@ -2531,7 +2595,8 @@ public class ChatSession extends Interpreter {
             recordConversationIo(question, answer, provider.getCurrentModel(), answeredIn);
             String ending = ChatInspection.endingLine(
                     personQuestion != null ? ChatInspection.ENDED_ASKED
-                            : stepLimitHit ? ChatInspection.ENDED_STEP_LIMIT : ChatInspection.ENDED_ANSWERED,
+                            : stepLimitHit ? ChatInspection.ENDED_STEP_LIMIT
+                            : repeatedCallHit ? ChatInspection.ENDED_REPEATED_CALL : ChatInspection.ENDED_ANSWERED,
                     stepCount, turnToolCalls);
             turnAnswer = new TurnReply(answer, ending, turnId());
             if (activeResultKey != null) {
@@ -3264,6 +3329,8 @@ public class ChatSession extends Interpreter {
         if (cancelled || pauseRequested) return new ActionResult(false, "paused or cancelled");
         // Asking the person is how this turn ends; the decision on the reply follows the person's answer.
         if (personQuestion != null) return new ActionResult(false, "asked the person");
+        // A turn that ended on a repeated call is not asked for more: the decision is left open at its end.
+        if (repeatedCallHit) return new ActionResult(false, "ended on a repeated call");
         if (undecidedRequest == null) return new ActionResult(false, "no reply waiting for a decision");
         if (decisionAsked) {
             logToConversationSquad("WARNING", "turn" + ioTurnNo + ": no decision was recorded on the reply to request "
@@ -3322,10 +3389,12 @@ public class ChatSession extends Interpreter {
         String replier = undecidedReplier;
         String leftOpen = personQuestion != null ? "this turn ended by asking the person"
                 : stepLimitHit ? "this turn reached its step limit"
+                : repeatedCallHit ? "this turn ended on a repeated call"
                 : cancelled ? "this turn was cancelled"
                 : finalAnswer == null && turnError != null ? "this turn failed: " + turnError
                 : com.scivicslab.chatui.agent.ChatInspection.ENDED_ASKED.equals(undecidedEnding)
                         || com.scivicslab.chatui.agent.ChatInspection.ENDED_STEP_LIMIT.equals(undecidedEnding)
+                || com.scivicslab.chatui.agent.ChatInspection.ENDED_REPEATED_CALL.equals(undecidedEnding)
                         ? "the reply ended " + undecidedEnding
                 : null;
         if (leftOpen != null) {

@@ -415,7 +415,7 @@ public class OpenAiCompatProvider implements LlmProvider {
                         @Override public void onError(String message) {
                             emitter.accept(ChatEvent.error(message));
                         }
-                    }, ctx.onRequestBody());
+                    }, ctx.onRequestBody(), ctx.noToolCalls());
                 return;
             } catch (ContextLengthExceededException e) {
                 retries++;

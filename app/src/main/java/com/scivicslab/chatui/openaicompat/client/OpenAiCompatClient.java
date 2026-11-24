@@ -250,10 +250,20 @@ public class OpenAiCompatClient {
     public String sendPrompt(String model, List<ChatMessage> history, boolean noThink,
                              int maxTokens, List<ToolDefinition> tools, StreamCallback callback,
                              java.util.function.Consumer<String> requestBodyListener) {
+        return sendPrompt(model, history, noThink, maxTokens, tools, callback, requestBodyListener, false);
+    }
+
+    /**
+     * As above; with {@code noToolCalls} the request keeps its {@code tools} but sends {@code tool_choice: "none"},
+     * so the model must answer in text.
+     */
+    public String sendPrompt(String model, List<ChatMessage> history, boolean noThink,
+                             int maxTokens, List<ToolDefinition> tools, StreamCallback callback,
+                             java.util.function.Consumer<String> requestBodyListener, boolean noToolCalls) {
         long startTime = System.currentTimeMillis();
         try {
             String requestBody = buildRequestBody(model, history, noThink, maxTokens, true,
-                    tools, temperature);
+                    tools, temperature, noToolCalls);
             if (requestBodyListener != null) requestBodyListener.accept(requestBody);
             HttpResponse<Stream<String>> response = sendWithRetry(requestBody);
 
@@ -412,6 +422,14 @@ public class OpenAiCompatClient {
                                    boolean noThink, int maxTokens,
                                    boolean stream, List<ToolDefinition> tools,
                                    Double temperature) {
+        return buildRequestBody(model, messages, noThink, maxTokens, stream, tools, temperature, false);
+    }
+
+    /** As above; {@code noToolCalls} sends {@code tool_choice: "none"} in place of {@code "auto"}. */
+    static String buildRequestBody(String model, List<ChatMessage> messages,
+                                   boolean noThink, int maxTokens,
+                                   boolean stream, List<ToolDefinition> tools,
+                                   Double temperature, boolean noToolCalls) {
         StringBuilder sb = new StringBuilder();
         sb.append("{\"model\":\"").append(escapeJson(model))
           .append("\",\"stream\":").append(stream).append(",");
@@ -435,7 +453,7 @@ public class OpenAiCompatClient {
                   .append("\"parameters\":").append(t.parametersJson())
                   .append("}}");
             }
-            sb.append("],\"tool_choice\":\"auto\",");
+            sb.append("],\"tool_choice\":\"").append(noToolCalls ? "none" : "auto").append("\",");
         }
         sb.append("\"messages\":[");
         for (int i = 0; i < messages.size(); i++) {
