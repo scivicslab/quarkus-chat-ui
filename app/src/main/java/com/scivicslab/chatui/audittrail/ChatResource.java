@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.audittrail;
 
+import com.scivicslab.chatui.kernel.BlockingJob;
 import com.scivicslab.chatui.agent.ToolSet;
 import com.scivicslab.chatui.core.actor.ChatSession;
 import com.scivicslab.chatui.core.actor.ChatSessionIIAR;
@@ -264,7 +265,9 @@ public class ChatResource {
         if (text.isBlank()) {
             return Multi.createFrom().item(translationEvent(Map.of("type", "error", "message", "text is required")));
         }
-        return Multi.createFrom().<String>emitter(emitter -> Thread.ofVirtual().start(() -> {
+        // The translation blocks on the model, so it is one BlockingJob (an actor of its own): the emitter callback
+        // returns at once, and the job ends the stream when the work ends.
+        return Multi.createFrom().<String>emitter(emitter -> BlockingJob.start("translate-stream", () -> {
             try {
                 ChatUiActorSystem.Translation t = actorSystem.translate(projectId, chatId, text, language,
                         piece -> emitter.emit(translationEvent(Map.of("type", "delta", "content", piece))));
@@ -280,7 +283,8 @@ public class ChatResource {
             } finally {
                 emitter.complete();
             }
-        }));
+            return null;
+        }, null));
     }
 
     /**

@@ -8,7 +8,6 @@ app/src/main/java/com/scivicslab/chatui/agent/AskChatTool.java async-without-exe
 app/src/main/java/com/scivicslab/chatui/agent/AskChatTool.java concurrent-class 2
 app/src/main/java/com/scivicslab/chatui/agent/AskChatTool.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/audittrail/BuildInfo.java volatile 1
-app/src/main/java/com/scivicslab/chatui/audittrail/ChatResource.java thread-start 1
 app/src/main/java/com/scivicslab/chatui/audittrail/StallDiagnostics.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/bench/DocRetrievalBenchmark.java sleep 1
 app/src/main/java/com/scivicslab/chatui/core/actor/ActorNotes.java concurrent-class 1
