@@ -125,4 +125,30 @@ class StateOwnerTest {
             assertEquals(0, (int) owner.ask(s -> s.count));
         }
     }
+
+    /** An event handed to a reader just as the reader is interrupted is returned, not dropped; the interrupt is kept. */
+    @Test
+    void anEventThatArrivesWithAnInterruptIsNotLost() throws Exception {
+        for (int round = 0; round < 300; round++) {
+            try (StateOwner<State> owner = new StateOwner<>("t-interrupt-" + round, new State())) {
+                java.util.concurrent.atomic.AtomicReference<Object> got = new java.util.concurrent.atomic.AtomicReference<>();
+                Thread waiter = Thread.ofVirtual().unstarted(() -> {
+                    try {
+                        got.set(owner.poll(s -> s.events, 10_000));
+                    } catch (InterruptedException e) {
+                        got.set("interrupted");
+                    }
+                });
+                waiter.start();
+                Thread.sleep(2);   // the waiter is waiting, or about to
+                owner.tell(s -> s.events.offer("event"));
+                waiter.interrupt();
+                waiter.join(5_000);
+                Object first = got.get();
+                String again = "interrupted".equals(first) ? owner.poll(s -> s.events, 200) : null;
+                assertTrue("event".equals(first) || "event".equals(again),
+                        "round " + round + ": the event was lost (first=" + first + ", again=" + again + ")");
+            }
+        }
+    }
 }

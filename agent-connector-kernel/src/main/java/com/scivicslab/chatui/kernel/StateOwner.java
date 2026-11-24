@@ -72,8 +72,12 @@ public final class StateOwner<S> implements AutoCloseable {
             if (e.getCause() instanceof CancellationException) throw new InterruptedException("the wait was cancelled");
             throw new IllegalStateException(e.getCause());
         } catch (InterruptedException e) {
-            ask(s -> queue.apply(s).abandon(reader));
-            throw e;
+            // An event the owner handed to this reader just before the interrupt is not dropped: it is returned, and the
+            // interrupt is kept for the caller's next wait.
+            E arrived = ask(s -> queue.apply(s).abandon(reader));
+            if (arrived == null) throw e;
+            Thread.currentThread().interrupt();
+            return arrived;
         }
     }
 
