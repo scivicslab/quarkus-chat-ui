@@ -35,12 +35,17 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      * picks which one it runs; multiple ConversationSquads may point at the same file. All ConversationSquads default to the
      * same file today since it's the only one that exists, not because ConversationSquads are forced to share it.
      */
+    /** Where this conversation's step and time limits are read from by other threads; the turn tells it every change. */
+    private final ActorRef<ChatLimits> limits;
+
     private String agentLoopWorkflowFile = "chat-session-agent-loop.yaml";
 
     public ChatSessionIIAR(String actorName, LlmProvider provider, Optional<String> configApiKey,
                      IoLogStore ioLog, IIActorSystem system) {
         super(actorName, new ChatSession(provider, configApiKey, ioLog), system);
         chatSession().setActorSystem(system);
+        this.limits = new ActorRef<>(actorName + ".limits", new ChatLimits());
+        chatSession().attachLimitsBoard(limits);
         // InterpreterIIAR's constructor does not call this itself — without it, "actor: this" in
         // chat-session-agent-loop.yaml resolves through Interpreter.action()'s selfActorRef==null
         // fallback (system.getIIActor("this")), which finds nothing ("Actor not found: this").
@@ -230,11 +235,18 @@ public class ChatSessionIIAR extends InterpreterIIAR {
     /** Whether this conversation asks its model to skip the thinking phase, read directly. */
     public boolean isNoThinkDirect() { return chatSession().isNoThink(); }
 
+    /** Closes the conversation's limits board with the conversation. */
+    @Override
+    public void close() {
+        limits.close();
+        super.close();
+    }
+
     /** @return the steps one turn of this conversation may make */
-    public int getStepLimitDirect() { return chatSession().getStepLimit(); }
+    public int getStepLimitDirect() { return limits.ask(ChatLimits::stepLimit).join(); }
 
     /** @return the minutes one turn of this conversation may run, {@code 0} for no limit */
-    public int getTimeLimitMinutesDirect() { return chatSession().getTimeLimitMinutes(); }
+    public int getTimeLimitMinutesDirect() { return limits.ask(ChatLimits::timeLimitMinutes).join(); }
 
     /** How hard this conversation's provider was told to work, read directly; null when it has no such setting. */
     public String getEffortDirect() { return chatSession().getEffort(); }

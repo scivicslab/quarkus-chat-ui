@@ -163,8 +163,10 @@ public class ChatSession extends Interpreter {
     public static final int DEFAULT_CONVERSATION_STEP_LIMIT = 100;
     /** Minutes one such turn may run, unless the conversation sets it; {@code 0} sets no time limit. */
     public static final int DEFAULT_TIME_LIMIT_MINUTES = 10;
-    private volatile int stepLimit = DEFAULT_CONVERSATION_STEP_LIMIT;
-    private volatile int timeLimitMinutes = DEFAULT_TIME_LIMIT_MINUTES;
+    private int stepLimit = DEFAULT_CONVERSATION_STEP_LIMIT;
+    private int timeLimitMinutes = DEFAULT_TIME_LIMIT_MINUTES;
+    /** Where other threads read the two limits above; this conversation tells it every change. Null in a bare session. */
+    private com.scivicslab.pojoactor.core.ActorRef<ChatLimits> limitsBoard;
     /** The time the turn's limit is measured on; a test sets its own. */
     private java.util.function.LongSupplier clock = System::currentTimeMillis;
     /** Whether this turn ended on a repeated call, whatever the model answered then. */
@@ -2415,6 +2417,7 @@ public class ChatSession extends Interpreter {
     public void setStepLimit(int value) {
         if (value < 1) throw new IllegalArgumentException("stepLimit must be at least 1");
         this.stepLimit = value;
+        publishLimits();
     }
 
     /** @return minutes one turn may run, {@code 0} for no limit */
@@ -2424,6 +2427,20 @@ public class ChatSession extends Interpreter {
     public void setTimeLimitMinutes(int value) {
         if (value < 0) throw new IllegalArgumentException("timeLimitMinutes must not be negative");
         this.timeLimitMinutes = value;
+        publishLimits();
+    }
+
+    /** Gives the limits a board other threads read them from, and tells it the current ones. */
+    void attachLimitsBoard(com.scivicslab.pojoactor.core.ActorRef<ChatLimits> board) {
+        this.limitsBoard = board;
+        publishLimits();
+    }
+
+    private void publishLimits() {
+        var board = limitsBoard;
+        if (board == null) return;
+        int step = stepLimit, time = timeLimitMinutes;
+        board.tell(l -> l.set(step, time));
     }
 
     /** Lets a test say what time it is: the turn's time limit is measured on this clock. */
