@@ -68,9 +68,6 @@ public class CodexProvider implements LlmProvider {
     private final Path sessionFile;
     private final Path workingDir;
     private final CodexEventParser parser = new CodexEventParser();
-    private String model;
-    private String effort;
-    private String threadId;
     private final ConversationMcp mcp;
     private final List<String> commandPrefix;
     /**
@@ -93,10 +90,11 @@ public class CodexProvider implements LlmProvider {
         boolean cancelled;
         Process process;
         StringBuilder stderr = new StringBuilder();
-        /** The session's settings as the turn last told them; {@link #getCurrentModel} and the like read these. */
+        /** The session's settings: any thread writes and reads them by messages to the owner. */
         String model;
         String effort;
         String threadId;
+        String developerInstructions;
         /** The turn's image files, kept while its run goes on, also while it is parked on calls; the cancel closes them too. */
         PreparedImages heldImages;
         /** Counted up by each cancel: a run whose start began before a cancel sees it and is stopped. */
@@ -135,7 +133,6 @@ public class CodexProvider implements LlmProvider {
 
     private final StateOwner<CodexState> state = new StateOwner<>("codex-run", new CodexState());
 
-    private String developerInstructions;
     private boolean sawResult;
     /** The errors the run reported, shown when the turn ends unless the run is retried; the turn's own thread alone uses it. */
     private final List<String> runErrors = new ArrayList<>();
@@ -146,29 +143,19 @@ public class CodexProvider implements LlmProvider {
     /** For a test: run when the turn has counted the cancels so far. */
     Runnable startBegan;
 
-    private void putModel(String value) {
-        model = value;
-        publishSession();
-    }
+    // The session's settings are the owner's: a write from any thread (the conversation's /model path, the turn's own
+    // thread-id update) and a read from any thread (the model shown by a page, the command the turn builds) are messages.
+    private String model() { return state.ask(s -> s.model); }
 
-    private void putEffort(String value) {
-        effort = value;
-        publishSession();
-    }
+    private String effort() { return state.ask(s -> s.effort); }
 
-    private void putThreadId(String value) {
-        threadId = value;
-        publishSession();
-    }
+    private String threadId() { return state.ask(s -> s.threadId); }
 
-    private void publishSession() {
-        String m = model, e = effort, id = threadId;
-        state.tell(s -> {
-            s.model = m;
-            s.effort = e;
-            s.threadId = id;
-        });
-    }
+    private void putModel(String value) { state.run(s -> s.model = value); }
+
+    private void putEffort(String value) { state.run(s -> s.effort = value); }
+
+    private void putThreadId(String value) { state.run(s -> s.threadId = value); }
 
     /** For a test: whether a codex process is held. */
     boolean processAlive() {
@@ -262,7 +249,7 @@ public class CodexProvider implements LlmProvider {
     @Override
     public List<ModelEntry> getAvailableModels() {
         CodexModelCatalog.Snapshot snapshot = MODEL_CATALOG.snapshot();
-        if (model == null && snapshot.defaultModel() != null) {
+        if (model() == null && snapshot.defaultModel() != null) {
             putModel(snapshot.defaultModel());
         }
         return snapshot.models();
@@ -323,7 +310,7 @@ public class CodexProvider implements LlmProvider {
     /** The system message goes in {@code developer_instructions} on every run: it is not part of the history. */
     @Override
     public void setSystemMessage(String text) {
-        this.developerInstructions = text;
+        state.run(s -> s.developerInstructions = text);
     }
 
     private void answer(String callId, String text) {
@@ -355,8 +342,8 @@ public class CodexProvider implements LlmProvider {
         });
         if (startBegan != null) startBegan.run();
         turnStartedAt = System.nanoTime();
-        boolean mayRetrySession = threadId != null;
-        boolean mayRetryModel = model != null;
+        boolean mayRetrySession = threadId() != null;
+        boolean mayRetryModel = model() != null;
         closeImages();
         try {
             PreparedImages prepared = PreparedImages.from(ctx.imageDataUrls());
@@ -522,7 +509,7 @@ public class CodexProvider implements LlmProvider {
             errors.forEach(message -> emitter.accept(ChatEvent.error(message)));
         }
         long durationMs = (System.nanoTime() - turnStartedAt) / 1_000_000;
-        emitter.accept(ChatEvent.result(threadId, -1, durationMs, this.model, false));
+        emitter.accept(ChatEvent.result(threadId(), -1, durationMs, model(), false));
     }
 
     private void closeImages() {
@@ -596,18 +583,18 @@ public class CodexProvider implements LlmProvider {
     List<String> buildCommand(List<Path> images) {
         List<String> cmd = new ArrayList<>(commandPrefix);
         cmd.add("exec");
-        if (threadId != null) {
+        if (threadId() != null) {
             cmd.add("resume");
-            cmd.add(threadId);
+            cmd.add(threadId());
         }
         cmd.add("--json");
         cmd.add("--skip-git-repo-check");
         cmd.add("-c");
         cmd.add("sandbox_mode=\"" + SANDBOX_MODE + "\"");
-        if (model != null && !model.isBlank()) { cmd.add("-m"); cmd.add(model); }
-        if (effort != null) {
+        if (model() != null && !model().isBlank()) { cmd.add("-m"); cmd.add(model()); }
+        if (effort() != null) {
             cmd.add("-c");
-            cmd.add("model_reasoning_effort=\"" + effort + "\"");
+            cmd.add("model_reasoning_effort=\"" + effort() + "\"");
         }
         for (Path image : images) {
             cmd.add("-i");
@@ -624,7 +611,7 @@ public class CodexProvider implements LlmProvider {
             cmd.add("-c"); cmd.add(server + "default_tools_approval_mode=\"approve\"");
             cmd.add("-c"); cmd.add(server + "tool_timeout_sec=86400");
         }
-        String instructions = developerInstructions;
+        String instructions = state.ask(s -> s.developerInstructions);
         if (instructions != null && !instructions.isBlank()) {
             cmd.add("-c");
             cmd.add("developer_instructions=" + tomlString(instructions));
@@ -670,14 +657,14 @@ public class CodexProvider implements LlmProvider {
         return switch (command) {
             case "/model" -> {
                 if (!arg.isEmpty()) putModel(arg);
-                yield List.of(ChatEvent.info(arg.isEmpty() ? "Current model: " + shown(model) : "Model changed to: " + model));
+                yield List.of(ChatEvent.info(arg.isEmpty() ? "Current model: " + shown(model()) : "Model changed to: " + model()));
             }
             case "/effort" -> handleEffort(arg);
             case "/session" -> {
                 if (!arg.isEmpty()) saveSession(arg);
                 yield List.of(ChatEvent.info(arg.isEmpty()
-                        ? (threadId == null ? "No active session." : "Current session: " + threadId)
-                        : "Session set to: " + threadId));
+                        ? (threadId() == null ? "No active session." : "Current session: " + threadId())
+                        : "Session set to: " + threadId()));
             }
             case "/clear" -> {
                 cancel();
@@ -696,13 +683,13 @@ public class CodexProvider implements LlmProvider {
     }
 
     private List<ChatEvent> handleEffort(String arg) {
-        if (arg.isEmpty()) return List.of(ChatEvent.info("Current effort: " + shown(effort)));
+        if (arg.isEmpty()) return List.of(ChatEvent.info("Current effort: " + shown(effort())));
         String value = arg.toLowerCase(Locale.ROOT);
         if (!List.of("low", "medium", "high", "xhigh", "max").contains(value)) {
             return List.of(ChatEvent.error("Unknown effort level: " + arg));
         }
         putEffort(value);
-        return List.of(ChatEvent.info("Effort changed to: " + effort));
+        return List.of(ChatEvent.info("Effort changed to: " + effort()));
     }
 
     // ---- Session persistence ----
@@ -715,7 +702,7 @@ public class CodexProvider implements LlmProvider {
                 else if (line.startsWith("model=")) putModel(blankToNull(line.substring("model=".length()).trim()));
                 else if (line.startsWith("effort=")) putEffort(blankToNull(line.substring("effort=".length()).trim()));
             }
-            if (threadId != null) logger.info("Restored codex thread " + threadId + " from " + sessionFile);
+            if (threadId() != null) logger.info("Restored codex thread " + threadId() + " from " + sessionFile);
         } catch (Exception e) {
             logger.log(Level.WARNING, "Failed to read session file " + sessionFile, e);
         }
@@ -726,8 +713,8 @@ public class CodexProvider implements LlmProvider {
         putThreadId(id);
         try {
             Files.createDirectories(sessionFile.getParent());
-            Files.writeString(sessionFile, "sessionId=" + id + "\nmodel=" + value(model)
-                    + "\neffort=" + value(effort) + "\n");
+            Files.writeString(sessionFile, "sessionId=" + id + "\nmodel=" + value(model())
+                    + "\neffort=" + value(effort()) + "\n");
         } catch (Exception e) {
             logger.log(Level.WARNING, "Failed to write session file " + sessionFile, e);
         }
