@@ -157,7 +157,7 @@ public class ScriptedModelServer {
             <invoke name="set_collaborator">
             <parameter name="chatId">03</parameter>
             <parameter name="role">reviewer</parameter>
-            <parameter name="collaboratorChatId">01</parameter>
+            <parameter name="collaboratorChatId">project1/chat-01</parameter>
             <parameter name="node">b</parameter>
             <reason>a role played by a conversation of another chat-ui instance</reason>
             </invoke>
