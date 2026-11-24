@@ -131,8 +131,12 @@ public class McpServerCheck {
 
         String noHeader = mcp(base, null, "read", "{\"path\":\"mcp-e2e.txt\"}");
         System.out.println("tools/call without header: " + noHeader);
-        check(!noHeader.contains(CONTENT) && (noHeader.contains("\"isError\":true") || noHeader.contains("\"error\"")),
-                "tools/call without the header is an error", noHeader);
+        // The server refuses a call that names no conversation before it reaches a tool: a bare HTTP 400 (McpKeyCheck
+        // documents that as intended). A JSON-RPC error body, or an isError result, would be refusals too.
+        check(!noHeader.contains(CONTENT) && (noHeader.startsWith("400 ") || noHeader.startsWith("401 ")
+                        || noHeader.startsWith("403 ") || noHeader.contains("\"isError\":true")
+                        || noHeader.contains("\"error\"")),
+                "tools/call without the header is refused", noHeader);
         String driving = mcp(base, "project1/chat-01", "ask_chat", "{\"chatId\":\"02\",\"prompt\":\"hi\"}");
         System.out.println("tools/call ask_chat: " + driving);
         check(driving.contains("\"isError\":true") || driving.contains("\"error\""), "tools/call ask_chat is an error", driving);
