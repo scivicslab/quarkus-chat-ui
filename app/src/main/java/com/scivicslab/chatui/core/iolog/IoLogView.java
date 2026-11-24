@@ -461,6 +461,9 @@ public class IoLogView {
             java.util.regex.Pattern.compile("turn(\\d+)/step(\\d+)/(llm|tool)");
     private static final java.util.regex.Pattern CONVERSATION_LABEL =
             java.util.regex.Pattern.compile("turn(\\d+)/conversation");
+    /** The entry a turn writes when it starts: only its question ({@code turnN/question}). */
+    private static final java.util.regex.Pattern QUESTION_LABEL =
+            java.util.regex.Pattern.compile("turn(\\d+)/question");
     /** Any label a turn writes, whatever comes after the turn number. */
     private static final java.util.regex.Pattern IDS_LABEL =
             java.util.regex.Pattern.compile("turn(\\d+)/ids");
@@ -487,13 +490,31 @@ public class IoLogView {
             java.util.regex.Matcher m = ANSWER_META_LABEL.matcher(e.getLabel());
             if (m.matches()) metaByTurn.put(Integer.parseInt(m.group(1)), e.getMessage());
         }
-        List<Turn> turns = raw.stream()
+        List<LogEntry> conversationRows = raw.stream()
                 .filter(e -> e.getLabel() != null && CONVERSATION_LABEL.matcher(e.getLabel()).matches())
-                .sorted(Comparator.comparingInt(e -> turnNumberOf(e.getLabel())))
-                .map(e -> withRecordedFacts(parseConversationEntry(e.getMessage()), e,
-                        metaByTurn.get(turnNumberOf(e.getLabel()))))
-                .filter(t -> t != null)
-                .collect(Collectors.toList());
+                .toList();
+        // A turn that has its question entry but no conversation entry has not finished: it comes back with its
+        // question and no answer. When both exist the conversation entry is the turn, and the question entry is ignored.
+        java.util.Set<Integer> finished = new java.util.HashSet<>();
+        for (LogEntry e : conversationRows) finished.add(turnNumberOf(e.getLabel()));
+        Map<Integer, Turn> byTurn = new java.util.TreeMap<>();
+        for (LogEntry e : conversationRows) {
+            Turn t = withRecordedFacts(parseConversationEntry(e.getMessage()), e, metaByTurn.get(turnNumberOf(e.getLabel())));
+            if (t != null) byTurn.put(turnNumberOf(e.getLabel()), t);
+        }
+        for (LogEntry e : raw) {
+            if (e.getLabel() == null) continue;
+            java.util.regex.Matcher m = QUESTION_LABEL.matcher(e.getLabel());
+            if (!m.matches()) continue;
+            int turn = Integer.parseInt(m.group(1));
+            if (finished.contains(turn)) continue;
+            String question = parseQuestionEntry(e.getMessage());
+            if (question == null) continue;
+            Long at = e.getTimestamp() == null ? null
+                    : e.getTimestamp().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+            byTurn.put(turn, new Turn(question, null, null, at, null, null));
+        }
+        List<Turn> turns = new java.util.ArrayList<>(byTurn.values());
         return turns.size() <= maxTurns ? turns : turns.subList(turns.size() - maxTurns, turns.size());
     }
 
@@ -552,6 +573,16 @@ public class IoLogView {
         return highest;
     }
 
+    /**
+     * @param message the text of a {@code turnN/question} entry: the question marker, then the question
+     * @return the question, or {@code null} when the entry does not start with the marker
+     */
+    static String parseQuestionEntry(String message) {
+        if (message == null) return null;
+        String marker = "QUESTION:\n";
+        return message.startsWith(marker) ? message.substring(marker.length()) : null;
+    }
+
     /** @return the turn, or {@code null} when either marker is missing */
     static Turn parseConversationEntry(String message) {
         if (message == null) return null;
@@ -601,6 +632,17 @@ public class IoLogView {
                 questions.put(turn, questionTail(extractUserPrompt(between(msg,
                         "REQUEST:", "RESPONSE:", "REASONING:", "TOOL_CALLS:", "USAGE:"))));
             }
+        }
+        // A turn writes its question when it starts, so a turn still running, or cut off before its first step, is
+        // listed with it.
+        for (LogEntry e : ordered) {
+            java.util.regex.Matcher m = QUESTION_LABEL.matcher(nz(e.getLabel()));
+            if (!m.matches()) continue;
+            int turn = Integer.parseInt(m.group(1));
+            if (beforeTurn > 0 && turn >= beforeTurn) continue;
+            String question = parseQuestionEntry(nz(e.getMessage()));
+            if (question != null && !question.isBlank()) questions.put(turn, questionTail(question));
+            else questions.putIfAbsent(turn, "");
         }
         // The conversation row holds what the person actually asked, without the system prompt and
         // the tool descriptions the request carries. Preferred over the request wherever it exists:
@@ -695,6 +737,13 @@ public class IoLogView {
                         k -> extractUserPrompt(between(msg, "REQUEST:", "RESPONSE:", "REASONING:", "TOOL_CALLS:", "USAGE:")));
             }
             byTurn.computeIfAbsent(turn, k -> new java.util.ArrayList<>()).add(step);
+        }
+        // A turn whose steps never reached an llm entry keeps the question it was started with.
+        for (LogEntry e : ordered) {
+            java.util.regex.Matcher qm = QUESTION_LABEL.matcher(nz(e.getLabel()));
+            if (!qm.matches()) continue;
+            String asked = parseQuestionEntry(nz(e.getMessage()));
+            if (asked != null) userPrompts.putIfAbsent(Integer.parseInt(qm.group(1)), asked);
         }
         return byTurn.entrySet().stream()
                 .map(en -> {

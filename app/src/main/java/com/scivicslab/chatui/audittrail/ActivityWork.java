@@ -157,7 +157,8 @@ public class ActivityWork {
         StringBuilder material = new StringBuilder();
         for (IoLogView.Turn t : turns) {
             material.append("Q: ").append(clip(t.question())).append("\n")
-                    .append("A: ").append(clip(t.answer() != null ? t.answer() : "(error: " + t.error() + ")")).append("\n\n");
+                    .append("A: ").append(clip(t.answer() != null ? t.answer()
+                            : t.error() != null ? "(error: " + t.error() + ")" : "(no answer yet)")).append("\n\n");
         }
         String reply = ask(projectId, material.toString());
         return reply == null ? "" : reply.strip();
