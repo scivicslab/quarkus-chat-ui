@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.openaicompat;
 
+import com.scivicslab.chatui.core.provider.CancelScope;
 import com.scivicslab.chatui.agent.ContextBudget;
 import com.scivicslab.chatui.agent.ConversationToolCatalog;
 import com.scivicslab.chatui.agent.ToolCatalog;
@@ -40,8 +41,6 @@ public class OpenAiCompatProvider implements LlmProvider {
     // thread writes it (ModelBelongsToTheConversation_260906_oo01) — the same reason
     // ChatSession.busy is volatile (BusyStateReadableSnapshot_260828_oo01).
     private volatile String currentModel;
-    private volatile boolean cancelled;
-    private volatile Thread sendingThread;
     /** The client of chat-ui's MCP server for this conversation, or {@code null} when it has none (a test). */
     private final McpToolClient mcp;
     /** The tools the model is given, read again whenever the system message is set at a turn's start. */
@@ -212,6 +211,12 @@ public class OpenAiCompatProvider implements LlmProvider {
     /** {@inheritDoc} Runs it through chat-ui's MCP server, which records it to the I/O log. */
     @Override
     public String callTool(String name, String argumentsJson) {
+        return callTool(name, argumentsJson, CancelScope.NEVER);
+    }
+
+    /** {@inheritDoc} The call's HTTP request is ended by {@code scope} when the turn is cancelled. */
+    @Override
+    public String callTool(String name, String argumentsJson, CancelScope scope) {
         McpToolClient client = mcp;
         String tool = name;
         int at = name.indexOf(EXTERNAL_SEPARATOR);
@@ -220,7 +225,7 @@ public class OpenAiCompatProvider implements LlmProvider {
             tool = name.substring(at + EXTERNAL_SEPARATOR.length());
         }
         if (client == null) return "error: tool '" + name + "' cannot be run: this conversation has no MCP server";
-        McpToolClient.Result r = client.callTool(tool, argumentsJson);
+        McpToolClient.Result r = client.callTool(tool, argumentsJson, scope);
         return r.isError() && !r.text().startsWith("error: ") ? "error: " + r.text() : r.text();
     }
 
@@ -311,9 +316,6 @@ public class OpenAiCompatProvider implements LlmProvider {
 
     @Override
     public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
-        cancelled = false;
-        sendingThread = Thread.currentThread();
-        try {
         if (model != null && !model.isBlank()) currentModel = model;
 
         // If model is still a placeholder, try to resolve it from the server
@@ -345,7 +347,7 @@ public class OpenAiCompatProvider implements LlmProvider {
         double correction = 1.0;
         int serverWindow = -1;
         while (retries <= MAX_TRIM_RETRIES) {
-            if (cancelled) return;
+            if (ctx.cancel().isCancelled()) return;
             List<ChatMessage> snapshot = List.copyOf(history);
             final int currentRetry = retries;
             int estimated = estimateRequestTokens(currentModel, snapshot, tools);
@@ -419,7 +421,7 @@ public class OpenAiCompatProvider implements LlmProvider {
                         @Override public void onError(String message) {
                             emitter.accept(ChatEvent.error(message));
                         }
-                    }, ctx.onRequestBody(), ctx.noToolCalls());
+                    }, ctx.onRequestBody(), ctx.noToolCalls(), ctx.cancel());
                 return;
             } catch (ContextLengthExceededException e) {
                 retries++;
@@ -459,9 +461,6 @@ public class OpenAiCompatProvider implements LlmProvider {
                     emitter.accept(ChatEvent.thinking("Context too long, shrinking the reply budget..."));
                 }
             }
-        }
-        } finally {
-            sendingThread = null;
         }
     }
 
@@ -810,9 +809,8 @@ public class OpenAiCompatProvider implements LlmProvider {
 
     @Override
     public void cancel() {
-        cancelled = true;
-        Thread t = sendingThread;
-        if (t != null) t.interrupt();
+        // The turn's cancel scope ends this provider's request and tool call: each registers what closes it there,
+        // so there is nothing to interrupt here.
     }
 
     private void trimHistory() {

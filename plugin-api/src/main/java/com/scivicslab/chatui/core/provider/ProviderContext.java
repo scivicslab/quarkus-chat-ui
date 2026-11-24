@@ -36,12 +36,23 @@ public record ProviderContext(
      * {@code tool_choice: "none"}, so the model cannot call a tool. The agent loop sets it for the one request it makes
      * after a call repeated itself ({@code ending: repeated-call}).
      */
-    boolean noToolCalls
+    boolean noToolCalls,
+    /**
+     * What the turn can cancel while this request runs: a provider that blocks on a connection registers what closes it,
+     * so a cancel ends the request at once. {@link CancelScope#NEVER} when the caller has no turn to cancel.
+     */
+    CancelScope cancel
 ) {
+    /** Constructor for callers that have no turn to cancel. */
+    public ProviderContext(String apiKey, List<String> imageDataUrls, boolean noThink, Runnable onActivity,
+                           Consumer<String> onRequestBody, boolean handlesCutOff, boolean noToolCalls) {
+        this(apiKey, imageDataUrls, noThink, onActivity, onRequestBody, handlesCutOff, noToolCalls, CancelScope.NEVER);
+    }
+
     /** Constructor for callers that do not ask for a text-only answer. */
     public ProviderContext(String apiKey, List<String> imageDataUrls, boolean noThink, Runnable onActivity,
                            Consumer<String> onRequestBody, boolean handlesCutOff) {
-        this(apiKey, imageDataUrls, noThink, onActivity, onRequestBody, handlesCutOff, false);
+        this(apiKey, imageDataUrls, noThink, onActivity, onRequestBody, handlesCutOff, false, CancelScope.NEVER);
     }
 
     /** Constructor for callers that want the request body but not cut-off handling. */
@@ -53,6 +64,12 @@ public record ProviderContext(
     /** Constructor for callers that do not need the request body. */
     public ProviderContext(String apiKey, List<String> imageDataUrls, boolean noThink, Runnable onActivity) {
         this(apiKey, imageDataUrls, noThink, onActivity, null);
+    }
+
+    /** The same request, ended by {@code scope} when the turn is cancelled. */
+    public ProviderContext withCancel(CancelScope scope) {
+        return new ProviderContext(apiKey, imageDataUrls, noThink, onActivity, onRequestBody, handlesCutOff,
+                noToolCalls, scope);
     }
 
     /** Convenience constructor for simple single-turn requests with no images. */

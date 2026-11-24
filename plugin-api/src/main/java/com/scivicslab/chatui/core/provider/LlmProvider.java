@@ -215,6 +215,12 @@ public interface LlmProvider {
      */
     default String callTool(String name, String argumentsJson) { return null; }
 
+    /**
+     * As {@link #callTool(String, String)}, ended by {@code scope} when the turn is cancelled: a provider whose call
+     * blocks on a connection registers what closes it, so the call returns at once with an error result.
+     */
+    default String callTool(String name, String argumentsJson, CancelScope scope) { return callTool(name, argumentsJson); }
+
     // ---- Calls a harness CLI makes over MCP, parked into the conversation's agent loop ----
 
     /**

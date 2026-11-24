@@ -1,6 +1,6 @@
 package com.scivicslab.chatui.openaicompat;
 
-import com.scivicslab.pojoactor.core.ManagedThreadPool;
+import com.scivicslab.chatui.core.provider.CancelScope;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -8,6 +8,7 @@ import org.json.JSONObject;
 
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.util.concurrent.CompletableFuture;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
@@ -49,9 +50,8 @@ public final class McpToolClient {
     // The JDK HttpClient runs its own short callbacks (TLS tasks, completions) on an executor; without one it
     // makes a pool of real threads of its own. They run on the real threads of one ManagedThreadPool that all
     // clients share (a call itself blocks the caller, not these). Threads are made on first use.
-    private static final ManagedThreadPool HTTP_CALLBACKS = new ManagedThreadPool(4);
     private final HttpClient http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
-            .executor(HTTP_CALLBACKS)
+            .executor(com.scivicslab.chatui.openaicompat.client.HttpCallbacks.POOL)
             .connectTimeout(Duration.ofSeconds(5)).build();
     private int nextId = 1;
 
@@ -115,6 +115,15 @@ public final class McpToolClient {
      *         text says why
      */
     public Result callTool(String name, String argumentsJson) {
+        return callTool(name, argumentsJson, CancelScope.NEVER);
+    }
+
+    /**
+     * As {@link #callTool(String, String)}, ended by {@code scope} when the turn is cancelled: the HTTP request itself
+     * is cancelled (the connection closes) and the call returns an error result at once. A scope that is already
+     * cancelled sends nothing.
+     */
+    public Result callTool(String name, String argumentsJson, CancelScope scope) {
         JSONObject arguments;
         try {
             arguments = new JSONObject(argumentsJson == null || argumentsJson.isBlank() ? "{}" : argumentsJson);
@@ -123,7 +132,7 @@ public final class McpToolClient {
         }
         try {
             JSONObject result = request("tools/call", name,
-                    new JSONObject().put("name", name).put("arguments", arguments), CALL_TIMEOUT);
+                    new JSONObject().put("name", name).put("arguments", arguments), CALL_TIMEOUT, scope);
             StringBuilder text = new StringBuilder();
             JSONArray content = result.optJSONArray("content");
             for (int i = 0; content != null && i < content.length(); i++) {
@@ -141,6 +150,10 @@ public final class McpToolClient {
 
     /** Sends one stateless request and returns its {@code result}. */
     private JSONObject request(String method, String name, JSONObject params, Duration timeout) {
+        return request(method, name, params, timeout, CancelScope.NEVER);
+    }
+
+    private JSONObject request(String method, String name, JSONObject params, Duration timeout, CancelScope scope) {
         params.put("_meta", new JSONObject()
                 .put("io.modelcontextprotocol/protocolVersion", PROTOCOL_VERSION)
                 .put("io.modelcontextprotocol/clientCapabilities", new JSONObject()));
@@ -155,14 +168,25 @@ public final class McpToolClient {
         if (conversation != null) b.header(CONVERSATION_HEADER, conversation);
         if (key != null) b.header("Authorization", "Bearer " + key);
         HttpResponse<String> response;
+        // What the turn's cancel completes; the request is cancelled from it, which closes the connection.
+        CompletableFuture<Void> stop = new CompletableFuture<>();
+        CancelScope.Registration registration = scope.register(() -> stop.complete(null));
+        if (registration == null) throw new McpException(method + " to " + endpoint + " was cancelled");
         try {
-            response = http.send(b.POST(HttpRequest.BodyPublishers.ofString(body.toString())).build(),
-                    HttpResponse.BodyHandlers.ofString());
+            CompletableFuture<HttpResponse<String>> call =
+                    http.sendAsync(b.POST(HttpRequest.BodyPublishers.ofString(body.toString())).build(),
+                            HttpResponse.BodyHandlers.ofString());
+            stop.thenRun(() -> call.cancel(true));
+            response = call.get();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new McpException(method + " to " + endpoint + " was interrupted");
         } catch (Exception e) {
-            throw new McpException(method + " to " + endpoint + " failed: " + e.getMessage());
+            if (stop.isDone()) throw new McpException(method + " to " + endpoint + " was cancelled");
+            Throwable cause = e instanceof java.util.concurrent.ExecutionException && e.getCause() != null ? e.getCause() : e;
+            throw new McpException(method + " to " + endpoint + " failed: " + cause.getMessage());
+        } finally {
+            registration.close();
         }
         JSONObject message = messageOf(response.body());
         if (message == null) {

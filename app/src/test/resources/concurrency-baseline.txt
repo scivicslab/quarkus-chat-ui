@@ -10,7 +10,7 @@ app/src/main/java/com/scivicslab/chatui/audittrail/StallDiagnostics.java synchro
 app/src/main/java/com/scivicslab/chatui/bench/DocRetrievalBenchmark.java sleep 1
 app/src/main/java/com/scivicslab/chatui/core/actor/ActorNotes.java concurrent-class 1
 app/src/main/java/com/scivicslab/chatui/core/actor/ChatSession.java concurrent-class 6
-app/src/main/java/com/scivicslab/chatui/core/actor/ChatSession.java volatile 16
+app/src/main/java/com/scivicslab/chatui/core/actor/ChatSession.java volatile 15
 app/src/main/java/com/scivicslab/chatui/core/actor/ChatUiActorSystem.java concurrent-class 10
 app/src/main/java/com/scivicslab/chatui/core/actor/ChatUiActorSystem.java synchronized 11
 app/src/main/java/com/scivicslab/chatui/core/actor/ConversationToolRunner.java synchronized 1
@@ -23,7 +23,7 @@ app/src/main/java/com/scivicslab/chatui/logging/LogTap.java synchronized 2
 app/src/main/java/com/scivicslab/chatui/logging/RecentEntriesAccumulator.java synchronized 5
 app/src/main/java/com/scivicslab/chatui/openaicompat/McpToolClient.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java concurrent-class 1
-app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java volatile 4
+app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java volatile 2
 app/src/main/java/com/scivicslab/chatui/openaicompat/client/OpenAiCompatClient.java volatile 3
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/ClaudeCodeProvider.java concurrent-class 3
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CliProcess.java concurrent-class 4

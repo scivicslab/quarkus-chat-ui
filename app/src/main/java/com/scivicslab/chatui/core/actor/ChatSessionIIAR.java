@@ -239,6 +239,7 @@ public class ChatSessionIIAR extends InterpreterIIAR {
     @Override
     public void close() {
         limits.close();
+        chatSession().closeCancelScope();
         super.close();
     }
 

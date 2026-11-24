@@ -1,11 +1,13 @@
 package com.scivicslab.chatui.openaicompat.client;
 
+import com.scivicslab.chatui.core.provider.CancelScope;
 import com.scivicslab.chatui.core.rest.TokenUsage;
 import com.scivicslab.chatui.openaicompat.ToolDefinition;
 
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.util.concurrent.CompletableFuture;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
@@ -101,7 +103,7 @@ public class OpenAiCompatClient {
      */
     public OpenAiCompatClient(String baseUrl) {
         this.baseUrl = baseUrl;
-        this.httpClient = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
+        this.httpClient = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).executor(HttpCallbacks.POOL).build();
     }
 
     /**
@@ -260,12 +262,32 @@ public class OpenAiCompatClient {
     public String sendPrompt(String model, List<ChatMessage> history, boolean noThink,
                              int maxTokens, List<ToolDefinition> tools, StreamCallback callback,
                              java.util.function.Consumer<String> requestBodyListener, boolean noToolCalls) {
+        return sendPrompt(model, history, noThink, maxTokens, tools, callback, requestBodyListener, noToolCalls,
+                CancelScope.NEVER);
+    }
+
+    /**
+     * As above, ended by {@code scope} when the turn is cancelled: the request registers what closes it, so a cancel
+     * closes the request itself (the connection to the server closes, and the server stops generating), whether it
+     * is still waiting for the response headers or is reading the stream. A scope that is already cancelled sends nothing.
+     */
+    public String sendPrompt(String model, List<ChatMessage> history, boolean noThink,
+                             int maxTokens, List<ToolDefinition> tools, StreamCallback callback,
+                             java.util.function.Consumer<String> requestBodyListener, boolean noToolCalls,
+                             CancelScope scope) {
         long startTime = System.currentTimeMillis();
+        // What the turn's cancel completes; the request is ended from it, wherever the request is.
+        CompletableFuture<Void> stop = new CompletableFuture<>();
+        CancelScope.Registration registration = scope.register(() -> stop.complete(null));
+        if (registration == null) {
+            callback.onError("Request cancelled");
+            return null;
+        }
         try {
             String requestBody = buildRequestBody(model, history, noThink, maxTokens, true,
                     tools, temperature, noToolCalls);
             if (requestBodyListener != null) requestBodyListener.accept(requestBody);
-            HttpResponse<Stream<String>> response = sendWithRetry(requestBody);
+            HttpResponse<Stream<String>> response = sendWithRetry(requestBody, stop);
 
             if (response.statusCode() == 400) {
                 StringBuilder errorBody = new StringBuilder();
@@ -288,8 +310,8 @@ public class OpenAiCompatClient {
             String finishReason = null;
             TokenUsage usage = null;
             var iterator = response.body().iterator();
-            while (iterator.hasNext()) {
-                if (Thread.currentThread().isInterrupted()) { interrupted = true; break; }
+            while (hasNextLine(iterator, stop)) {
+                if (stop.isDone()) { interrupted = true; break; }
                 String line = iterator.next();
                 TokenUsage chunkUsage = parseSseUsage(line);
                 if (chunkUsage != null) usage = chunkUsage;
@@ -311,7 +333,8 @@ public class OpenAiCompatClient {
                 toolCalls.add(delta.toolCalls());
                 if (delta.finishReason() != null) finishReason = delta.finishReason();
             }
-            if (interrupted) { callback.onError("Request cancelled"); return null; }
+            // A stream closed by a cancel can end as a stream that simply has no more lines.
+            if (interrupted || stop.isDone()) { callback.onError("Request cancelled"); return null; }
             if (!toolCalls.isEmpty()) callback.onToolCalls(toolCalls.calls());
             if (usage != null) callback.onUsage(usage);
             callback.onComplete(System.currentTimeMillis() - startTime, finishReason);
@@ -322,6 +345,10 @@ public class OpenAiCompatClient {
             callback.onError("Request cancelled");
             return null;
         } catch (java.io.UncheckedIOException e) {
+            if (stop.isDone()) {
+                callback.onError("Request cancelled");
+                return null;
+            }
             if (e.getCause() != null && e.getCause().getCause() instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
                 callback.onError("Request cancelled");
@@ -334,15 +361,36 @@ public class OpenAiCompatClient {
         } catch (ContextLengthExceededException e) {
             throw e;
         } catch (Exception e) {
+            if (stop.isDone()) {
+                callback.onError("Request cancelled");
+                return null;
+            }
             logger.log(Level.WARNING, "Request failed", e);
             String detail = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             if (isContextLengthError(detail)) throw new ContextLengthExceededException(detail);
             callback.onError("Error (" + baseUrl + "): " + detail);
             return null;
+        } finally {
+            registration.close();
         }
     }
 
-    private HttpResponse<Stream<String>> sendWithRetry(String requestBody)
+    /** Whether the stream has another line; a stream closed by a cancel has none. */
+    private static boolean hasNextLine(java.util.Iterator<String> iterator, CompletableFuture<Void> stop) {
+        try {
+            return iterator.hasNext();
+        } catch (java.io.UncheckedIOException | IllegalStateException e) {
+            if (stop.isDone()) return false;
+            throw e;
+        }
+    }
+
+    /**
+     * Sends the request and waits for its response headers, ending the request when {@code stop} completes: while it
+     * waits, the request is cancelled (the connection closes); once the response is there, its body stream is closed,
+     * which cancels the rest of the transfer and closes the connection.
+     */
+    private HttpResponse<Stream<String>> sendWithRetry(String requestBody, CompletableFuture<Void> stop)
             throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/v1/chat/completions"))
@@ -350,15 +398,33 @@ public class OpenAiCompatClient {
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                 .build();
         try {
-            return httpClient.send(request, HttpResponse.BodyHandlers.ofLines());
+            return sendOnce(httpClient, request, stop);
         } catch (IOException e) {
             String msg = e.getMessage();
-            if (msg != null && (msg.contains("Connection reset") || msg.contains("received no bytes"))) {
+            if (!stop.isDone() && msg != null && (msg.contains("Connection reset") || msg.contains("received no bytes"))) {
                 logger.info("Connection reset, retrying");
-                return HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()
-                        .send(request, HttpResponse.BodyHandlers.ofLines());
+                return sendOnce(HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+                        .executor(HttpCallbacks.POOL).build(), request, stop);
             }
             throw e;
+        }
+    }
+
+    private static HttpResponse<Stream<String>> sendOnce(HttpClient client, HttpRequest request,
+                                                         CompletableFuture<Void> stop)
+            throws IOException, InterruptedException {
+        CompletableFuture<HttpResponse<Stream<String>>> call =
+                client.sendAsync(request, HttpResponse.BodyHandlers.ofLines());
+        stop.thenRun(() -> {
+            call.cancel(true);
+            call.thenAccept(response -> response.body().close());
+        });
+        try {
+            return call.get();
+        } catch (java.util.concurrent.ExecutionException e) {
+            if (e.getCause() instanceof IOException io) throw io;
+            if (e.getCause() instanceof RuntimeException re) throw re;
+            throw new IOException(e.getCause());
         }
     }
 

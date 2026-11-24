@@ -512,7 +512,8 @@ public class ChatSession extends Interpreter {
     private List<ToolCall> pendingCalls;
     private String finalAnswer;
     private volatile int stepCount;
-    private volatile boolean cancelled;
+    /** The turn's cancel state and what ends its in-flight model requests and tool calls; one actor owns it. */
+    private final TurnCancel cancelScope = new TurnCancel("turn-cancel");
 
     // ---- Babysitter loop (BabysitterLoopWorkflowShape_260828_oo01, made phase-agnostic by
     // GenericBabysitterPhases_260829_oo01) — per-turn, reset in start() ----
@@ -1007,7 +1008,7 @@ public class ChatSession extends Interpreter {
         this.askCount = 0;
         this.turnOriginal = null;
         this.turnAnswer = null;
-        this.cancelled = false;
+        cancelScope.begin();
         this.turnError = null;
         this.turnTranscript.setLength(0);
         this.pauseRequested = false;
@@ -1037,7 +1038,7 @@ public class ChatSession extends Interpreter {
 
                 Runnable heartbeat = () -> {};
 
-                ProviderContext ctx = new ProviderContext(snapApiKey, List.of(), noThink, heartbeat);
+                ProviderContext ctx = new ProviderContext(snapApiKey, List.of(), noThink, heartbeat).withCancel(cancelScope);
 
                 // Wrap emitter to intercept assistant content for history and optional result capture
                 StringBuilder assistantBuf = new StringBuilder();
@@ -1138,7 +1139,7 @@ public class ChatSession extends Interpreter {
     /** Why a turn that left no answer has none: what its asker is told ({@code TurnWithoutAnAnswerTellsTheAsker_261119_oo01}). */
     private String noAnswerReason() {
         if (turnAnswer != null && turnAnswer.ending() != null) return turnAnswer.ending();
-        if (cancelled) return "its turn was cancelled";
+        if (cancelScope.isCancelled()) return "its turn was cancelled";
         if (turnError != null) return "its turn failed: " + turnError;
         return "its turn ended without an answer";
     }
@@ -1334,7 +1335,7 @@ public class ChatSession extends Interpreter {
         this.stepWarningGiven = false;
         this.repeatedCallHit = false;
         this.personQuestion = null;
-        this.cancelled = false;
+        cancelScope.begin();
         this.constructedPrompts.clear();
         this.cutOffPending = false;
         this.cutOffRun = 0;
@@ -1676,7 +1677,7 @@ public class ChatSession extends Interpreter {
      * @return {@link ActionResult} with {@code success=true} if a tool call was found
      */
     public ActionResult stepExpectingAction() {
-        if (cancelled) {
+        if (cancelScope.isCancelled()) {
             finalAnswer = null;
             return new ActionResult(false, "cancelled");
         }
@@ -1720,7 +1721,7 @@ public class ChatSession extends Interpreter {
         // and no tool call. That is not an empty stop to retry: the retry below would send the same
         // prompt again, so the Cancel the human just pressed would restart the turn instead of
         // ending it.
-        if (cancelled) {
+        if (cancelScope.isCancelled()) {
             finalAnswer = null;
             return new ActionResult(false, "cancelled");
         }
@@ -1756,7 +1757,7 @@ public class ChatSession extends Interpreter {
 
         // A Cancel that landed during the retry call ends the turn too, and a tool call the model
         // had already asked for is not run.
-        if (cancelled) {
+        if (cancelScope.isCancelled()) {
             finalAnswer = null;
             return new ActionResult(false, "cancelled");
         }
@@ -1950,7 +1951,7 @@ public class ChatSession extends Interpreter {
         // (RequestMessagesControl_261018_oo01); a provider with no request body leaves it null.
         java.util.concurrent.atomic.AtomicReference<String> sentBody = new java.util.concurrent.atomic.AtomicReference<>();
         ProviderContext ctx = new ProviderContext(apiKey, stepImages, turnNoThink, () -> {}, sentBody::set, true,
-                finalRequest != FinalRequest.NONE);
+                finalRequest != FinalRequest.NONE).withCancel(cancelScope);
         boolean[] cutOff = {false};
         StringBuilder assistantBuf = new StringBuilder();
         // The reasoning is kept for the record, not for the answer: it goes to the I/O log's
@@ -2381,7 +2382,7 @@ public class ChatSession extends Interpreter {
      */
     public ActionResult timeLimitReached() {
         if (!provider.takesStepBudget() || timeLimitMinutes <= 0) return new ActionResult(false, "no time limit");
-        if (finalRequest != FinalRequest.NONE || cancelled || pauseRequested) return new ActionResult(false, "not now");
+        if (finalRequest != FinalRequest.NONE || cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "not now");
         long limitMs = timeLimitMinutes * 60_000L;
         if (clock.getAsLong() - turnStartedAt < limitMs) return new ActionResult(false, "within the time limit");
         askForAnAnswerInText(FinalRequest.TIME_LIMIT,
@@ -2395,7 +2396,7 @@ public class ChatSession extends Interpreter {
      */
     public ActionResult stepBudgetWarning() {
         if (!provider.takesStepBudget() || stepWarningGiven || finalRequest != FinalRequest.NONE
-                || cancelled || pauseRequested) {
+                || cancelScope.isCancelled() || pauseRequested) {
             return new ActionResult(false, "no warning to give");
         }
         int max = stepLimit;
@@ -2430,6 +2431,11 @@ public class ChatSession extends Interpreter {
         publishLimits();
     }
 
+    /** Stops the cancel state's owner with the conversation. */
+    void closeCancelScope() {
+        cancelScope.close();
+    }
+
     /** Gives the limits a board other threads read them from, and tells it the current ones. */
     void attachLimitsBoard(com.scivicslab.pojoactor.core.ActorRef<ChatLimits> board) {
         this.limitsBoard = board;
@@ -2456,7 +2462,7 @@ public class ChatSession extends Interpreter {
      */
     public ActionResult repeatedCallReached() {
         if (finalRequest != FinalRequest.NONE) return new ActionResult(false, "already asked for an answer in text");
-        if (cancelled || pauseRequested) return new ActionResult(false, "paused or cancelled");
+        if (cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "paused or cancelled");
         // A CLI harness (Claude Code, Codex) runs its own tool loop and takes no tool choice; it is left alone.
         if (provider.parksToolCalls()) return new ActionResult(false, "the provider's CLI runs the tool loop");
         if (!repeatedCalls.repeated()) return new ActionResult(false, "no repeated call");
@@ -2612,7 +2618,7 @@ public class ChatSession extends Interpreter {
                 } else if (byDefinition() && !provider.parksToolCalls() && !drivesConversation(tc.name())
                         && !(summarizePages && returnsPages(tc.name()))) {
                     turnToolCalls++;
-                    fullObservation = providerRef().ask(p -> p.callTool(tc.name(), tc.argumentsJson()),
+                    fullObservation = providerRef().ask(p -> p.callTool(tc.name(), tc.argumentsJson(), cancelScope),
                             system.getManagedThreadPool()).get();
                     if (fullObservation == null) fullObservation = "error: the provider runs no tools";
                     // An external MCP server does not write this I/O log (ExternalMcpServersOfAConversation_261120_oo01).
@@ -2726,7 +2732,7 @@ public class ChatSession extends Interpreter {
     public ActionResult finish() {
         // For an agent loop without the step: the reply this turn began with is settled before the turn ends.
         decideReplyAtTurnEnd();
-        if (!cancelled && finalAnswer == null && turnError != null) {
+        if (!cancelScope.isCancelled() && finalAnswer == null && turnError != null) {
             // A failed turn (TurnErrorInConversation_260913_oo01): the error was relayed live as it
             // happened; here it becomes part of the record. Not an assistant answer — the provider
             // never gets it back as something the model said — and no empty answer bubble.
@@ -2740,11 +2746,11 @@ public class ChatSession extends Interpreter {
                     System.currentTimeMillis() - turnStartedAt, provider.getCurrentModel(), false)
                     .withTurn(turnId(), turnRequestId));
         }
-        if (!cancelled && finalAnswer != null && answerBeforeDecision != null && !answerBeforeDecision.isBlank()) {
+        if (!cancelScope.isCancelled() && finalAnswer != null && answerBeforeDecision != null && !answerBeforeDecision.isBlank()) {
             finalAnswer = answerBeforeDecision + "\n\n" + finalAnswer;
         }
         answerBeforeDecision = null;
-        if (!cancelled && finalAnswer != null && finalAnswer.isBlank()) {
+        if (!cancelScope.isCancelled() && finalAnswer != null && finalAnswer.isBlank()) {
             // Nothing written, even after the retry: there is no answer to give. The asker is told so when the turn
             // closes, rather than sent an empty reply that reads as answered (TurnWithoutAnAnswerTellsTheAsker_261119_oo01).
             finalAnswer = null;
@@ -2753,7 +2759,7 @@ public class ChatSession extends Interpreter {
                     System.currentTimeMillis() - turnStartedAt, provider.getCurrentModel(), false)
                     .withTurn(turnId(), turnRequestId));
         }
-        if (!cancelled && finalAnswer != null) {
+        if (!cancelScope.isCancelled() && finalAnswer != null) {
             String answer = finalAnswer;
             long answeredIn = System.currentTimeMillis() - turnStartedAt;
             recordHistory("assistant", answer, null, provider.getCurrentModel(), answeredIn);
@@ -2802,7 +2808,7 @@ public class ChatSession extends Interpreter {
                 // answer of its own: the provider collapses the runs of identical calls it left in the history,
                 // so that the next turn does not imitate them.
                 boolean endedWithoutAnswer = personQuestion == null
-                        && (cancelled || finalAnswer == null || stepLimitHit || timeLimitHit || repeatedCallHit);
+                        && (cancelScope.isCancelled() || finalAnswer == null || stepLimitHit || timeLimitHit || repeatedCallHit);
                 providerRef().tell(p -> p.collapseTurn(question, finalAnswer, endedWithoutAnswer));
             }
         } catch (Exception e) {
@@ -2989,7 +2995,7 @@ public class ChatSession extends Interpreter {
      */
     private String callModelOnce(String prompt, boolean noThink) throws Exception {
         StringBuilder buf = new StringBuilder();
-        ProviderContext ctx = new ProviderContext(apiKey, List.of(), noThink, () -> {});
+        ProviderContext ctx = new ProviderContext(apiKey, List.of(), noThink, () -> {}).withCancel(cancelScope);
         providerRef().ask(p -> {
             Consumer<ChatEvent> wrapped = event -> {
                 if ("delta".equals(event.type()) && event.content() != null) {
@@ -3093,7 +3099,7 @@ public class ChatSession extends Interpreter {
 
     private void decideReminderNow() throws Exception {
         if (!reminderDecisionEnabled) return;
-        if (cancelled || pauseRequested || turnError != null || finalAnswer == null || finalAnswer.isBlank()) {
+        if (cancelScope.isCancelled() || pauseRequested || turnError != null || finalAnswer == null || finalAnswer.isBlank()) {
             noteReminderDecision("SKIPPED | the turn has no final answer", null, null);
             return;
         }
@@ -3398,7 +3404,7 @@ public class ChatSession extends Interpreter {
     public ActionResult continueAfterCutOff(String maxInARow) {
         if (!cutOffPending) return new ActionResult(false, "not cut off");
         cutOffPending = false;
-        if (cancelled || pauseRequested) return new ActionResult(false, "paused or cancelled");
+        if (cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "paused or cancelled");
         int max = parsePositiveOr(maxInARow, DEFAULT_MAX_CUT_OFFS_IN_A_ROW);
         if (cutOffRun > max) {
             String kept = cutOffText.toString().strip();
@@ -3438,7 +3444,7 @@ public class ChatSession extends Interpreter {
     public ActionResult repairBrokenCall(String maxInARow) {
         if (!repairPending) return new ActionResult(false, "no broken tool call");
         repairPending = false;
-        if (cancelled || pauseRequested) return new ActionResult(false, "paused or cancelled");
+        if (cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "paused or cancelled");
         int max = parsePositiveOr(maxInARow, DEFAULT_MAX_REPAIRS_IN_A_ROW);
         if (repairRun > max) {
             String kept = repairText == null ? "" : repairText.strip();
@@ -3497,7 +3503,7 @@ public class ChatSession extends Interpreter {
      */
     public ActionResult replyLeftUndecided() {
         // A turn being paused or cancelled is not ending: the decision, if still owed, is asked for when it resumes.
-        if (cancelled || pauseRequested) return new ActionResult(false, "paused or cancelled");
+        if (cancelScope.isCancelled() || pauseRequested) return new ActionResult(false, "paused or cancelled");
         // Asking the person is how this turn ends; the decision on the reply follows the person's answer.
         if (personQuestion != null) return new ActionResult(false, "asked the person");
         // A turn that ended on a repeated call is not asked for more: the decision is left open at its end.
@@ -3562,7 +3568,7 @@ public class ChatSession extends Interpreter {
                 : stepLimitHit ? "this turn reached its step limit"
                 : timeLimitHit ? "this turn reached its time limit"
                 : repeatedCallHit ? "this turn ended on a repeated call"
-                : cancelled ? "this turn was cancelled"
+                : cancelScope.isCancelled() ? "this turn was cancelled"
                 : finalAnswer == null && turnError != null ? "this turn failed: " + turnError
                 : com.scivicslab.chatui.agent.ChatInspection.ENDED_ASKED.equals(undecidedEnding)
                         || com.scivicslab.chatui.agent.ChatInspection.ENDED_STEP_LIMIT.equals(undecidedEnding)
@@ -3821,7 +3827,7 @@ public class ChatSession extends Interpreter {
      * provider call this unblocks returns.</p>
      */
     public void cancel() {
-        cancelled = true;
+        cancelScope.cancel();
         if (providerName == null) return;
         ActorRef<LlmProvider> providerRef = providerRef();
         if (providerRef != null) providerRef.tellNow(LlmProvider::cancel);
