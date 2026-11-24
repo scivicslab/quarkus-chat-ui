@@ -230,6 +230,12 @@ public class ChatSessionIIAR extends InterpreterIIAR {
     /** Whether this conversation asks its model to skip the thinking phase, read directly. */
     public boolean isNoThinkDirect() { return chatSession().isNoThink(); }
 
+    /** @return the steps one turn of this conversation may make */
+    public int getStepLimitDirect() { return chatSession().getStepLimit(); }
+
+    /** @return the minutes one turn of this conversation may run, {@code 0} for no limit */
+    public int getTimeLimitMinutesDirect() { return chatSession().getTimeLimitMinutes(); }
+
     /** How hard this conversation's provider was told to work, read directly; null when it has no such setting. */
     public String getEffortDirect() { return chatSession().getEffort(); }
 
@@ -455,6 +461,42 @@ public class ChatSessionIIAR extends InterpreterIIAR {
     @Action("askedThePerson")
     public ActionResult askedThePersonAction(String arg) {
         return chatSession().askedThePerson();
+    }
+
+    /**
+     * The time-limit transition's guard: succeeds once, when the turn has run for its conversation's time limit, and
+     * queues the note that asks the model for an answer in text.
+     *
+     * @param arg unused
+     * @return successful when the note was queued
+     */
+    @Action("timeLimitReached")
+    public ActionResult timeLimitReachedAction(String arg) {
+        return chatSession().timeLimitReached();
+    }
+
+    /**
+     * The step-warning transition's guard: succeeds once per turn, when 80% of the steps are used, and queues a note
+     * saying so.
+     *
+     * @param arg unused
+     * @return successful when the note was queued
+     */
+    @Action("stepBudgetWarning")
+    public ActionResult stepBudgetWarningAction(String arg) {
+        return chatSession().stepBudgetWarning();
+    }
+
+    /**
+     * The repeated-call transition's guard: succeeds once, when the turn's last three tool calls were the same call
+     * with the same result, and queues the note that asks the model for an answer in text.
+     *
+     * @param arg unused
+     * @return successful when the note was queued
+     */
+    @Action("repeatedCallReached")
+    public ActionResult repeatedCallReachedAction(String arg) {
+        return chatSession().repeatedCallReached();
     }
 
     /**

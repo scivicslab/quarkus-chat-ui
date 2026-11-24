@@ -713,6 +713,8 @@ public class ChatResource {
         status.put("provider", chatSessionIIAR.getProviderIdDirect());
         status.put("tools", chatSessionIIAR.getToolSetDirect());
         status.put("noThink", chatSessionIIAR.isNoThinkDirect());
+        status.put("stepLimit", chatSessionIIAR.getStepLimitDirect());
+        status.put("timeLimitMinutes", chatSessionIIAR.getTimeLimitMinutesDirect());
         String effort = chatSessionIIAR.getEffortDirect();
         if (effort != null) status.put("effort", effort);
         // Absent rather than a made-up number when this conversation asks the server for nothing.
@@ -757,6 +759,71 @@ public class ChatResource {
      * @return {@code {"type": "accepted", "temperature": ...}}, or 400 when the value is not a
      *         number between 0 and 2
      */
+    /** The most steps a conversation may be given per turn. */
+    static final int MAX_STEP_LIMIT = 10_000;
+    /** The longest time limit a conversation may be given, in minutes (a day). */
+    static final int MAX_TIME_LIMIT_MINUTES = 1_440;
+
+    /**
+     * Sets how many steps one turn of this conversation may make, for a provider that runs the tool loop here
+     * (openai-compat); the default is {@code ChatSession.DEFAULT_CONVERSATION_STEP_LIMIT}. The model is told the number.
+     *
+     * @param body {@code {"stepLimit": 100}}
+     * @return {@code {"type": "accepted", "stepLimit": N}}, or 400 when it is not a whole number from 1 to 10000
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/step-limit")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response stepLimit(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
+                              Map<String, Object> body) {
+        Integer value = wholeNumber(body == null ? null : body.get("stepLimit"));
+        if (value == null || value < 1 || value > MAX_STEP_LIMIT) {
+            return Response.status(400).entity(Map.of("type", "error",
+                    "message", "stepLimit must be a whole number from 1 to " + MAX_STEP_LIMIT)).build();
+        }
+        if (!actorSystem.setStepLimit(projectId, chatId, value)) {
+            return Response.status(404).entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        return Response.ok(Map.of("type", "accepted", "stepLimit", value)).build();
+    }
+
+    /**
+     * Sets how many minutes one turn of this conversation may run, for a provider that runs the tool loop here;
+     * {@code 0} sets no time limit; the default is {@code ChatSession.DEFAULT_TIME_LIMIT_MINUTES}.
+     *
+     * @param body {@code {"timeLimitMinutes": 10}}
+     * @return {@code {"type": "accepted", "timeLimitMinutes": N}}, or 400 when it is not a whole number from 0 to 1440
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/time-limit")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response timeLimit(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
+                              Map<String, Object> body) {
+        Integer value = wholeNumber(body == null ? null : body.get("timeLimitMinutes"));
+        if (value == null || value < 0 || value > MAX_TIME_LIMIT_MINUTES) {
+            return Response.status(400).entity(Map.of("type", "error",
+                    "message", "timeLimitMinutes must be a whole number from 0 to " + MAX_TIME_LIMIT_MINUTES)).build();
+        }
+        if (!actorSystem.setTimeLimitMinutes(projectId, chatId, value)) {
+            return Response.status(404).entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        return Response.ok(Map.of("type", "accepted", "timeLimitMinutes", value)).build();
+    }
+
+    /** @return the number as a whole number, or {@code null} when it is absent, not a number, or has a fraction */
+    static Integer wholeNumber(Object given) {
+        if (given instanceof Number n && n.doubleValue() == Math.rint(n.doubleValue())
+                && Math.abs(n.doubleValue()) < Integer.MAX_VALUE) {
+            return n.intValue();
+        }
+        if (given instanceof String s) {
+            try { return Integer.parseInt(s.strip()); } catch (NumberFormatException e) { return null; }
+        }
+        return null;
+    }
+
     /**
      * Sets whether this conversation asks its model to skip the thinking phase
      * ({@code ThinkingAndEffortAreConversationSettings_260917_oo01}). A setting of the conversation,

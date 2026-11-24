@@ -31,6 +31,7 @@ class ChatSessionStepLimitTest {
     /** Always answers with a tool call, so the loop only ends when something stops it. */
     private static final class NeverFinishingProvider implements LlmProvider {
         final List<String> calls = new ArrayList<>();
+        private int count;
 
         @Override public String id() { return "fake"; }
         @Override public String displayName() { return "Fake"; }
@@ -42,10 +43,10 @@ class ChatSessionStepLimitTest {
         @Override
         public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
             calls.add(prompt);
-            emitter.accept(ChatEvent.delta("""
-                    <invoke name="read">
-                    <parameter name="path">no-such-file-for-this-test</parameter>
-                    </invoke>"""));
+            // A different file each time: the same call over and over is stopped by the repeated-call transition
+            // (ChatSessionRepeatedCallTest), and this test is about the step limit.
+            emitter.accept(ChatEvent.delta("<invoke name=\"read\">\n<parameter name=\"path\">no-such-file-for-this-test-"
+                    + (++count) + "</parameter>\n</invoke>"));
             emitter.accept(ChatEvent.result(null, 0, 0));
         }
     }
@@ -93,7 +94,7 @@ class ChatSessionStepLimitTest {
         List<String> prompts = runTurn("step-limit-2.yaml").calls;
 
         assertEquals(2, prompts.size());
-        assertTrue(prompts.get(1).contains("no-such-file-for-this-test"),
+        assertTrue(prompts.get(1).contains("no-such-file-for-this-test-1"),
                 "the tool result is what the next step is asked about, got: " + prompts.get(1));
     }
 }
