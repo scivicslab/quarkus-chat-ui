@@ -4298,6 +4298,9 @@ public class ChatSession extends Interpreter {
         // New conversation: end the current I/O-log session and renumber turns from 1.
         if (ioLog != null) ioLog.resetSession(myChatName());
         ioTurn = 0;
+        // The settings live in the session; the new one starts with them, or a restart would put the conversation back
+        // on the default provider (it is still on the one it was on).
+        recordSettings(null);
     }
 
     /** @return the array the next request is built from, as JSON, or {@code null} if the provider keeps none */
