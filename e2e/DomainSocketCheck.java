@@ -19,7 +19,10 @@ import java.util.List;
  * java e2e/DomainSocketCheck.java &lt;socket path&gt;
  * </pre>
  *
- * The instance runs with {@code -Dquarkus.http.domain-socket=<path> -Dquarkus.http.domain-socket-enabled=true}. Checks:
+ * The instance runs with {@code -Dquarkus.http.domain-socket=<path> -Dquarkus.http.domain-socket-enabled=true},
+ * {@code -Dquarkus.vertx.prefer-native-transport=true} (without it the instance does not start with the socket) and
+ * {@code -Dagent-connector-kernel.mcp.require-key=false} (the check's {@code initialize} carries no scope header or
+ * key, which the MCP server refuses unless the key requirement is off). Checks:
  * the socket is 0600 and its directory 0700; an MCP {@code initialize} through the socket answers 200 with a complete
  * serverInfo. Prints one line per check and exits 1 when any fails.
  */
