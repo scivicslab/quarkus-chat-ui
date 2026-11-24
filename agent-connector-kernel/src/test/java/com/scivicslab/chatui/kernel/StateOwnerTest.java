@@ -104,9 +104,14 @@ class StateOwnerTest {
                 }
             }, command -> Thread.ofVirtual().start(command));
             Thread.sleep(100);
-            owner.run(s -> s.events.cancelWaiting());
+            owner.run(s -> s.events.interrupt());
             assertEquals("interrupted", outcome.get(5, TimeUnit.SECONDS));
-            owner.run(s -> s.events.offer("after"));
+            assertThrows(InterruptedException.class, () -> owner.poll(s -> s.events, 1_000),
+                    "a wait that begins after the interrupt ends at once too");
+            owner.run(s -> {
+                s.events.resume();
+                s.events.offer("after");
+            });
             assertEquals("after", owner.poll(s -> s.events, 1_000));
         }
     }

@@ -42,8 +42,6 @@ public class CliProcess {
 
     private CliConfig config;
     private String lastSessionId;
-    private Process currentProcess;
-    private OutputStream stdinStream;
     /**
      * What several threads share of the process: the events of the prompt's turn and the autonomous ones, the calls
      * the CLI is parked on, and the flags that route them. It is a plain object for one owner, an actor: the reader of the
@@ -68,6 +66,11 @@ public class CliProcess {
         boolean autonomousTurnOpen;
         /** The job that reads the process's stdout; it ends when the output closes. */
         BlockingJob<Void> readerJob;
+        /** The CLI process, or {@code null} when none runs, and its standard input. */
+        Process process;
+        OutputStream stdin;
+        /** Counted up by each {@link CliProcess#cancel()}: a start that began before a cancel sees it and gives up. */
+        long cancels;
 
         void route(StreamEvent event) {
             boolean isResult = "result".equals(event.type());
@@ -110,6 +113,19 @@ public class CliProcess {
     }
 
     private final StateOwner<CliState> state = new StateOwner<>("cli-process", new CliState());
+
+    /** For a test: run when a start has counted the cancels so far, so a cancel sent after it is one that came during the start. */
+    Runnable startBegan;
+
+    private Process currentProcess() {
+        return state.ask(s -> s.process);
+    }
+
+    private OutputStream stdin() throws IOException {
+        OutputStream out = state.ask(s -> s.stdin);
+        if (out == null) throw new IOException("No active process stdin");
+        return out;
+    }
 
     /** {@code --mcp-config}'s value, or {@code null} for none. Set and read inside the provider's own messages. */
     private String mcpConfigJson;
@@ -169,22 +185,35 @@ public class CliProcess {
      *
      * @return {@code true} if the process is alive
      */
-    public boolean isAlive() { return currentProcess != null && currentProcess.isAlive(); }
+    public boolean isAlive() {
+        Process p = currentProcess();
+        return p != null && p.isAlive();
+    }
 
-    private void startProcess() throws IOException {
+    private boolean startProcess(long cancelsAtStart) throws IOException {
         List<String> cmd = buildCommand();
         logger.fine(() -> "Starting CLI: " + String.join(" ", cmd));
 
-        currentProcess = launch(cmd).processBuilder().start();
-
-        stdinStream = currentProcess.getOutputStream();
+        Process started = launch(cmd).processBuilder().start();
+        // The process is the owner's from now on. A cancel that came while it was being started is not lost: the owner
+        // counts cancels, sees one since this start began, and the process is stopped here instead of being kept.
+        boolean kept = state.ask(s -> {
+            if (s.cancels != cancelsAtStart) return false;
+            s.process = started;
+            s.stdin = started.getOutputStream();
+            return true;
+        });
+        if (!kept) {
+            started.destroy();
+            logger.info(binary + " CLI process cancelled while it started");
+            return false;
+        }
         BufferedReader stdoutReader =
-                new BufferedReader(new InputStreamReader(currentProcess.getInputStream()));
+                new BufferedReader(new InputStreamReader(started.getInputStream()));
 
         // Background thread: read stdout continuously and route parsed events into the turn or
         // autonomous queue. Keeps running while the process is alive, picking up both prompted and
         // autonomous (background-job / ScheduleWakeup) turns.
-        final Process started = currentProcess;
         BlockingJob<Void> stdoutJob = BlockingJob.start("cli-stdout", () -> {
             try {
                 String line;
@@ -209,15 +238,13 @@ public class CliProcess {
             // The output closed: the process is ending. A prompt still waiting for its result is told at once
             // rather than at its next 60-second poll (TurnWithoutAnAnswerTellsTheAsker_261119_oo01).
             // Only for the process this reader reads: a process cancelled earlier must not end a later prompt.
-            if (currentProcess == started) {
-                state.tell(s -> { if (s.turnActive) s.turn.offer(StreamEvent.text(OUTPUT_CLOSED, null)); });
-            }
+            state.tell(s -> { if (s.process == started && s.turnActive) s.turn.offer(StreamEvent.text(OUTPUT_CLOSED, null)); });
             return null;
         }, started::destroy);
         state.run(s -> s.readerJob = stdoutJob);
 
         // stderr is only logged; its job ends with the process and nobody waits for it.
-        Process proc = currentProcess;
+        Process proc = started;
         BlockingJob.start("cli-stderr", () -> {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(proc.getErrorStream()))) {
                 String line;
@@ -228,6 +255,7 @@ public class CliProcess {
             } catch (IOException ignored) {}
             return null;
         }, proc::destroy);
+        return true;
     }
 
     /**
@@ -251,13 +279,19 @@ public class CliProcess {
      * blocks alongside the text.
      */
     public int sendPrompt(String prompt, List<String> imageDataUrls, StreamCallback callback) throws IOException {
-        if (currentProcess == null || !currentProcess.isAlive()) {
+        Process running = currentProcess();
+        if (running == null || !running.isAlive()) {
+            long cancelsAtStart = state.ask(s -> s.cancels);
+            if (startBegan != null) startBegan.run();
             state.run(s -> {
                 s.turn.clear();
                 s.autonomous.clear();
                 s.autonomousTurnOpen = false;
             });
-            startProcess();
+            if (!startProcess(cancelsAtStart)) {
+                if (callback != null) callback.onComplete(-1);
+                return -1;
+            }
         }
 
         // Mark the turn active before writing so the reader routes the response to turnQueue.
@@ -331,7 +365,8 @@ public class CliProcess {
      */
     public void endTurn(long waitMs) {
         state.run(s -> s.suspended = false);
-        if (isTurnActive() && currentProcess != null && currentProcess.isAlive()) {
+        Process turnProcess = currentProcess();
+        if (isTurnActive() && turnProcess != null && turnProcess.isAlive()) {
             try {
                 writeInterrupt();
             } catch (IOException e) {
@@ -366,7 +401,7 @@ public class CliProcess {
 
     /** Writes Claude Code's stream-json interrupt, which ends the running turn with a result. */
     void writeInterrupt() throws IOException {
-        if (stdinStream == null) throw new IOException("No active process stdin");
+        OutputStream stdinStream = stdin();
         String json = "{\"type\":\"control_request\",\"request_id\":\"interrupt-" + state.ask(s -> ++s.seq)
                 + "\",\"request\":{\"subtype\":\"interrupt\"}}\n";
         stdinStream.write(json.getBytes(StandardCharsets.UTF_8));
@@ -380,7 +415,8 @@ public class CliProcess {
             while (true) {
                 StreamEvent event = pollTurnEvent(60_000);
                 if (event == null) {
-                    if (currentProcess != null && currentProcess.isAlive()) {
+                    Process alive = currentProcess();
+                    if (alive != null && alive.isAlive()) {
                         // Process is alive but slow (e.g. 529 retries in progress) — keep waiting.
                         // Do NOT return here: the response will eventually arrive and must reach the callback.
                         logger.info(binary + " CLI: no event in 60s but process is alive — continuing to wait...");
@@ -442,7 +478,7 @@ public class CliProcess {
     /** Forgets the prompt's turn and says how the process ended. */
     private EndedWithoutResult endedWithoutResult() {
         state.run(CliState::forgetTurn);
-        Process p = currentProcess;
+        Process p = currentProcess();
         Integer code = null;
         if (p != null) {
             try {
@@ -479,7 +515,12 @@ public class CliProcess {
     }
 
     /** Marks a prompt turn as started so subsequent events route to the turn queue. */
-    void beginTurn() { state.run(s -> s.turnActive = true); }
+    void beginTurn() {
+        state.run(s -> {
+            s.turn.resume();
+            s.turnActive = true;
+        });
+    }
 
     /** Returns whether a prompt turn is currently in flight (visible for testing). */
     boolean isTurnActive() { return state.ask(s -> s.turnActive); }
@@ -513,6 +554,16 @@ public class CliProcess {
      * Destroys the running CLI process and resets all I/O handles.
      */
     public void cancel() {
+        // The process goes first, and with it the stdin: a prompt that has not written yet then fails at once, and one that
+        // has is ended by the interrupt below, which a later start of a turn cannot take back (it can only clear one that was
+        // made before it).
+        Process p = state.ask(s -> {
+            s.cancels++;
+            Process x = s.process;
+            s.process = null;
+            s.stdin = null;
+            return x;
+        });
         BlockingJob<Void> reader = state.ask(s -> {
             BlockingJob<Void> job = s.readerJob;
             s.readerJob = null;
@@ -521,15 +572,12 @@ public class CliProcess {
         if (reader != null) reader.cancel();
         // Ends the wait of a turn that is reading events, as the interrupt of its thread did.
         state.run(s -> {
-            s.turn.cancelWaiting();
+            s.turn.interrupt();
             s.autonomous.cancelWaiting();
             s.suspended = false;
         });
         answerAllParked();
         state.run(CliState::forgetTurn);
-        Process p = currentProcess;
-        currentProcess = null;
-        stdinStream = null;
         if (p != null && p.isAlive()) {
             p.destroy();
             logger.info(binary + " CLI process cancelled");
@@ -555,7 +603,7 @@ public class CliProcess {
      * @throws IOException if the process stdin is not available or writing fails
      */
     public void writeUserMessage(String text, List<String> imageDataUrls) throws IOException {
-        if (stdinStream == null) throw new IOException("No active process stdin");
+        OutputStream stdinStream = stdin();
         String json = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":"
             + buildContentJson(text, imageDataUrls) + "}}\n";
         stdinStream.write(json.getBytes(StandardCharsets.UTF_8));
@@ -601,7 +649,7 @@ public class CliProcess {
      * @throws IOException if writing to the process stdin fails
      */
     public void writePermissionResponse(String toolUseId, String response) throws IOException {
-        if (stdinStream == null) throw new IOException("No active process stdin");
+        OutputStream stdinStream = stdin();
         String normalised = normalisePermissionResponse(response);
         String json = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":"
             + "[{\"type\":\"tool_result\",\"tool_use_id\":"
@@ -669,7 +717,7 @@ public class CliProcess {
      * options and {@code --resume}.
      */
     public void restartBeforeNextPrompt() {
-        if (currentProcess == null) return;
+        if (currentProcess() == null) return;
         if (lastSessionId != null) config = config.withSessionId(lastSessionId);
         cancel();
     }

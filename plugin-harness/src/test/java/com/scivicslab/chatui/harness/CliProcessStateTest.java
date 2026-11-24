@@ -2,6 +2,7 @@ package com.scivicslab.chatui.harness;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -82,6 +83,50 @@ class CliProcessStateTest {
         process.cancel();
         assertEquals(-1, turn.get(5, TimeUnit.SECONDS), "an interrupted turn returns -1");
         assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - cancelledAt) < 2_000);
+        assertThrows(InterruptedException.class, () -> process.pollTurnEvent(10),
+                "the turn stays interrupted until the next prompt begins");
+        process.beginTurn();
         assertNull(process.pollTurnEvent(10), "nothing is left in the turn queue");
+    }
+
+    /**
+     * A cancel that arrives while the process and its reader job are being started is not lost, and breaks nothing: over 200
+     * rounds with the cancel sent a little earlier or later each time, the prompt ends (cancelled, or failed because its
+     * process was stopped), no other exception comes out, and no process is left running.
+     */
+    @Test
+    void aCancelWhileTheProcessAndItsReaderStartAreNotLost(@TempDir Path dir) throws Exception {
+        Path script = dir.resolve("fake-claude");
+        Files.writeString(script, "#!/bin/bash\nread line\nsleep 30\n");
+        assertTrue(script.toFile().setExecutable(true));
+        for (int round = 0; round < 200; round++) {
+            CliProcess process = new CliProcess(script.toString(), "K", CliConfig.defaults(null));
+            java.util.concurrent.CountDownLatch began = new java.util.concurrent.CountDownLatch(1);
+            process.startBegan = began::countDown;
+            Thread[] promptThread = new Thread[1];
+            CompletableFuture<Object> prompt = CompletableFuture.supplyAsync(() -> {
+                promptThread[0] = Thread.currentThread();
+                try {
+                    return process.sendPrompt("hello", e -> { });
+                } catch (java.io.IOException ended) {
+                    return ended;   // the process was stopped under the prompt: a cancel's visible result
+                }
+            }, command -> Thread.ofVirtual().start(command));
+            assertTrue(began.await(10, TimeUnit.SECONDS));   // the prompt's start has begun: a cancel now comes during it
+            if (round % 4 != 0) Thread.sleep(java.time.Duration.ofNanos((round % 4) * 700_000L));   // at once, or 0.7 to 2.1 ms later
+            process.cancel();
+            Object outcome;
+            try {
+                outcome = prompt.get(15, TimeUnit.SECONDS);
+            } catch (java.util.concurrent.TimeoutException hung) {
+                throw new AssertionError("round " + round + " hung: alive=" + process.isAlive() + " turnActive=" + process.isTurnActive()
+                        + "\n" + java.util.Arrays.stream(promptThread[0].getStackTrace()).limit(14).map(StackTraceElement::toString).collect(java.util.stream.Collectors.joining("\n")));
+            } catch (java.util.concurrent.ExecutionException unexpected) {
+                throw new AssertionError("round " + round + ": the prompt failed with " + unexpected.getCause(), unexpected.getCause());
+            }
+            assertTrue(outcome instanceof Integer || outcome instanceof java.io.IOException,
+                    "round " + round + ": " + outcome);
+            assertTrue(!process.isAlive(), "round " + round + ": the cancel was lost, the process still runs");
+        }
     }
 }

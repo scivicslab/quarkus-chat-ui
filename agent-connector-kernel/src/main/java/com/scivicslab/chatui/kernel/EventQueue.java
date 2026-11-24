@@ -17,6 +17,7 @@ public final class EventQueue<E> {
 
     private final ArrayDeque<E> events = new ArrayDeque<>();
     private final ArrayDeque<CompletableFuture<E>> waiting = new ArrayDeque<>();
+    private boolean interrupted;
 
     /** Queues an event, or hands it to the reader that has waited longest. */
     public void offer(E event) {
@@ -27,6 +28,7 @@ public final class EventQueue<E> {
 
     /** @return a future with the oldest event, complete at once when one is queued, pending until the next when not */
     public CompletableFuture<E> take() {
+        if (interrupted) return CompletableFuture.failedFuture(new CancellationException("the wait was interrupted"));
         if (!events.isEmpty()) return CompletableFuture.completedFuture(events.pollFirst());
         CompletableFuture<E> reader = new CompletableFuture<>();
         waiting.addLast(reader);
@@ -59,7 +61,22 @@ public final class EventQueue<E> {
         events.clear();
     }
 
-    /** Ends every wait: each waiting reader's future fails with a {@link CancellationException}. */
+    /**
+     * Interrupts the readers for good, until {@link #resume()}: every waiting reader's future fails, and so does every
+     * future {@link #take()} gives from now on. An interrupt that comes before the reader has begun to wait is not lost,
+     * as an interrupt of a thread is not.
+     */
+    public void interrupt() {
+        interrupted = true;
+        cancelWaiting();
+    }
+
+    /** Lets readers wait again after {@link #interrupt()}. */
+    public void resume() {
+        interrupted = false;
+    }
+
+    /** Ends the waits there are now: each waiting reader's future fails with a {@link CancellationException}. */
     public void cancelWaiting() {
         for (CompletableFuture<E> reader : waiting) reader.completeExceptionally(new CancellationException("the wait was cancelled"));
         waiting.clear();
