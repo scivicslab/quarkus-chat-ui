@@ -154,6 +154,27 @@ public class IoLogStore {
     }
 
     /**
+     * Ends the project's own session (called when the project is deleted); nothing is deleted from the log.
+     *
+     * @param projectId the project's id
+     */
+    public void endProjectSession(String projectId) {
+        ask(b -> {
+            b.endProjectSession(projectId);
+            return null;
+        }, null);
+    }
+
+    /**
+     * The ids of the projects whose own session is still open, oldest first.
+     *
+     * @return the project ids, e.g. {@code "project3"}
+     */
+    public List<String> runningProjectIds() {
+        return ask(IoLogSessions::runningProjectIds, List.of());
+    }
+
+    /**
      * Every ConversationSquad the log still holds an unfinished session for, most recent first. This is what the
      * ConversationSquad-to-actor structure is rebuilt from after a restart. Only {@code RUNNING} sessions count: a
      * conversation the user cleared has had its session ended, and must stay cleared.

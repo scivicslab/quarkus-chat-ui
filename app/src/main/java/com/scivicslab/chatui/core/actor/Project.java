@@ -161,6 +161,17 @@ public class Project {
     }
 
     private java.util.List<Member> readConversations() {
+        return listedConversations(entries);
+    }
+
+    /**
+     * The conversations the project's own session lists, as its last {@code conversations} entry gives them.
+     *
+     * @param entries the project's session, or {@code null} when nothing is recorded
+     * @return the list, empty for the entry a deleted project's last write left, or {@code null} when the session holds
+     *         no such entry (a log written before the list was kept)
+     */
+    public static java.util.List<Member> listedConversations(com.scivicslab.chatui.core.iolog.SessionEntries entries) {
         if (entries == null) return null;
         org.json.JSONObject saved = entries.latestWithKey(CONVERSATIONS_LABEL, CONVERSATIONS_LABEL);
         if (saved == null) return null;

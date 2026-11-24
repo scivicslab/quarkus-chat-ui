@@ -266,6 +266,53 @@ final class IoLogSessions {
     }
 
     /**
+     * Ends the project's session, the way {@link #resetSession} ends a conversation's: nothing is deleted, and the
+     * session no longer counts as open, so {@link #runningProjectIds()} does not list the project again. Called when
+     * the project is deleted.
+     *
+     * @param projectId the project's id
+     */
+    public void endProjectSession(String projectId) {
+        Long opened = projectSessionIds.remove(projectId);
+        long toEnd = (opened != null && opened >= 0) ? opened : findProjectSession(projectId);
+        if (store != null && toEnd >= 0) {
+            try {
+                store.endSession(toEnd, SessionStatus.COMPLETED);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "endSession failed for project " + projectId, e);
+            }
+        }
+    }
+
+    /**
+     * The ids of the projects whose own session is still open, oldest first, so they come back in the order they were
+     * made. A project whose conversations were all cleared has no running conversation session, but its own session
+     * stays open until the project is deleted.
+     *
+     * @return the project ids, e.g. {@code "project3"}, without duplicates
+     */
+    public List<String> runningProjectIds() {
+        ensureStore();
+        if (store == null) {
+            return List.of();
+        }
+        java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>();
+        try {
+            for (SessionSummary s : store.listSessions(SESSION_SCAN_LIMIT)) {
+                String name = s.getWorkflowName();
+                if (name == null || !name.startsWith(PROJECT_PREFIX) || s.getStatus() != SessionStatus.RUNNING) continue;
+                String id = name.substring(PROJECT_PREFIX.length());
+                if (!id.isBlank()) ids.add(id);
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Could not list the open project sessions", e);
+        }
+        List<String> ordered = new java.util.ArrayList<>(ids);
+        java.util.Collections.reverse(ordered);                 // listSessions is most recent first
+        return List.copyOf(ordered);
+    }
+
+    /**
      * Every ConversationSquad the log still holds an unfinished session for, most recent first.
      *
      * <p>This is what the ConversationSquad-to-actor structure is rebuilt from after a restart. The actor tree

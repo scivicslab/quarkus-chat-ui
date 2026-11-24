@@ -628,6 +628,7 @@ public class ChatUiActorSystem implements ConversationControls {
                 LOG.log(Level.WARNING, "Could not re-open project " + projectId, e);
             }
         }
+        reopenProjectsOfOpenSessions();
         // A project whose conversations were all ended -- it was deleted -- is not reopened, but its
         // name is still on those sessions, and a new project must not take it
         // (ProjectDeletion_261011_oo01).
@@ -636,6 +637,33 @@ public class ChatUiActorSystem implements ConversationControls {
             if (parts != null) advanceProjectCounterPast(parts[0]);
         }
         return running;
+    }
+
+    /**
+     * Re-opens every project whose own session is still open, however its conversations' sessions stand: {@code /clear}
+     * ends a conversation's session, so a project whose conversations were all cleared (or never wrote anything) has
+     * none running, and looked deleted. Deleting a project ends its own session ({@link #deleteProject}).
+     *
+     * <p>A project is brought back only when its session holds a list of its conversations that is not empty. A log
+     * written before the list was kept has none, and the earlier delete left the project's session open with an empty
+     * list; neither can be told from a live project, so neither is revived. Such a project still comes back through
+     * its running conversation sessions, as before.</p>
+     */
+    private void reopenProjectsOfOpenSessions() {
+        for (String projectId : ioLogStore.runningProjectIds()) {
+            try {
+                var listed = Project.listedConversations(
+                        com.scivicslab.chatui.core.iolog.SessionEntries.ofProject(ioLogStore, ioLogView, projectId));
+                if (listed == null || listed.isEmpty()) continue;
+                if (!projects.containsKey(projectId)) {
+                    projects.put(projectId, actorSystem.getRoot().createChild(projectId, new Project()));
+                    wireProject(projectId);
+                }
+                advanceProjectCounterPast(projectId);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Could not re-open project " + projectId, e);
+            }
+        }
     }
 
     /**
@@ -903,6 +931,8 @@ public class ChatUiActorSystem implements ConversationControls {
         } catch (Exception e) {
             LOG.log(Level.WARNING, "Could not end the conversations of " + projectId, e);
         }
+        // The project's own session ends too, so the project does not come back through it.
+        if (ioLogStore != null) ioLogStore.endProjectSession(projectId);
         projectRef.tell(Project::stopWatching);
         try {
             projectRef.ask(p -> {
