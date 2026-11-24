@@ -1,6 +1,7 @@
 package com.scivicslab.sshtools;
 
 import com.scivicslab.chatui.kernel.BlockingJob;
+import com.scivicslab.chatui.kernel.StateOwner;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -12,7 +13,6 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -84,7 +84,9 @@ public final class SshRunner {
         } catch (IOException e) {
             return new Result(-1, "", "cannot start " + command.get(0) + ": " + e.getMessage(), 0, null);
         }
-        AtomicReference<String> limit = new AtomicReference<>();
+        // The first limit that is hit is the one reported; its one owner, an actor, takes the report of each stream.
+        StateOwner<String[]> limit = new StateOwner<>("ssh-limit", new String[1]);
+        try {
         ByteArrayOutputStream outBuffer = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuffer = new ByteArrayOutputStream();
         long[] outCount = new long[1];
@@ -96,7 +98,7 @@ public final class SshRunner {
             try (OutputStream sink = stdoutFile == null ? outBuffer : Files.newOutputStream(stdoutFile)) {
                 outCount[0] = copy(process.getInputStream(), sink, stdoutLimit, "standard output", process, limit);
             } catch (IOException e) {
-                limit.compareAndSet(null, "standard output could not be written: " + e.getMessage());
+                firstLimit(limit, "standard output could not be written: " + e.getMessage());
                 kill(process);
             }
             return null;
@@ -107,7 +109,7 @@ public final class SshRunner {
         }, killProcess);
         try {
             if (!process.waitFor(limits.time().toMillis(), TimeUnit.MILLISECONDS)) {
-                limit.compareAndSet(null, "the time limit of " + describe() + " was reached; ssh was killed");
+                firstLimit(limit, "the time limit of " + describe() + " was reached; ssh was killed");
                 kill(process);
                 process.waitFor();
             }
@@ -124,9 +126,19 @@ public final class SshRunner {
         }
         String stdout = outBuffer.toString(StandardCharsets.UTF_8);
         String stderr = errBuffer.toString(StandardCharsets.UTF_8);
-        return limit.get() != null
-                ? new Result(-1, stdout, stderr, outCount[0], limit.get())
+        return limit.ask(a -> a[0]) != null
+                ? new Result(-1, stdout, stderr, outCount[0], limit.ask(a -> a[0]))
                 : new Result(process.exitValue(), stdout, stderr, outCount[0], null);
+        } finally {
+            limit.close();
+        }
+    }
+
+    /** Records the limit that was hit, unless another was hit first. */
+    private static void firstLimit(StateOwner<String[]> limit, String message) {
+        limit.run(a -> {
+            if (a[0] == null) a[0] = message;
+        });
     }
 
     /** Waits for a job to end; what it threw beyond the stream errors its work already catches is logged, not raised. */
@@ -154,7 +166,7 @@ public final class SshRunner {
 
     /** Copies up to {@code max} bytes; at the limit it records which and kills the process. */
     private static long copy(InputStream from, OutputStream to, long max, String stream, Process process,
-                             AtomicReference<String> limit) {
+                             StateOwner<String[]> limit) {
         long total = 0;
         byte[] buffer = new byte[8192];
         try (from) {
@@ -163,7 +175,7 @@ public final class SshRunner {
                 if (total + n > max) {
                     to.write(buffer, 0, (int) (max - total));
                     total = max;
-                    limit.compareAndSet(null, "the output limit of " + max + " bytes was reached on " + stream
+                    firstLimit(limit, "the output limit of " + max + " bytes was reached on " + stream
                             + "; ssh was killed");
                     kill(process);
                     break;

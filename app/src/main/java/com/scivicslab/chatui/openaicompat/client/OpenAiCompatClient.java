@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.openaicompat.client;
 
+import com.scivicslab.chatui.kernel.StateOwner;
 import com.scivicslab.chatui.core.provider.CancelScope;
 import com.scivicslab.chatui.core.rest.TokenUsage;
 import com.scivicslab.chatui.openaicompat.ToolDefinition;
@@ -31,8 +32,17 @@ public class OpenAiCompatClient {
 
     private final String baseUrl;
     private final HttpClient httpClient;
-    private volatile List<String> cachedModels = List.of();
-    private volatile Map<String, Integer> cachedMaxModelLen = Map.of();
+    /**
+     * What the client has learned about its server, and the temperature it samples at: read by the turn, written by whoever
+     * refreshes the model list. One owner, an actor, holds them, and each use is a message to it.
+     */
+    private static final class Learned {
+        List<String> models = List.of();
+        Map<String, Integer> maxModelLen = Map.of();
+        Double temperature;
+    }
+
+    private final StateOwner<Learned> learned = new StateOwner<>("openai-compat-client", new Learned());
 
     public interface StreamCallback {
         void onDelta(String content);
@@ -119,14 +129,14 @@ public class OpenAiCompatClient {
      * @param model the model identifier to look up
      * @return {@code true} if the model was found in the cached list
      */
-    public boolean servesModel(String model) { return cachedModels.contains(model); }
+    public boolean servesModel(String model) { return learned.ask(l -> l.models.contains(model)); }
 
     /**
      * Returns the list of model identifiers from the last successful {@link #fetchModels()} call.
      *
      * @return cached model IDs, or an empty list if models have not been fetched yet
      */
-    public List<String> getCachedModels() { return cachedModels; }
+    public List<String> getCachedModels() { return learned.ask(l -> l.models); }
 
     /**
      * Returns the maximum context length for the given model, as reported by the server.
@@ -134,7 +144,7 @@ public class OpenAiCompatClient {
      * @param model the model identifier
      * @return the maximum model length, or {@code -1} if unknown
      */
-    public int getMaxModelLen(String model) { return cachedMaxModelLen.getOrDefault(model, -1); }
+    public int getMaxModelLen(String model) { return learned.ask(l -> l.maxModelLen.getOrDefault(model, -1)); }
 
     /**
      * Fetches the list of available models from the server's {@code /v1/models} endpoint
@@ -153,9 +163,13 @@ public class OpenAiCompatClient {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) return List.of();
             String body = response.body();
-            this.cachedModels = parseModelIds(body);
-            this.cachedMaxModelLen = parseMaxModelLens(body);
-            return cachedModels;
+            List<String> models = parseModelIds(body);
+            Map<String, Integer> maxLens = parseMaxModelLens(body);
+            learned.run(l -> {
+                l.models = models;
+                l.maxModelLen = maxLens;
+            });
+            return models;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return List.of();
@@ -193,7 +207,7 @@ public class OpenAiCompatClient {
                                                  java.util.function.Consumer<String> requestBodyListener) {
         try {
             String requestBody = buildRequestBody(model, messages, noThink, maxTokens, false, tools,
-                    temperature);
+                    learned.ask(l -> l.temperature));
             if (requestBodyListener != null) requestBodyListener.accept(requestBody);
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/v1/chat/completions"))
@@ -285,7 +299,7 @@ public class OpenAiCompatClient {
         }
         try {
             String requestBody = buildRequestBody(model, history, noThink, maxTokens, true,
-                    tools, temperature, noToolCalls);
+                    tools, learned.ask(l -> l.temperature), noToolCalls);
             if (requestBodyListener != null) requestBodyListener.accept(requestBody);
             HttpResponse<Stream<String>> response = sendWithRetry(requestBody, stop);
 
@@ -435,16 +449,16 @@ public class OpenAiCompatClient {
      * <p>A property of the conversation, set through {@code LlmProvider.setTemperature}, kept here
      * because this client serves one conversation ({@code ConversationTemperature_260914_oo01}).</p>
      */
-    private volatile Double temperature;
+
 
     /** @param temperature what to sample at, or {@code null} to leave it to the server */
     public void setTemperature(Double temperature) {
-        this.temperature = temperature;
+        learned.run(l -> l.temperature = temperature);
     }
 
     /** @return what this conversation asks to sample at, or {@code null} when it asks for nothing */
     public Double getTemperature() {
-        return temperature;
+        return learned.ask(l -> l.temperature);
     }
 
     /**

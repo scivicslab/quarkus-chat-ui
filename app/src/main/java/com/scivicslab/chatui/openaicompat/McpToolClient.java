@@ -1,6 +1,7 @@
 package com.scivicslab.chatui.openaicompat;
 
 import com.scivicslab.chatui.core.provider.CancelScope;
+import com.scivicslab.chatui.kernel.StateOwner;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -53,7 +54,8 @@ public final class McpToolClient {
     private final HttpClient http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
             .executor(com.scivicslab.chatui.openaicompat.client.HttpCallbacks.POOL)
             .connectTimeout(Duration.ofSeconds(5)).build();
-    private int nextId = 1;
+    /** The numbers of the requests, one sequence for all clients; its one owner, an actor, hands them out. */
+    private static final StateOwner<int[]> IDS = new StateOwner<>("mcp-request-ids", new int[] {1});
 
     /**
      * @param endpoint     the server's MCP endpoint, e.g. {@code http://127.0.0.1:28030/mcp}
@@ -202,8 +204,8 @@ public final class McpToolClient {
         return result;
     }
 
-    private synchronized int nextId() {
-        return nextId++;
+    private int nextId() {
+        return IDS.ask(n -> n[0]++);
     }
 
     /**

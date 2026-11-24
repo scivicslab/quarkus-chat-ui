@@ -1,6 +1,7 @@
 package com.scivicslab.chatui.openaicompat;
 
 import com.scivicslab.chatui.core.provider.CancelScope;
+import com.scivicslab.chatui.kernel.StateOwner;
 import com.scivicslab.chatui.agent.ContextBudget;
 import com.scivicslab.chatui.agent.ConversationToolCatalog;
 import com.scivicslab.chatui.agent.ToolCatalog;
@@ -40,7 +41,22 @@ public class OpenAiCompatProvider implements LlmProvider {
     // volatile because GET .../status reads it from the request thread while this provider's own
     // thread writes it (ModelBelongsToTheConversation_260906_oo01) — the same reason
     // ChatSession.busy is volatile (BusyStateReadableSnapshot_260828_oo01).
-    private volatile String currentModel;
+    private String currentModel;
+    /**
+     * What other threads read of this provider's settings (the REST views read the model and the temperature while a turn
+     * runs): a copy the provider tells its one owner, an actor, at each change.
+     */
+    private static final class Shown {
+        String model;
+        Double temperature;
+    }
+
+    private final StateOwner<Shown> shown = new StateOwner<>("openai-compat-settings", new Shown());
+
+    private void putCurrentModel(String value) {
+        currentModel = value;
+        shown.run(s -> s.model = value);
+    }
     /** The client of chat-ui's MCP server for this conversation, or {@code null} when it has none (a test). */
     private final McpToolClient mcp;
     /** The tools the model is given, read again whenever the system message is set at a turn's start. */
@@ -110,7 +126,7 @@ public class OpenAiCompatProvider implements LlmProvider {
         this.clients = serverUrls.stream()
                 .map(OpenAiCompatClient::new)
                 .toList();
-        this.currentModel = defaultModel;
+        putCurrentModel(defaultModel);
         this.mcp = mcp;
         this.tools = drivingTools();
     }
@@ -125,7 +141,7 @@ public class OpenAiCompatProvider implements LlmProvider {
     @Override public ProviderCapabilities capabilities() { return ProviderCapabilities.OPENAI_COMPAT; }
 
     /** {@inheritDoc} */
-    @Override public String getCurrentModel() { return currentModel; }
+    @Override public String getCurrentModel() { return shown.ask(s -> s.model); }
 
     /** {@inheritDoc} */
     @Override public boolean callsToolsByDefinition() { return true; }
@@ -234,7 +250,7 @@ public class OpenAiCompatProvider implements LlmProvider {
      *
      * @param model the model identifier
      */
-    @Override public void setModel(String model) { this.currentModel = model; }
+    @Override public void setModel(String model) { putCurrentModel(model); }
 
     /**
      * Returns {@code null} because OpenAI-compatible providers do not use persistent sessions.
@@ -271,7 +287,7 @@ public class OpenAiCompatProvider implements LlmProvider {
         }
         // Auto-select the first available model if currentModel is still a placeholder
         if (!models.isEmpty() && (currentModel == null || currentModel.isBlank() || currentModel.equals("default"))) {
-            currentModel = models.get(0).name();
+            putCurrentModel(models.get(0).name());
             logger.info("Auto-selected model: " + currentModel);
         }
         return models;
@@ -288,7 +304,7 @@ public class OpenAiCompatProvider implements LlmProvider {
      * @param ctx     provider context containing images and other request metadata
      */
     /** What this conversation asks the server to sample at; {@code null} asks for nothing. */
-    private volatile Double temperature;
+    private Double temperature;
 
     /**
      * {@inheritDoc}
@@ -304,6 +320,7 @@ public class OpenAiCompatProvider implements LlmProvider {
     @Override
     public void setTemperature(Double temperature) {
         this.temperature = temperature;
+        shown.run(s -> s.temperature = temperature);
         for (OpenAiCompatClient c : clients) {
             c.setTemperature(temperature);
         }
@@ -311,12 +328,12 @@ public class OpenAiCompatProvider implements LlmProvider {
 
     @Override
     public Double getTemperature() {
-        return temperature;
+        return shown.ask(s -> s.temperature);
     }
 
     @Override
     public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
-        if (model != null && !model.isBlank()) currentModel = model;
+        if (model != null && !model.isBlank()) putCurrentModel(model);
 
         // If model is still a placeholder, try to resolve it from the server
         if (currentModel == null || currentModel.isBlank() || currentModel.equals("default")) {
@@ -872,14 +889,14 @@ public class OpenAiCompatProvider implements LlmProvider {
         if (client == null || useModel == null || useModel.isBlank()) {
             return com.scivicslab.chatui.core.provider.OneShotReply.refused("no server available for the model");
         }
-        java.util.concurrent.atomic.AtomicReference<String> sent = new java.util.concurrent.atomic.AtomicReference<>();
+        String[] sent = {null};   // set by the request-body listener, which the client calls on this thread before it sends
         OpenAiCompatClient.NonStreamingResponse response = client.sendNonStreaming(
-                useModel, messages, noThink == null || noThink, maxTokensFor(client, useModel, messages), List.of(), sent::set);
+                useModel, messages, noThink == null || noThink, maxTokensFor(client, useModel, messages), List.of(), body -> sent[0] = body);
         String reason = response.finishReason();
         if (reason != null && reason.startsWith("error")) {
-            return new com.scivicslab.chatui.core.provider.OneShotReply(null, sent.get(), reason);
+            return new com.scivicslab.chatui.core.provider.OneShotReply(null, sent[0], reason);
         }
-        return new com.scivicslab.chatui.core.provider.OneShotReply(response.content(), sent.get(), null);
+        return new com.scivicslab.chatui.core.provider.OneShotReply(response.content(), sent[0], null);
     }
 
     /**
