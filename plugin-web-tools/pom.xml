@@ -21,6 +21,12 @@
       <artifactId>quarkus-chat-ui-plugin-api</artifactId>
       <scope>provided</scope>
     </dependency>
+    <!-- BlockingJob (the actor that owns one blocking fetch) is the kernel's; the body ships the kernel, so it is not bundled -->
+    <dependency>
+      <groupId>com.scivicslab.chatui</groupId>
+      <artifactId>agent-connector-kernel</artifactId>
+      <scope>provided</scope>
+    </dependency>
     <dependency>
       <groupId>org.jsoup</groupId>
       <artifactId>jsoup</artifactId>

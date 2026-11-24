@@ -1,10 +1,9 @@
 package com.scivicslab.chatui.agent;
 
+import com.scivicslab.chatui.kernel.BlockingJob;
+
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.function.UnaryOperator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -66,18 +65,20 @@ public final class WebPageSummarizer {
         if (blocks.isEmpty() || !blocks.get(0).matches("(?s)\\d+\\. .*")) {
             return observation;
         }
-        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
-            List<Future<String>> summarised = new ArrayList<>();
+        // One job (an actor of its own) per page, so the calls run in parallel; the blocks keep their order.
+        List<BlockingJob<String>> summarised = new ArrayList<>();
+        try {
             for (String block : blocks) {
-                summarised.add(pool.submit(() -> summarizeBlock(block)));
+                summarised.add(BlockingJob.start("web-page-summary", () -> summarizeBlock(block), null));
             }
             StringBuilder out = new StringBuilder();
-            for (Future<String> f : summarised) {
-                out.append(f.get()).append("\n\n");
+            for (BlockingJob<String> job : summarised) {
+                out.append(job.result().get()).append("\n\n");
             }
             return out.toString().stripTrailing();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            summarised.forEach(BlockingJob::cancel);
             return observation;
         } catch (Exception e) {
             LOG.log(Level.WARNING, "summarising a web_search observation failed; passing it through", e);

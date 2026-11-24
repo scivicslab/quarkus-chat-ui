@@ -1,5 +1,7 @@
 package com.scivicslab.chatui.agent;
 
+import com.scivicslab.chatui.kernel.BlockingJob;
+
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -15,7 +17,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 import java.util.logging.Logger;
 
 /**
@@ -81,11 +82,12 @@ public final class WebSearchTool {
         }
         if (results.isEmpty()) return "No results found.";
 
-        // Fetch every result's page content in parallel; preserve result order.
+        // Fetch every result's page content in parallel, one job (an actor of its own) per page; preserve result order.
         LOG.info("web_search: fetching " + results.size() + " page(s) for: " + query);
-        List<String> bodies = results.parallelStream()
-                .map(r -> contentFor(r, pageFitter))
-                .collect(Collectors.toList());
+        List<BlockingJob<String>> fetches = results.stream()
+                .map(r -> BlockingJob.start("web-search-fetch", () -> contentFor(r, pageFitter), null))
+                .toList();
+        List<String> bodies = fetches.stream().map(job -> job.result().join()).toList();
 
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < results.size(); i++) {

@@ -7,7 +7,6 @@ agent-connector-kernel/src/main/java/com/scivicslab/chatui/llm/ScopeKeyIntercept
 app/src/main/java/com/scivicslab/chatui/agent/AskChatTool.java async-without-executor 2
 app/src/main/java/com/scivicslab/chatui/agent/AskChatTool.java concurrent-class 2
 app/src/main/java/com/scivicslab/chatui/agent/AskChatTool.java synchronized 1
-app/src/main/java/com/scivicslab/chatui/agent/WebPageSummarizer.java executor 1
 app/src/main/java/com/scivicslab/chatui/audittrail/BuildInfo.java volatile 1
 app/src/main/java/com/scivicslab/chatui/audittrail/ChatResource.java thread-start 1
 app/src/main/java/com/scivicslab/chatui/audittrail/StallDiagnostics.java synchronized 1
@@ -46,6 +45,5 @@ plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java th
 plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java volatile 7
 plugin-web-tools/src/main/java/com/scivicslab/chatui/agent/ScholarSearchTool.java sleep 1
 plugin-web-tools/src/main/java/com/scivicslab/chatui/agent/ScholarSearchTool.java synchronized 1
-plugin-web-tools/src/main/java/com/scivicslab/chatui/agent/WebSearchTool.java parallel-stream 1
 ssh-tools/src/main/java/com/scivicslab/sshtools/SshRunner.java concurrent-class 2
 ssh-tools/src/main/java/com/scivicslab/sshtools/SshRunner.java thread-start 3
