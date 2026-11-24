@@ -514,6 +514,16 @@ public class OpenAiCompatProvider implements LlmProvider {
      */
     @Override
     public void collapseTurn(String question, String answer) {
+        collapseTurn(question, answer, false);
+    }
+
+    /**
+     * As {@link #collapseTurn(String, String)}. A turn that ended without a plain-text answer also has each run of
+     * identical consecutive calls collapsed to its first call and one note ({@link #collapseRepeatedCalls}): the next
+     * turn's model imitates a long run it can read in the history, and starts the same loop again.
+     */
+    @Override
+    public void collapseTurn(String question, String answer, boolean endedWithoutAnswer) {
         if (question == null || question.isBlank()) return;
         List<ChatMessage> turn = new ArrayList<>(history.subList(Math.min(collapsedCount, history.size()), history.size()));
         while (history.size() > collapsedCount) history.removeLast();
@@ -521,22 +531,92 @@ public class OpenAiCompatProvider implements LlmProvider {
         java.util.Set<String> answered = new java.util.HashSet<>();
         for (ChatMessage m : turn) if (m instanceof ChatMessage.ToolResult r) answered.add(r.toolCallId());
         java.util.Set<String> kept = new java.util.HashSet<>();
+        List<ChatMessage> turnPart = new ArrayList<>();
         for (ChatMessage m : turn) {
             if (m instanceof ChatMessage.ToolCallRequest t) {
                 List<ChatMessage.ToolCallRequest.ToolCall> withResults =
                         t.toolCalls().stream().filter(c -> answered.contains(c.id())).toList();
                 if (withResults.isEmpty()) continue;
-                history.addLast(new ChatMessage.ToolCallRequest(t.content(), withResults));
+                turnPart.add(new ChatMessage.ToolCallRequest(t.content(), withResults));
                 withResults.forEach(c -> kept.add(c.id()));
             } else if (m instanceof ChatMessage.ToolResult r && kept.contains(r.toolCallId())) {
-                history.addLast(r);
+                turnPart.add(r);
             }
         }
+        history.addAll(endedWithoutAnswer ? collapseRepeatedCalls(turnPart) : turnPart);
         if (answer != null && !answer.isBlank()) {
             history.addLast(new ChatMessage.Assistant(answer));
         }
         collapsedCount = history.size();
         fitHistoryToBudget();
+    }
+
+    /**
+     * Collapses each run of identical consecutive tool calls in a turn's messages to its first call, its result, and
+     * one assistant note saying how many more were removed. Two calls are identical when they name the same tool, take
+     * the same arguments (the same JSON, whatever the key order and spacing) and got the same result text. Text the
+     * model wrote with a call ends a run, and a call that differs ends it too; everything else is kept as it is.
+     *
+     * <p>The messages must be a turn's kept messages: each reply that called tools followed by one result for each of
+     * its calls. A call is dropped together with its result, so every call that stays has its result, and the note goes
+     * after the results of the calls before it, never between a call and its result.</p>
+     *
+     * @param turn the turn's tool-call replies and results, in order
+     * @return the turn's messages with the runs collapsed; {@code turn} itself when no run was found
+     */
+    static List<ChatMessage> collapseRepeatedCalls(List<ChatMessage> turn) {
+        java.util.Map<String, ChatMessage.ToolResult> resultOf = new java.util.HashMap<>();
+        for (ChatMessage m : turn) if (m instanceof ChatMessage.ToolResult r) resultOf.put(r.toolCallId(), r);
+        List<ChatMessage> out = new ArrayList<>();
+        java.util.Set<String> keptIds = new java.util.HashSet<>();
+        String runName = null;
+        String runArguments = null;
+        String runResult = null;
+        int removed = 0;
+        for (ChatMessage m : turn) {
+            if (m instanceof ChatMessage.ToolCallRequest t) {
+                boolean hasText = t.content() != null && !t.content().isBlank();
+                if (hasText) {
+                    if (removed > 0) out.add(repeatNote(removed));
+                    removed = 0;
+                    runName = null;
+                }
+                List<ChatMessage.ToolCallRequest.ToolCall> keep = new ArrayList<>();
+                for (ChatMessage.ToolCallRequest.ToolCall c : t.toolCalls()) {
+                    ChatMessage.ToolResult r = resultOf.get(c.id());
+                    String result = r == null ? "" : r.content();
+                    if (!hasText && runName != null && runName.equals(c.name())
+                            && com.scivicslab.chatui.agent.RepeatedCallDetector.sameArguments(runArguments, c.arguments())
+                            && java.util.Objects.equals(runResult, result)) {
+                        removed++;
+                        continue;
+                    }
+                    if (removed > 0) {
+                        out.add(repeatNote(removed));
+                        removed = 0;
+                    }
+                    runName = c.name();
+                    runArguments = c.arguments();
+                    runResult = result;
+                    keep.add(c);
+                }
+                if (!keep.isEmpty()) {
+                    out.add(keep.size() == t.toolCalls().size() ? t : new ChatMessage.ToolCallRequest(t.content(), keep));
+                    keep.forEach(c -> keptIds.add(c.id()));
+                }
+            } else if (m instanceof ChatMessage.ToolResult r) {
+                if (keptIds.contains(r.toolCallId())) out.add(r);
+            } else {
+                out.add(m);
+            }
+        }
+        if (removed > 0) out.add(repeatNote(removed));
+        return out;
+    }
+
+    private static ChatMessage repeatNote(int removed) {
+        return new ChatMessage.Assistant("The same call was repeated " + removed
+                + " more times with the same result and was removed from the history.");
     }
 
     /**

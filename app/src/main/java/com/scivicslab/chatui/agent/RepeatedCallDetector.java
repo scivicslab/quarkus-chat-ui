@@ -72,7 +72,12 @@ public final class RepeatedCallDetector {
         return result;
     }
 
-    private static boolean sameArguments(String a, String b) {
+    /**
+     * @return whether two argument texts are the same call's: equal text, or the same JSON whatever the key order and
+     *         spacing
+     */
+    public static boolean sameArguments(String a, String b) {
+        if (a == null || b == null) return a == b;
         if (a.equals(b)) return true;
         try {
             return new JSONObject(a).similar(new JSONObject(b));

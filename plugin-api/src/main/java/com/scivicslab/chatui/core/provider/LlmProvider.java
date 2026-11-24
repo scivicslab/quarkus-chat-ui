@@ -155,6 +155,18 @@ public interface LlmProvider {
      */
     default void collapseTurn(String question, String answer) { }
 
+    /**
+     * As {@link #collapseTurn(String, String)}, saying whether the turn ended without a plain-text answer of its own
+     * (cancelled, out of steps, or stopped for repeating a call). A provider that keeps the turn's tool calls in its
+     * history may then collapse runs of identical calls in it, so that the next turn does not imitate them.
+     *
+     * @param endedWithoutAnswer {@code true} when the turn was cancelled or failed, reached its step limit, or was
+     *                           stopped for a repeated call
+     */
+    default void collapseTurn(String question, String answer, boolean endedWithoutAnswer) {
+        collapseTurn(question, answer);
+    }
+
     // ---- Tools given as definitions (OpenAiCompatStandardToolCalling_261120_oo01) ----
 
     /**

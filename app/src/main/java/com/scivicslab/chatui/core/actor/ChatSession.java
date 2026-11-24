@@ -2632,7 +2632,12 @@ public class ChatSession extends Interpreter {
                 providerRef().tell(p -> p.collapseTurn(question, progress));
                 recordHistory("assistant", "(paused for an urgent request; the work resumes after it)");
             } else {
-                providerRef().tell(p -> p.collapseTurn(question, finalAnswer));
+                // A turn that was cancelled or failed, ran out of steps or was stopped for repeating a call has no
+                // answer of its own: the provider collapses the runs of identical calls it left in the history,
+                // so that the next turn does not imitate them.
+                boolean endedWithoutAnswer = personQuestion == null
+                        && (cancelled || finalAnswer == null || stepLimitHit || repeatedCallHit);
+                providerRef().tell(p -> p.collapseTurn(question, finalAnswer, endedWithoutAnswer));
             }
         } catch (Exception e) {
             logger.log(Level.WARNING, "Could not collapse this turn's provider history", e);
