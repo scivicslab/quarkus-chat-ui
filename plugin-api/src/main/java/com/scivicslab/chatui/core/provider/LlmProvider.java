@@ -60,6 +60,12 @@ public interface LlmProvider {
      */
     default String promptPreface() { return ""; }
 
+    /**
+     * How many tokens this provider's model takes in one request, as its own server reports it; {@code -1} when the
+     * provider does not know (a CLI harness: the Tokens tab then reads its configured table of limits).
+     */
+    default int contextWindowTokens() { return -1; }
+
 
     /**
      * Sets what the conversation asks the server to sample at, where that means anything.

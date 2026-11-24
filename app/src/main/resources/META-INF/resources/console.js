@@ -3170,6 +3170,57 @@
         }
     }
 
+    /** A token figure for a cell: "-" when it cannot be said. */
+    function tokensNum(n) {
+        return n === null || n === undefined ? "-" : String(n);
+    }
+
+    /**
+     * The table of what fills the window: fixed rows (a row with nothing in it shows 0), the residual row, and the
+     * special topics in a table of their own. Everything is computed by GET /api/chats/{id}/tokens-breakdown.
+     */
+    function tokensShowBreakdown(b) {
+        var box = document.getElementById("tokens-breakdown");
+        var topicsBox = document.getElementById("tokens-topics");
+        if (!box || !topicsBox) return;
+        box.textContent = "";
+        topicsBox.textContent = "";
+        var rows = [];
+        rows.push({ values: ["Window of the model (" + b.windowLimitSource + ")", tokensNum(b.windowLimit), "", ""] });
+        rows.push({ values: [b.measured.label, tokensNum(b.measured.lastRequest), tokensNum(b.measured.cumulative), b.measured.basis] });
+        rows.push({ values: [b.free.label, tokensNum(b.free.lastRequest), "", b.free.basis] });
+        var group = null;
+        b.rows.forEach(function (r) {
+            if (r.group !== group) {
+                group = r.group;
+                rows.push({ total: true, values: [group, "", "", ""] });
+            }
+            var last = r.id === "F2" ? r.lastRequest : (r.lastRequest === null || r.lastRequest === undefined ? 0 : r.lastRequest);
+            var cum = r.id === "F2" ? r.cumulative : (r.cumulative === null || r.cumulative === undefined ? 0 : r.cumulative);
+            if (r.basis === "not available" && r.id !== "F2") { last = null; cum = null; }
+            rows.push({ values: [r.id + "  " + r.label, tokensNum(last), tokensNum(cum), r.basis], title: r.definition });
+        });
+        rows.push({ total: true, values: [b.rowsSum.label, tokensNum(b.rowsSum.lastRequest), tokensNum(b.rowsSum.cumulative), ""] });
+        rows.push({ total: true, values: ["Output", "", "", ""] });
+        b.output.forEach(function (r) { rows.push({ values: [r.id + "  " + r.label, tokensNum(r.lastRequest), tokensNum(r.cumulative), r.basis] }); });
+        rows.push({ total: true, values: ["Cache", "", "", ""] });
+        b.cache.forEach(function (r) { rows.push({ values: [r.label, tokensNum(r.lastRequest), tokensNum(r.cumulative), r.basis] }); });
+        var head = ["Row", "Last request (turn " + (b.lastTurn === null || b.lastTurn === undefined ? "-" : b.lastTurn) + ")",
+                    "All requests (" + b.cumulativeRequests + " of " + b.requests + ")", "Basis"];
+        var table = tokensTable(head, rows, 1);
+        var trs = table.querySelectorAll("tr");
+        rows.forEach(function (r, i) { if (r.title && trs[i + 1]) trs[i + 1].title = r.title; });
+        box.appendChild(table);
+        (b.notes || []).forEach(function (n) {
+            var d = document.createElement("div");
+            d.className = "io-empty";
+            d.textContent = n;
+            box.appendChild(d);
+        });
+        var topicRows = (b.topics || []).map(function (t) { return { values: [t.label, t.value, t.note] }; });
+        topicsBox.appendChild(tokensTable(["Topic", "Value", "Why it is shown"], topicRows, 9));
+    }
+
     function tokensShowTurns(t) {
         var box = document.getElementById("tokens-turns");
         if (!box) return;
@@ -3195,6 +3246,14 @@
         turnsBox.textContent = "";
         var conversation = encodeURIComponent(c.projectId) + "/chat-" + encodeURIComponent(c.chatId);
         tokensSetStatus("loading…");
+        var breakdownBox = document.getElementById("tokens-breakdown");
+        var topicsBox = document.getElementById("tokens-topics");
+        if (breakdownBox) breakdownBox.textContent = "";
+        if (topicsBox) topicsBox.textContent = "";
+        fetch("api/chats/" + conversation + "/tokens-breakdown")
+            .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
+            .then(function (b) { if (seq === tokensLoadSeq) tokensShowBreakdown(b); })
+            .catch(function (e) { if (seq === tokensLoadSeq && breakdownBox) tokensEmpty(breakdownBox, "error: " + e.message); });
         fetch("api/chats/" + conversation + "/head-block")
             .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
             .then(function (hb) { if (seq === tokensLoadSeq) tokensShowParts(hb); })

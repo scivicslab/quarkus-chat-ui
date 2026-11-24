@@ -88,6 +88,12 @@ public class TokensTabE2E {
         page.locator("#tokens-turns table").first().waitFor();
         String parts = page.locator("#tokens-parts").textContent();
         check(parts.contains(expectedPart), label + ": the parts table lists '" + expectedPart + "'");
+        String breakdown = page.locator("#tokens-breakdown").textContent();
+        check(breakdown.contains("A1  System prompt") && breakdown.contains("F1  Framing")
+                        && breakdown.contains("Not attributed (residual)") && breakdown.contains("Input the provider reported"),
+                label + ": the fixed rows and the residual are shown: " + breakdown.substring(0, Math.min(120, breakdown.length())));
+        check(page.locator("#tokens-topics").textContent().contains("History in the last request"),
+                label + ": the special topics table is shown");
         check(parts.contains("Estimated total of the parts above"), label + ": the estimate is shown");
         check(parts.contains("Measured first request") && !parts.contains("not recorded"),
                 label + ": the measured first request is shown beside it");

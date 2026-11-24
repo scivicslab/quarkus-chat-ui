@@ -180,6 +180,42 @@ public class IoLogView {
         return new Tokens(requests, turns);
     }
 
+    /**
+     * One recorded model request with what came back: the text of its {@code REQUEST:} (the body that was sent, for a
+     * provider that sends one; the one prompt chat-ui handed a CLI, otherwise), its answer, its reasoning and tool calls,
+     * and the tokens its {@code USAGE:} line holds. A figure that was not recorded is 0.
+     */
+    public record LlmRow(int turn, int step, String request, String response, String reasoning, String toolCalls,
+                         int prompt, int cacheCreation, int cacheRead, int completion) {}
+
+    /** Every {@code turnN/stepM/llm} row of a session, oldest first, for the Tokens tab's breakdown. */
+    public List<LlmRow> llmRows(long sessionId) {
+        return llmRowsOf(allLogs(sessionId));
+    }
+
+    static List<LlmRow> llmRowsOf(List<LogEntry> raw) {
+        List<LogEntry> ordered = raw.stream()
+                .sorted(Comparator.comparing(IoLogView::ts).thenComparing(LogEntry::getId))
+                .toList();
+        List<LlmRow> rows = new java.util.ArrayList<>();
+        for (LogEntry e : ordered) {
+            java.util.regex.Matcher m = TURN_LABEL.matcher(nz(e.getLabel()));
+            if (!m.find() || !"llm".equals(m.group(3))) continue;
+            String msg = nz(e.getMessage());
+            // The request is one line of JSON, so a blank line before RESPONSE: cannot be inside it.
+            String request = between(msg, "REQUEST:\n", "\n\nRESPONSE:\n");
+            String response = between(msg, "\n\nRESPONSE:\n", "\n\nREASONING:\n", "\n\nTOOL_CALLS:\n", "\n\nERROR:\n", "\n\nUSAGE:");
+            String reasoning = between(msg, "\n\nREASONING:\n", "\n\nTOOL_CALLS:\n", "\n\nERROR:\n", "\n\nUSAGE:");
+            String toolCalls = between(msg, "\n\nTOOL_CALLS:\n", "\n\nERROR:\n", "\n\nUSAGE:");
+            rows.add(new LlmRow(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)), request, response, reasoning,
+                    toolCalls, Math.max(0, parseTokenCount(msg, "promptTokens=")),
+                    Math.max(0, parseTokenCount(msg, "cacheCreationTokens=")),
+                    Math.max(0, parseTokenCount(msg, "cacheReadTokens=")),
+                    Math.max(0, parseTokenCount(msg, "completionTokens="))));
+        }
+        return rows;
+    }
+
     /** Reconstructs the per-turn trace for a session. */
     public List<TraceTurn> trace(long sessionId) {
         return traceOf(allLogs(sessionId));

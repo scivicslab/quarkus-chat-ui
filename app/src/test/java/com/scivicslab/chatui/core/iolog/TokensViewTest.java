@@ -68,4 +68,27 @@ class TokensViewTest {
         assertEquals(365, IoLogView.parseTokenCount(line, "completionTokens="));
         assertEquals("USAGE: promptTokens=0 completionTokens=0", TokenUsage.logLine(null));
     }
+
+    @Test
+    void llmRowsGiveTheRequestTheAnswerAndTheUsageOfEachStep() {
+        String msg = "REQUEST:\n{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}\n\nRESPONSE:\nan answer\nover two lines"
+                + "\n\nREASONING:\nthought\n\nTOOL_CALLS:\n  read {}\n\n"
+                + TokenUsage.logLine(new TokenUsage(2, 300, 1000, 50));
+        List<IoLogView.LlmRow> rows = IoLogView.llmRowsOf(List.of(
+                entry(1, "turn7/step2/llm", msg),
+                entry(2, "turn7/step2/tool", "TOOL: x\nINPUT: {}\nOBSERVATION: y")));
+
+        assertEquals(1, rows.size());
+        IoLogView.LlmRow r = rows.get(0);
+        assertEquals(7, r.turn());
+        assertEquals(2, r.step());
+        assertEquals("{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", r.request());
+        assertEquals("an answer\nover two lines", r.response());
+        assertEquals("thought", r.reasoning());
+        assertEquals("read {}", r.toolCalls());
+        assertEquals(1302, r.prompt());
+        assertEquals(300, r.cacheCreation());
+        assertEquals(1000, r.cacheRead());
+        assertEquals(50, r.completion());
+    }
 }

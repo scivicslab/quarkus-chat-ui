@@ -1,0 +1,58 @@
+package com.scivicslab.chatui.audittrail;
+
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * The context window of a model whose server does not report one (Claude Code, Codex): a fixed table kept in the
+ * settings, {@code chat-ui.window-limits}, as {@code name=tokens} entries separated by commas. A model is matched by
+ * the longest entry name its own name contains, ignoring case. A local LLM's window is read from its server instead.
+ */
+public final class WindowLimits {
+
+    /** What the table holds when the setting names nothing: the Claude families and GLM-5.3. */
+    public static final String DEFAULTS = "opus=200000,sonnet=200000,haiku=200000,glm-5.3=262144";
+
+    private final Map<String, Integer> table = new LinkedHashMap<>();
+
+    private WindowLimits() {}
+
+    /**
+     * @param setting the value of {@code chat-ui.window-limits}, or {@code null}; its entries replace the default ones
+     *                of the same name and add to them
+     * @return the table
+     */
+    public static WindowLimits of(String setting) {
+        WindowLimits limits = new WindowLimits();
+        limits.add(DEFAULTS);
+        limits.add(setting);
+        return limits;
+    }
+
+    private void add(String spec) {
+        if (spec == null) return;
+        for (String entry : spec.split(",")) {
+            int eq = entry.indexOf('=');
+            if (eq <= 0) continue;
+            String name = entry.substring(0, eq).strip().toLowerCase(Locale.ROOT);
+            try {
+                int tokens = Integer.parseInt(entry.substring(eq + 1).strip());
+                if (!name.isEmpty() && tokens > 0) table.put(name, tokens);
+            } catch (NumberFormatException e) {
+                // An entry that is not a number is left out; the others still apply.
+            }
+        }
+    }
+
+    /** @return the window of {@code model} in tokens, or {@code -1} when no entry matches */
+    public int windowOf(String model) {
+        if (model == null) return -1;
+        String m = model.toLowerCase(Locale.ROOT);
+        String best = null;
+        for (String name : table.keySet()) {
+            if (m.contains(name) && (best == null || name.length() > best.length())) best = name;
+        }
+        return best == null ? -1 : table.get(best);
+    }
+}
