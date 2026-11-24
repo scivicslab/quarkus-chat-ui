@@ -1259,6 +1259,7 @@ public class ChatSession extends Interpreter {
         // id and request id under it (TurnAndRequestIds_261107_oo01).
         emitter.accept(ChatEvent.turn(turnId(), requestId));
         recordTurnIds(requestId);
+        recordTurnQuestion(prompt);
         if (resultKey != null) {
             pendingResultKeys.remove(resultKey);
             activeResultKey = resultKey;
@@ -2075,6 +2076,23 @@ public class ChatSession extends Interpreter {
                             + (requestId == null ? "" : "\n" + REQUEST_ID_MARKER + " " + requestId));
         } catch (Exception e) {
             logger.log(Level.WARNING, "I/O log turn id record failed", e);
+        }
+    }
+
+    /**
+     * Records what this turn was asked ({@code turnN/question}) as soon as the turn starts, so that a turn that is
+     * still running, or that a crash or restart cut off, has its question in the log. {@code turnN/conversation}
+     * is written when the turn ends, with the same question and the answer; a reader that finds both uses that one.
+     *
+     * @param askedQuestion the prompt the turn began with
+     */
+    private void recordTurnQuestion(String askedQuestion) {
+        if (ioLog == null || ioSession < 0 || askedQuestion == null) return;
+        try {
+            ioLog.record(ioSession, "agent", "turn" + ioTurnNo + "/question",
+                    CONVERSATION_QUESTION_MARKER + "\n" + askedQuestion);
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "I/O log turn question record failed", e);
         }
     }
 

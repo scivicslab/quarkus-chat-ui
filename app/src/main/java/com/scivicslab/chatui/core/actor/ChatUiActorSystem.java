@@ -1391,6 +1391,21 @@ public class ChatUiActorSystem implements ConversationControls {
     }
 
     /**
+     * Puts one recorded turn back into a conversation's history: its user line, then its answer, or its failure. A
+     * turn with neither never finished, and comes back as its user line only.
+     */
+    static void restoreTurnInto(ChatSession c, IoLogView.Turn t) {
+        c.restoreHistory("user", t.question());
+        if (t.error() != null) {
+            // A failed turn comes back as the failure it was, not as an empty answer
+            // (TurnErrorInConversation_260913_oo01).
+            c.restoreHistory("error", "Error: " + t.error(), t.at(), null, null);
+        } else if (t.answer() != null) {
+            c.restoreHistory("assistant", t.answer(), t.at(), t.model(), t.durationMs());
+        }
+    }
+
+    /**
      * Refills a just-created conversation from what the I/O log recorded for it, so that restarting
      * the process does not empty the pane or lose what the model was told
      * ({@code ConversationRestoreOnRestart_260904_oo01}).
@@ -1457,21 +1472,14 @@ public class ChatUiActorSystem implements ConversationControls {
         }
 
         for (IoLogView.Turn t : turns) {
-            chatSessionIIAR.tell(a -> {
-                ChatSession c = (ChatSession) a;
-                c.restoreHistory("user", t.question());
-                if (t.error() != null) {
-                    // A failed turn comes back as the failure it was, not as an empty answer
-                    // (TurnErrorInConversation_260913_oo01).
-                    c.restoreHistory("error", "Error: " + t.error(), t.at(), null, null);
-                } else {
-                    c.restoreHistory("assistant", t.answer(), t.at(), t.model(), t.durationMs());
-                }
-            });
+            chatSessionIIAR.tell(a -> restoreTurnInto((ChatSession) a, t));
             // collapseTurn appends the pair and moves the collapsed/running boundary past it, which
             // is the same state a turn ending normally leaves behind — so seeding is just replaying
-            // it once per restored turn, and needs no separate provider API.
-            providerRef.tell(p -> p.collapseTurn(t.question(), t.answer()));
+            // it once per restored turn, and needs no separate provider API. A turn that never finished
+            // left the model nothing to remember.
+            if (t.answer() != null || t.error() != null) {
+                providerRef.tell(p -> p.collapseTurn(t.question(), t.answer()));
+            }
         }
         // The questions go on the queue's sent list too, so the checklist the browser draws
         // starts where the conversation left off (QueueChecklistView_260913_oo01).
