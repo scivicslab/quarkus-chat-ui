@@ -435,6 +435,12 @@ public class OpenAiCompatClient {
         });
         try {
             return call.get();
+        } catch (InterruptedException e) {
+            // A shutdown or a timeout interrupts the waiting thread: the request must not stay open behind it, and a
+            // response that arrives meanwhile is closed (the JDK's own send() did this).
+            call.cancel(true);
+            call.thenAccept(response -> response.body().close());
+            throw e;
         } catch (java.util.concurrent.ExecutionException e) {
             if (e.getCause() instanceof IOException io) throw io;
             if (e.getCause() instanceof RuntimeException re) throw re;

@@ -174,13 +174,15 @@ public final class McpToolClient {
         CompletableFuture<Void> stop = new CompletableFuture<>();
         CancelScope.Registration registration = scope.register(() -> stop.complete(null));
         if (registration == null) throw new McpException(method + " to " + endpoint + " was cancelled");
+        CompletableFuture<HttpResponse<String>> call = null;
         try {
-            CompletableFuture<HttpResponse<String>> call =
-                    http.sendAsync(b.POST(HttpRequest.BodyPublishers.ofString(body.toString())).build(),
-                            HttpResponse.BodyHandlers.ofString());
-            stop.thenRun(() -> call.cancel(true));
+            call = http.sendAsync(b.POST(HttpRequest.BodyPublishers.ofString(body.toString())).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            CompletableFuture<HttpResponse<String>> sent = call;
+            stop.thenRun(() -> sent.cancel(true));
             response = call.get();
         } catch (InterruptedException e) {
+            if (call != null) call.cancel(true);   // an interrupt (a shutdown, a timeout) must not leave the request open
             Thread.currentThread().interrupt();
             throw new McpException(method + " to " + endpoint + " was interrupted");
         } catch (Exception e) {
