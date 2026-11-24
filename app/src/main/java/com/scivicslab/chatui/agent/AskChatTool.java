@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.agent;
 
+import com.scivicslab.chatui.kernel.StateOwner;
 import com.scivicslab.chatui.core.actor.CallWatchdog;
 import com.scivicslab.chatui.core.actor.ChatSession;
 import com.scivicslab.chatui.core.actor.OpenRequests;
@@ -206,27 +207,61 @@ public final class AskChatTool {
     /** How many sent requests are remembered; the oldest go first. */
     private static final int MAX_SENT = 2000;
 
-    /** The requests sent with {@code ask_chat}, by request id, oldest first. */
-    private static final java.util.Map<String, Sent> SENT = java.util.Collections.synchronizedMap(
-            new java.util.LinkedHashMap<>() {
-                @Override protected boolean removeEldestEntry(java.util.Map.Entry<String, Sent> eldest) {
-                    return size() > MAX_SENT;
-                }
+    /**
+     * The requests sent with {@code ask_chat}, by request id, oldest first, and the number the next request sent from
+     * outside any turn gets. One owner, an actor, holds them: a conversation's turn, a remote reply and a job each use it from
+     * their own thread, and each use is one message to it.
+     */
+    private static final class SentBook {
+
+        /** The plain state the owner runs. */
+        private static final class State {
+            final java.util.LinkedHashMap<String, Sent> sent = new java.util.LinkedHashMap<>();
+            /** Seeded with the time the process started, so a number is not given out again after a restart. */
+            long outsideTurn = System.currentTimeMillis();
+        }
+
+        private final StateOwner<State> owner = new StateOwner<>("ask-chat-sent", new State());
+
+        void put(String requestId, Sent sent) {
+            owner.run(s -> {
+                s.sent.put(requestId, sent);
+                while (s.sent.size() > MAX_SENT) s.sent.remove(s.sent.keySet().iterator().next());
             });
+        }
+
+        Sent get(String requestId) {
+            return owner.ask(s -> s.sent.get(requestId));
+        }
+
+        void remove(String requestId) {
+            owner.run(s -> s.sent.remove(requestId));
+        }
+
+        java.util.List<String> unansweredFrom(String myName) {
+            return owner.ask(s -> {
+                java.util.List<String> out = new java.util.ArrayList<>();
+                for (java.util.Map.Entry<String, Sent> e : s.sent.entrySet()) {
+                    Sent sent = e.getValue();
+                    if (sent.sender().equals(myName) && !sent.done().isDone()) out.add(e.getKey() + " to " + sent.targetName());
+                }
+                return out;
+            });
+        }
+
+        long nextOutsideTurn() {
+            return owner.ask(s -> ++s.outsideTurn);
+        }
+    }
+
+    private static final SentBook SENT = new SentBook();
 
     /**
      * @param myName the calling conversation's qualified name
      * @return one line for each request it sent that has no reply yet, "{@code <id> to <target>}", oldest first
      */
     public static java.util.List<String> unansweredFrom(String myName) {
-        java.util.List<String> out = new java.util.ArrayList<>();
-        synchronized (SENT) {
-            for (java.util.Map.Entry<String, Sent> e : SENT.entrySet()) {
-                Sent s = e.getValue();
-                if (s.sender().equals(myName) && !s.done().isDone()) out.add(e.getKey() + " to " + s.targetName());
-            }
-        }
-        return out;
+        return SENT.unansweredFrom(myName);
     }
 
     /**
@@ -453,18 +488,11 @@ public final class AskChatTool {
     }
 
     /**
-     * Numbers requests sent from outside any conversation's turn (a job's workflow step). Seeded with the
-     * time the process started, so a number is not given out again after a restart.
-     */
-    private static final java.util.concurrent.atomic.AtomicLong OUTSIDE_TURN_REQUESTS =
-            new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
-
-    /**
      * @param myName the sender's name, e.g. a job's actor name
      * @return a request id for a request sent from outside any turn, {@code <sender>:q<n>}
      */
     static String outsideTurnRequestId(String myName) {
-        return myName + ":q" + OUTSIDE_TURN_REQUESTS.incrementAndGet();
+        return myName + ":q" + SENT.nextOutsideTurn();
     }
 
     /**
