@@ -50,11 +50,10 @@ public final class DocSearchTool {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    // The base URL and the HTTP client are made on first use, not in a static initializer: Quarkus initializes
-    // application classes at build time for a native image, which would freeze the build machine's settings into the
-    // executable and put an HttpClient in its image heap (tasks/todo.md, stage 12). In a JVM nothing changes: one of
-    // each, made once and then reused.
-    private static volatile String baseUrl;
+    // The HTTP client is made on first use, not in a static initializer: Quarkus initializes application classes at build
+    // time for a native image, which would put an HttpClient in its image heap (tasks/todo.md, stage 12); a static
+    // initializer that made an actor would fail the same way. So this one lazily made, locked field stays, and it is the
+    // only place ConcurrencyPrimitiveRatchetTest lists. The base URL needs no such field: it is read at each call.
     private static volatile HttpClient http;
 
     private static String resolveBaseUrl() {
@@ -243,17 +242,10 @@ public final class DocSearchTool {
     /**
      * The html-saurus base URL both this tool and {@link ReferenceLinkTool} call when no html-saurus node is known:
      * {@code -Dchatui.docsearch.url}, else {@code $DOCSEARCH_URL}, else {@code http://localhost:28001}, read on the first
-     * call and kept.
+     * call.
      */
     public static String baseUrl() {
-        String url = baseUrl;
-        if (url == null) {
-            synchronized (DocSearchTool.class) {
-                url = baseUrl;
-                if (url == null) baseUrl = url = resolveBaseUrl();
-            }
-        }
-        return url;
+        return resolveBaseUrl();
     }
 
     /** @return the one HTTP client of the docs tools, with a 10 s connect timeout, made on the first call and reused */
