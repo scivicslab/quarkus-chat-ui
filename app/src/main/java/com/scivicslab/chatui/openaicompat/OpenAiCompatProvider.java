@@ -198,6 +198,10 @@ public class OpenAiCompatProvider implements LlmProvider {
                 .toList();
     }
 
+    /** The conversation runs this provider's tool loop, so it gives it a step and time budget. */
+    @Override
+    public boolean takesStepBudget() { return true; }
+
     @Override
     public void addToolResults(List<ToolCallResult> results) {
         for (ToolCallResult r : results) {

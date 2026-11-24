@@ -229,6 +229,13 @@ public interface LlmProvider {
     default boolean parksToolCalls() { return false; }
 
     /**
+     * Whether the conversation runs this provider's tool loop and so gives it a budget: a limit on the steps of a turn
+     * and on its time, a warning before the limit, and one last request that must be answered in text at the limit.
+     * A provider whose CLI runs the tool loop itself has none.
+     */
+    default boolean takesStepBudget() { return false; }
+
+    /**
      * Parks one call the CLI made over MCP. Called on the thread that took the MCP request, not on the provider's
      * own actor thread, which is busy in {@link #sendPrompt}: the provider must take it safely from any thread.
      * The running {@link #sendPrompt} reports the call as a {@link ChatEvent#toolCall} event and returns; the

@@ -109,11 +109,13 @@ public final class ChatInspection {
     public static final String ENDED_STEP_LIMIT = "step-limit";
     /** The turn stopped because the model made the same call, with the same result, over and over. */
     public static final String ENDED_REPEATED_CALL = "repeated-call";
+    /** The turn stopped because it had run for its conversation's time limit. */
+    public static final String ENDED_TIME_LIMIT = "time-limit";
     /** The turn ended with {@code ask_person}: its reply is a question waiting for a decision. */
     public static final String ENDED_ASKED = "asked";
 
     /**
-     * @param ending    {@link #ENDED_ANSWERED}, {@link #ENDED_STEP_LIMIT}, {@link #ENDED_REPEATED_CALL} or
+     * @param ending    {@link #ENDED_ANSWERED}, {@link #ENDED_STEP_LIMIT}, {@link #ENDED_TIME_LIMIT}, {@link #ENDED_REPEATED_CALL} or
      *                  {@link #ENDED_ASKED}
      * @param modelCalls how many times the turn called the model
      * @param toolCalls  how many tools the turn ran

@@ -148,8 +148,25 @@ public class ChatSession extends Interpreter {
     private boolean stepLimitHit;
     /** The run of identical tool calls this turn has made, ending at its last call. */
     private final RepeatedCallDetector repeatedCalls = new RepeatedCallDetector();
-    /** Whether this turn has been told to answer in text after repeating a call: its next request carries no tool choice. */
-    private boolean repeatedCallFinal;
+    /**
+     * Why this turn's last model request is one that must be answered in text (its request carries no tool choice),
+     * or {@link FinalRequest#NONE} while the turn goes on as usual.
+     */
+    private FinalRequest finalRequest = FinalRequest.NONE;
+    private enum FinalRequest { NONE, REPEATED_CALL, STEP_LIMIT, TIME_LIMIT }
+    /** Whether this turn ended at its time limit. */
+    private boolean timeLimitHit;
+    /** Whether this turn has been warned that its steps are running out, which is done once. */
+    private boolean stepWarningGiven;
+
+    /** Steps one turn of a conversation whose provider takes a step budget may make, unless the conversation sets it. */
+    public static final int DEFAULT_CONVERSATION_STEP_LIMIT = 100;
+    /** Minutes one such turn may run, unless the conversation sets it; {@code 0} sets no time limit. */
+    public static final int DEFAULT_TIME_LIMIT_MINUTES = 10;
+    private volatile int stepLimit = DEFAULT_CONVERSATION_STEP_LIMIT;
+    private volatile int timeLimitMinutes = DEFAULT_TIME_LIMIT_MINUTES;
+    /** The time the turn's limit is measured on; a test sets its own. */
+    private java.util.function.LongSupplier clock = System::currentTimeMillis;
     /** Whether this turn ended on a repeated call, whatever the model answered then. */
     private boolean repeatedCallHit;
     /**
@@ -1300,7 +1317,7 @@ public class ChatSession extends Interpreter {
         this.turnDone = done;
         // Either side may ask for it: the conversation's own setting, or this one prompt.
         this.turnNoThink = noThink || noThinkAlways;
-        this.turnStartedAt = System.currentTimeMillis();
+        this.turnStartedAt = clock.getAsLong();
         if (byDefinition()) handSystemMessage();
         this.pendingCalls = null;
         this.finalAnswer = null;
@@ -1309,7 +1326,9 @@ public class ChatSession extends Interpreter {
         this.turnToolCalls = 0;
         this.stepLimitHit = false;
         this.repeatedCalls.reset();
-        this.repeatedCallFinal = false;
+        this.finalRequest = FinalRequest.NONE;
+        this.timeLimitHit = false;
+        this.stepWarningGiven = false;
         this.repeatedCallHit = false;
         this.personQuestion = null;
         this.cancelled = false;
@@ -1557,7 +1576,19 @@ public class ChatSession extends Interpreter {
      * @return the text
      */
     String systemMessageText() {
-        return provider.promptPreface() + HARNESS_NOTES + fileScopeNote() + skillCatalogPart() + projectInstructionsPart();
+        return provider.promptPreface() + HARNESS_NOTES + fileScopeNote() + skillCatalogPart() + projectInstructionsPart()
+                + stepBudgetNote();
+    }
+
+    /**
+     * The sentence that tells a model it has a budget of steps, for a provider that takes one; it is part of the system
+     * message, so the prompt's prefix stays the same from step to step.
+     *
+     * @return the sentence with its leading blank line, or {@code ""}
+     */
+    private String stepBudgetNote() {
+        if (!provider.takesStepBudget()) return "";
+        return "\n\nYou may make at most " + stepLimit + " tool-call steps in a turn; answer in text before you run out.";
     }
 
     /** @return where read and write may reach, with its leading blank line; {@code ""} without read */
@@ -1705,7 +1736,7 @@ public class ChatSession extends Interpreter {
         // answer. Retried once, same prompt, as its own step — a second draw from the same model
         // most often lands on a tool call or an answer (EmptyStopRetry_261009_oo01).
         if (!outcome.cutOff() && outcome.calls().isEmpty() && outcome.text().isBlank() && turnError == null
-                && !repeatedCallFinal) {
+                && finalRequest == FinalRequest.NONE) {
             turnEmitter.accept(ChatEvent.thinking(
                     "\n→ retrying: the reply had no text and no tool call\n"));
             stepCount++;
@@ -1749,14 +1780,13 @@ public class ChatSession extends Interpreter {
         // Any text the model writes ends a run of identical calls. The one request made after a repeated call is
         // the end of the turn: what it wrote is the answer, and a call it makes anyway is not run.
         String writtenText = TextToolCallParser.stripToolCallBlocks(outcome.text()).strip();
-        if (repeatedCallFinal) {
-            finalAnswer = writtenText.isEmpty()
-                    ? "The model repeated the same call " + repeatedCalls.count() + " times and gave no answer"
-                    : writtenText;
+        if (finalRequest != FinalRequest.NONE) {
+            finalAnswer = writtenText.isEmpty() ? noAnswerText() : writtenText;
             logToConversationSquad(writtenText.isEmpty() ? "WARNING" : "INFO", "turn" + ioTurnNo + "/step" + stepCount
-                    + ": the request after the repeated call " + (writtenText.isEmpty() ? "returned no text" : "was answered in text")
+                    + ": the request after the " + finalRequest.name().toLowerCase().replace('_', ' ') + " "
+                    + (writtenText.isEmpty() ? "returned no text" : "was answered in text")
                     + (outcome.calls().isEmpty() ? "" : "; a call in it was not run"));
-            return new ActionResult(false, "answer after a repeated call");
+            return new ActionResult(false, "answer after the " + finalRequest.name().toLowerCase().replace('_', ' '));
         }
         if (!writtenText.isEmpty()) repeatedCalls.reset();
 
@@ -1917,7 +1947,7 @@ public class ChatSession extends Interpreter {
         // (RequestMessagesControl_261018_oo01); a provider with no request body leaves it null.
         java.util.concurrent.atomic.AtomicReference<String> sentBody = new java.util.concurrent.atomic.AtomicReference<>();
         ProviderContext ctx = new ProviderContext(apiKey, stepImages, turnNoThink, () -> {}, sentBody::set, true,
-                repeatedCallFinal);
+                finalRequest != FinalRequest.NONE);
         boolean[] cutOff = {false};
         StringBuilder assistantBuf = new StringBuilder();
         // The reasoning is kept for the record, not for the answer: it goes to the I/O log's
@@ -2267,6 +2297,17 @@ public class ChatSession extends Interpreter {
      * @return {@link ActionResult} with {@code success=true} iff the limit has been reached
      */
     public ActionResult stepLimitReached(String limit) {
+        if (provider.takesStepBudget()) {
+            // This conversation's own limit, not the workflow's: at it, the turn makes one more request that must be
+            // answered in text, and the workflow goes on to it (the guard fails).
+            int own = stepLimit;
+            if (stepCount < own || finalRequest != FinalRequest.NONE) {
+                return new ActionResult(false, stepCount + "/" + own + " steps used");
+            }
+            askForAnAnswerInText(FinalRequest.STEP_LIMIT,
+                    "You reached the step limit of " + own + "; say what you found and what is left.");
+            return new ActionResult(false, "step limit " + own + " reached: asking for an answer in text");
+        }
         int max = parsePositiveOr(limit, DEFAULT_STEP_LIMIT);
         boolean reached = stepCount >= max;
         if (reached) stepLimitHit = true;
@@ -2282,6 +2323,95 @@ public class ChatSession extends Interpreter {
     }
 
     /**
+     * Makes the next model request this turn's last: it carries {@code note} as its prompt and no tool choice, so the
+     * model answers in text, and what it writes is the turn's answer. The ending is the one of {@code reason}.
+     */
+    private void askForAnAnswerInText(FinalRequest reason, String note) {
+        finalRequest = reason;
+        if (reason == FinalRequest.STEP_LIMIT) stepLimitHit = true;
+        if (reason == FinalRequest.TIME_LIMIT) timeLimitHit = true;
+        pendingPrompt = note;
+        turnTranscript.append(note).append("\n\n");
+        turnEmitter.accept(ChatEvent.thinking("\n→ " + note + "\n"));
+        logToConversationSquad("WARNING", "turn" + ioTurnNo + "/step" + stepCount + ": " + note);
+        if (ioLog != null && ioSession >= 0) {
+            try {
+                ioLog.record(ioSession, "agent", "turn" + ioTurnNo + "/step" + stepCount + "/limit",
+                        "LIMIT: " + reason.name().toLowerCase().replace('_', '-') + "\nNOTE: " + note);
+            } catch (Exception e) {
+                logger.log(Level.WARNING, "I/O log limit record failed", e);
+            }
+        }
+    }
+
+    /** What the turn answers when the request for an answer in text returned none. */
+    private String noAnswerText() {
+        return switch (finalRequest) {
+            case STEP_LIMIT -> "The step limit of " + stepLimit + " was reached and the model gave no answer";
+            case TIME_LIMIT -> "The time limit of " + timeLimitMinutes + " minutes was reached and the model gave no answer";
+            default -> "The model repeated the same call " + repeatedCalls.count() + " times and gave no answer";
+        };
+    }
+
+    /**
+     * The time-limit transition's guard: succeeds once, when this turn has run for its conversation's time limit,
+     * before the model is called again. It queues the note that asks the model for an answer in text; that request is
+     * the turn's last, and the turn ends with {@code time-limit}. Only a provider that takes a step budget has a time
+     * limit; the default is {@link #DEFAULT_TIME_LIMIT_MINUTES} and {@code 0} sets none. Makes no model call.
+     */
+    public ActionResult timeLimitReached() {
+        if (!provider.takesStepBudget() || timeLimitMinutes <= 0) return new ActionResult(false, "no time limit");
+        if (finalRequest != FinalRequest.NONE || cancelled || pauseRequested) return new ActionResult(false, "not now");
+        long limitMs = timeLimitMinutes * 60_000L;
+        if (clock.getAsLong() - turnStartedAt < limitMs) return new ActionResult(false, "within the time limit");
+        askForAnAnswerInText(FinalRequest.TIME_LIMIT,
+                "You reached the time limit of " + timeLimitMinutes + " minutes; say what you found and what is left.");
+        return new ActionResult(true, "time limit reached: asking for an answer in text");
+    }
+
+    /**
+     * The step-warning transition's guard: succeeds once per turn, when 80% of the steps (rounded up) are used, and
+     * queues the note that says so as the next step's prompt. Only a provider that takes a step budget gets it.
+     */
+    public ActionResult stepBudgetWarning() {
+        if (!provider.takesStepBudget() || stepWarningGiven || finalRequest != FinalRequest.NONE
+                || cancelled || pauseRequested) {
+            return new ActionResult(false, "no warning to give");
+        }
+        int max = stepLimit;
+        int warnAt = (int) Math.ceil(max * 0.8);
+        if (stepCount < warnAt || stepCount >= max) return new ActionResult(false, stepCount + "/" + max + " steps used");
+        stepWarningGiven = true;
+        String note = stepCount + " of " + max + " steps used. Start wrapping up: answer in text soon.";
+        pendingPrompt = pendingPrompt == null || pendingPrompt.isBlank() ? note : pendingPrompt + "\n\n" + note;
+        turnTranscript.append(note).append("\n\n");
+        turnEmitter.accept(ChatEvent.thinking("\n→ " + note + "\n"));
+        logToConversationSquad("INFO", "turn" + ioTurnNo + "/step" + stepCount + ": " + note);
+        return new ActionResult(true, "warned");
+    }
+
+    /** @return how many steps one turn of this conversation may make, when its provider takes a step budget */
+    public int getStepLimit() { return stepLimit; }
+
+    /** @param value steps per turn, at least 1 */
+    public void setStepLimit(int value) {
+        if (value < 1) throw new IllegalArgumentException("stepLimit must be at least 1");
+        this.stepLimit = value;
+    }
+
+    /** @return minutes one turn may run, {@code 0} for no limit */
+    public int getTimeLimitMinutes() { return timeLimitMinutes; }
+
+    /** @param value minutes per turn, {@code 0} for no limit */
+    public void setTimeLimitMinutes(int value) {
+        if (value < 0) throw new IllegalArgumentException("timeLimitMinutes must not be negative");
+        this.timeLimitMinutes = value;
+    }
+
+    /** Lets a test say what time it is: the turn's time limit is measured on this clock. */
+    void setClock(java.util.function.LongSupplier clock) { this.clock = clock; }
+
+    /**
      * The repeated-call transition's guard. When this turn's last {@link RepeatedCallDetector#REPEAT_LIMIT} tool calls
      * were the same call with the same result, it queues a note as the next step's prompt, and that step is the turn's
      * last request: it carries {@code tool_choice: "none"}, so the model must answer in text. It succeeds once per turn,
@@ -2290,12 +2420,12 @@ public class ChatSession extends Interpreter {
      * @return {@code success=true} when the note was queued
      */
     public ActionResult repeatedCallReached() {
-        if (repeatedCallFinal) return new ActionResult(false, "already asked for an answer in text");
+        if (finalRequest != FinalRequest.NONE) return new ActionResult(false, "already asked for an answer in text");
         if (cancelled || pauseRequested) return new ActionResult(false, "paused or cancelled");
         // A CLI harness (Claude Code, Codex) runs its own tool loop and takes no tool choice; it is left alone.
         if (provider.parksToolCalls()) return new ActionResult(false, "the provider's CLI runs the tool loop");
         if (!repeatedCalls.repeated()) return new ActionResult(false, "no repeated call");
-        repeatedCallFinal = true;
+        finalRequest = FinalRequest.REPEATED_CALL;
         repeatedCallHit = true;
         String what = repeatedCalls.tool() + " " + repeatedCalls.arguments();
         String note = "The same call (" + what + ") was made " + repeatedCalls.count() + " times in a row with the same"
@@ -2596,6 +2726,7 @@ public class ChatSession extends Interpreter {
             String ending = ChatInspection.endingLine(
                     personQuestion != null ? ChatInspection.ENDED_ASKED
                             : stepLimitHit ? ChatInspection.ENDED_STEP_LIMIT
+                            : timeLimitHit ? ChatInspection.ENDED_TIME_LIMIT
                             : repeatedCallHit ? ChatInspection.ENDED_REPEATED_CALL : ChatInspection.ENDED_ANSWERED,
                     stepCount, turnToolCalls);
             turnAnswer = new TurnReply(answer, ending, turnId());
@@ -2636,7 +2767,7 @@ public class ChatSession extends Interpreter {
                 // answer of its own: the provider collapses the runs of identical calls it left in the history,
                 // so that the next turn does not imitate them.
                 boolean endedWithoutAnswer = personQuestion == null
-                        && (cancelled || finalAnswer == null || stepLimitHit || repeatedCallHit);
+                        && (cancelled || finalAnswer == null || stepLimitHit || timeLimitHit || repeatedCallHit);
                 providerRef().tell(p -> p.collapseTurn(question, finalAnswer, endedWithoutAnswer));
             }
         } catch (Exception e) {
@@ -3335,7 +3466,7 @@ public class ChatSession extends Interpreter {
         // Asking the person is how this turn ends; the decision on the reply follows the person's answer.
         if (personQuestion != null) return new ActionResult(false, "asked the person");
         // A turn that ended on a repeated call is not asked for more: the decision is left open at its end.
-        if (repeatedCallHit) return new ActionResult(false, "ended on a repeated call");
+        if (repeatedCallHit || stepLimitHit || timeLimitHit) return new ActionResult(false, "ended on a limit or a repeated call");
         if (undecidedRequest == null) return new ActionResult(false, "no reply waiting for a decision");
         if (decisionAsked) {
             logToConversationSquad("WARNING", "turn" + ioTurnNo + ": no decision was recorded on the reply to request "
@@ -3394,12 +3525,14 @@ public class ChatSession extends Interpreter {
         String replier = undecidedReplier;
         String leftOpen = personQuestion != null ? "this turn ended by asking the person"
                 : stepLimitHit ? "this turn reached its step limit"
+                : timeLimitHit ? "this turn reached its time limit"
                 : repeatedCallHit ? "this turn ended on a repeated call"
                 : cancelled ? "this turn was cancelled"
                 : finalAnswer == null && turnError != null ? "this turn failed: " + turnError
                 : com.scivicslab.chatui.agent.ChatInspection.ENDED_ASKED.equals(undecidedEnding)
                         || com.scivicslab.chatui.agent.ChatInspection.ENDED_STEP_LIMIT.equals(undecidedEnding)
                 || com.scivicslab.chatui.agent.ChatInspection.ENDED_REPEATED_CALL.equals(undecidedEnding)
+                || com.scivicslab.chatui.agent.ChatInspection.ENDED_TIME_LIMIT.equals(undecidedEnding)
                         ? "the reply ended " + undecidedEnding
                 : null;
         if (leftOpen != null) {
@@ -3923,6 +4056,8 @@ public class ChatSession extends Interpreter {
         o.put("model", m == null ? org.json.JSONObject.NULL : m);
         o.put("temperature", temperature == null ? org.json.JSONObject.NULL : temperature);
         o.put("noThink", noThinkAlways);
+        o.put("stepLimit", stepLimit);
+        o.put("timeLimitMinutes", timeLimitMinutes);
         o.put("effort", effort == null ? org.json.JSONObject.NULL : effort);
         o.put("mcpServers", new org.json.JSONObject(mcpServers));
         e.write(com.scivicslab.chatui.core.iolog.IoLogView.SETTINGS_LABEL, o.toString());

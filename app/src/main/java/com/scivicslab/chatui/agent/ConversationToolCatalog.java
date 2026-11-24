@@ -92,9 +92,10 @@ public final class ConversationToolCatalog {
                 starting with "[reply to request <request id>, from <the turn that wrote it>]" — match the id
                 against the one you were given to tell which request it answers — followed by one line, [ended:
                 answered; model calls: N; tool calls: M], saying how its turn ended: "answered", "step-limit"
-                when it ran out of steps (then the reply is only a notice, not an answer), "repeated-call" when it
-                made the same call three times with the same result and was then asked for an answer in text (the
-                reply may be that answer, or a line saying it gave none), or "asked" when it
+                when it ran out of steps, "time-limit" when it ran out of time, "repeated-call" when it made the same
+                call three times with the same result. In these three it was asked for an answer in text, so the
+                reply is what it found so far, or a line saying it gave none; it may be unfinished. A turn also ends
+                "asked" when it
                 ended with ask_person (then the reply is a question that waits for your decision: answer it with
                 ask_chat, or ask_person yourself). If its turn left no reply, the message says so and why. So
                 once you have sent your instructions, end your turn and wait; do not call get_chat_log or
