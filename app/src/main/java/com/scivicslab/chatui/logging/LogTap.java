@@ -4,9 +4,6 @@ import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Deque;
 import java.util.List;
 import java.util.logging.Formatter;
 import java.util.logging.Handler;
@@ -31,7 +28,8 @@ public class LogTap {
 
     private static final int MAX = 1000;
 
-    private final Deque<Entry> buffer = new ArrayDeque<>(MAX);
+    /** The captured lines; one owner (an actor) keeps them, so a log call from any thread only tells it. */
+    private final RecentRing<Entry> buffer = new RecentRing<>("log-tap", MAX);
     private final Formatter formatter = new SimpleFormatter();
 
     private final Handler handler = new Handler() {
@@ -66,12 +64,7 @@ public class LogTap {
             }
             Entry entry = new Entry(record.getMillis(), record.getLevel().getName(),
                     record.getLevel().intValue(), shortLogger, message);
-            synchronized (buffer) {
-                buffer.addLast(entry);
-                while (buffer.size() > MAX) {
-                    buffer.pollFirst();
-                }
-            }
+            buffer.add(entry);
         }
 
         @Override
@@ -91,18 +84,6 @@ public class LogTap {
 
     /** Returns up to {@code limit} of the most recent entries, oldest first. */
     public List<Entry> recent(int limit) {
-        synchronized (buffer) {
-            int size = buffer.size();
-            int skip = (limit > 0 && size > limit) ? size - limit : 0;
-            List<Entry> out = new ArrayList<>(skip < size ? size - skip : 0);
-            int i = 0;
-            for (Entry entry : buffer) {
-                if (i++ < skip) {
-                    continue;
-                }
-                out.add(entry);
-            }
-            return out;
-        }
+        return buffer.recent(limit);
     }
 }
