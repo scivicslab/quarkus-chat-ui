@@ -5,6 +5,7 @@ import com.scivicslab.chatui.core.actor.ChatSessionIIAR;
 import com.scivicslab.chatui.core.actor.ChatUiActorSystem;
 import com.scivicslab.chatui.core.actor.Project;
 import com.scivicslab.chatui.core.iolog.IoLogStore;
+import com.scivicslab.chatui.mcp.ChatUiMcpScopes;
 import com.scivicslab.chatui.openaicompat.McpToolClient;
 import com.scivicslab.chatui.openaicompat.ToolDefinition;
 import jakarta.inject.Inject;
@@ -37,8 +38,9 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>For a Claude Code conversation the parts are the CLAUDE.md files that apply to the working directory,
  * the project's MEMORY.md index, the skill list, each MCP server the CLI is configured with, and the CLI's
- * own prompt and tools, which cannot be counted here. For any other provider they are the tools of chat-ui's
- * own MCP server and of the conversation's external MCP servers.</p>
+ * own prompt and tools, which cannot be counted here, and the tools of chat-ui's own MCP server, which the CLI is
+ * launched with. For any other provider they are the tools of chat-ui's own MCP server and of the conversation's
+ * external MCP servers.</p>
  */
 @Path("/api/chats")
 public class HeadBlockResource {
@@ -51,6 +53,9 @@ public class HeadBlockResource {
 
     @Inject
     IoLogStore ioLog;
+
+    @Inject
+    ChatUiMcpScopes mcpScopes;
 
     @ConfigProperty(name = "quarkus.http.port", defaultValue = "28030")
     int httpPort;
@@ -81,8 +86,7 @@ public class HeadBlockResource {
         if ("claude".equals(session.getProviderIdDirect())) {
             claudeParts(parts, workingDir, home, id);
         } else {
-            parts.addAll(mcpParts("chat-ui's own MCP server", "http://127.0.0.1:" + httpPort + "/mcp", id,
-                    HeadBlock.CONVERSATION_SETTING));
+            parts.add(HeadBlock.chatUiMcpPart(mcpScopes.offeredTo(id)));
             Map<String, String> external = actorSystem.mcpServersOf(id);
             if (external != null) {
                 external.forEach((name, url) -> parts.addAll(mcpParts("MCP server " + name, url, id,
@@ -120,6 +124,8 @@ public class HeadBlockResource {
                     HeadBlock.PERSON_EDITED_FILE));
         }
         parts.add(skillListPart());
+        // Passed by chat-ui when it launches the CLI (--mcp-config), so no configuration file below names it.
+        parts.add(HeadBlock.chatUiMcpPart(mcpScopes.offeredTo(conversation)));
         mcpConfigOfTheCli(workingDir, home).forEach((name, server) -> {
             String url = server.optString("url", "");
             if (url.isEmpty()) {

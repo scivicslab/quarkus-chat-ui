@@ -72,6 +72,38 @@ class McpToolEndpointTest {
         assertEquals(List.of("calc {\"expression\":\"23*47\"}"), handed, "only the offered call was handed over");
     }
 
+    /** What {@code tools/list} answers is the registered tools the scope is offered, in registration order. */
+    @Test
+    void offeredFromIsTheRegisteredToolsTheScopeIsOffered(@TempDir Path root) {
+        ToolRunner full = runner("s1", root, ToolSet.FULL);
+        ToolRunner harness = runner("s2", root, ToolSet.HARNESS);
+        McpToolEndpoint endpoint = new McpToolEndpoint(name -> switch (name) { case "s1" -> full; case "s2" -> harness; default -> null; });
+        List<ToolCatalog.Spec> registered = new java.util.ArrayList<>(ToolCatalog.coreTools().values());
+
+        List<String> s1 = endpoint.offeredFrom(registered, "s1").stream().map(ToolCatalog.Spec::name).toList();
+        List<String> s2 = endpoint.offeredFrom(registered, "s2").stream().map(ToolCatalog.Spec::name).toList();
+
+        assertEquals(registered.stream().map(ToolCatalog.Spec::name).toList(), s1);
+        assertEquals(s1.stream().filter(n -> ToolSet.HARNESS.contains(n)).toList(), s2, "the tool set's exclusions are left out");
+        assertTrue(s1.size() > s2.size());
+        assertTrue(endpoint.offeredFrom(registered, "s3").isEmpty(), "an unknown scope is offered nothing");
+    }
+
+    /** A scope with a hand-off is listed what the hand-off offers, as its requests would be. */
+    @Test
+    void offeredFromFollowsTheHandOff(@TempDir Path root) {
+        ToolRunner full = runner("s1", root, ToolSet.FULL);
+        McpCallHandOff handOff = new McpCallHandOff() {
+            @Override public boolean offers(String tool) { return "ask_person".equals(tool) || "calc".equals(tool); }
+            @Override public String call(String tool, String argumentsJson) { return ""; }
+        };
+        McpToolEndpoint endpoint = new McpToolEndpoint(name -> "s1".equals(name) ? full : null,
+                name -> "s1".equals(name) ? handOff : null);
+        List<ToolCatalog.Spec> registered = new java.util.ArrayList<>(ToolCatalog.coreTools().values());
+        assertEquals(List.of("calc"), endpoint.offeredFrom(registered, "s1").stream().map(ToolCatalog.Spec::name).toList(),
+                "only registered tools are listed, and only those the hand-off offers");
+    }
+
     private static ToolRunner runner(String name, Path root, ToolSet set) {
         return new ToolRunner(new ToolScope(name, new FileAccessScope(root, List.of()), set, Map.of()),
                 expression -> "1081", DocsLookup.HTTP, ToolExtension.NONE, ToolCallRecorder.NONE);

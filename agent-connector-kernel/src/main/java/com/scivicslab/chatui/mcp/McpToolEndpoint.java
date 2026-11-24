@@ -69,6 +69,21 @@ public final class McpToolEndpoint {
     }
 
     /**
+     * The tools a {@code tools/list} request for scope {@code scopeName} answers, given the tools the server registers:
+     * those {@link #offers} says the scope is offered, in the order they are registered. The server registers
+     * {@link McpScopes#tools()} and {@link McpScopeToolFilter} applies {@code offers}, so this is the same list without
+     * a request ({@link KernelMcpServer}).
+     *
+     * @param registered every tool the server registers, e.g. {@link McpScopes#tools()}
+     * @return the definitions the scope is shown; empty when there is no such scope
+     */
+    public List<ToolCatalog.Spec> offeredFrom(List<ToolCatalog.Spec> registered, String scopeName) {
+        List<ToolCatalog.Spec> specs = new ArrayList<>();
+        for (ToolCatalog.Spec spec : registered) if (offers(scopeName, spec.name())) specs.add(spec);
+        return specs;
+    }
+
+    /**
      * @return the definitions scope {@code scopeName} is offered: the core tools and the plugin tools it may call;
      *         empty when there is no such scope
      */

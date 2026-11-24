@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.audittrail;
 
+import com.scivicslab.chatui.agent.ToolCatalog;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -161,6 +162,24 @@ public final class HeadBlock {
             array.put(o);
         }
         return array.toString();
+    }
+
+    /**
+     * The part for chat-ui's own MCP server: the tool definitions its {@code tools/list} answers a conversation with,
+     * as the JSON array a client receives ({@link #toolsJson}). Measured here, without a request, from the same list
+     * the server's filter produces ({@code ChatUiMcpScopes.offeredTo}); a harness CLI such as Claude Code or Codex is
+     * launched with this server, so its definitions are in the head block although no configuration file names them.
+     *
+     * @param offered the definitions the conversation is offered
+     * @return a measured part, cut by changing the conversation's tool set ({@link #CONVERSATION_SETTING})
+     */
+    public static Part chatUiMcpPart(List<ToolCatalog.Spec> offered) {
+        List<String[]> tools = new ArrayList<>();
+        for (ToolCatalog.Spec spec : offered) {
+            tools.add(new String[] {spec.name(), spec.description(), spec.inputSchema().toString()});
+        }
+        return measuredPart("chat-ui's MCP server (tools/list, " + tools.size() + " tools)", toolsJson(tools),
+                CONVERSATION_SETTING);
     }
 
     /**

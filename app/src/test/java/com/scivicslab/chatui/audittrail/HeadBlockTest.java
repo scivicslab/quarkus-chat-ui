@@ -108,6 +108,32 @@ class HeadBlockTest {
         assertEquals("object", array.getJSONObject(1).getJSONObject("inputSchema").getString("type"));
     }
 
+    @Test
+    void chatUiMcpPart_isTheToolsListJsonOfTheConversationsToolSet() {
+        List<com.scivicslab.chatui.agent.ToolCatalog.Spec> full =
+                new java.util.ArrayList<>(com.scivicslab.chatui.agent.ConversationToolCatalog.builtInTools().values());
+        List<com.scivicslab.chatui.agent.ToolCatalog.Spec> harness = full.stream()
+                .filter(t -> com.scivicslab.chatui.agent.ToolSet.HARNESS.contains(t.name())).toList();
+
+        Part all = HeadBlock.chatUiMcpPart(full);
+        Part fewer = HeadBlock.chatUiMcpPart(harness);
+
+        assertEquals("chat-ui's MCP server (tools/list, " + full.size() + " tools)", all.name());
+        assertTrue(all.measured());
+        assertEquals(HeadBlock.CONVERSATION_SETTING, all.whoCanCut());
+        assertTrue(all.chars() > 5_000, "the conversation tools are thousands of characters: " + all.chars());
+        // The part is exactly the JSON array a client receives: its name, description and input schema per tool.
+        var array = new org.json.JSONArray(HeadBlock.toolsJson(full.stream()
+                .map(t -> new String[] {t.name(), t.description(), t.inputSchema().toString()}).toList()));
+        assertEquals(full.size(), array.length());
+        assertEquals(array.toString().codePointCount(0, array.toString().length()), all.chars());
+        assertEquals(HeadBlock.estimateTokens(array.toString()), all.estimatedTokens());
+        // A tool set that leaves tools out leaves their definitions out of the part.
+        assertEquals("chat-ui's MCP server (tools/list, " + harness.size() + " tools)", fewer.name());
+        assertTrue(fewer.chars() < all.chars());
+        assertTrue(harness.size() < full.size());
+    }
+
     /** The answer of GET /api/sessions/{id}/tokens as the other half of the plan defines it (a stub, until it exists). */
     private static final String TOKENS = new JSONObject()
             .put("requests", new org.json.JSONArray().put(new JSONObject().put("turn", 1).put("step", 1)

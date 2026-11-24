@@ -47,6 +47,18 @@ public class ChatUiMcpScopes implements McpScopes {
         return specs;
     }
 
+    /**
+     * The tools chat-ui's MCP server answers {@code tools/list} with for one conversation, as its request would get
+     * them: every registered tool the server's filter offers that conversation, so a harness CLI that parks its calls
+     * gets the tools that drive the conversation too, and a conversation's tool set leaves out what it excludes.
+     *
+     * @param conversation a qualified conversation name, e.g. {@code "project1/chat-01"}
+     * @return the definitions, in the order the server lists them; empty when there is no such conversation
+     */
+    public List<ToolCatalog.Spec> offeredTo(String conversation) {
+        return new McpToolEndpoint(this::runnerOf, this::handOffOf).offeredFrom(tools(), conversation);
+    }
+
     @Override
     public ToolRunner runnerOf(String name) {
         ConversationToolRunner runner = chats.toolRunnerOf(name);

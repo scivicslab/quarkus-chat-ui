@@ -69,8 +69,9 @@ public class TokensTabE2E {
                 Page page = browser.newPage();
                 page.onPageError(e -> check(false, "page error: " + e));
                 page.navigate(BASE_URL, new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
-                checkTab(page, "01", "chat-ui's own MCP server", "openai-compat", 1000);
+                checkTab(page, "01", "chat-ui's MCP server (tools/list", "openai-compat", 1000);
                 checkTab(page, "02", "CLI built-in prompt and tools (not measurable here)", "claude", 41000);
+                checkTab(page, "02", "chat-ui's MCP server (tools/list", "claude (chat-ui's own MCP server)", 41000);
             } finally {
                 browser.close();
             }
