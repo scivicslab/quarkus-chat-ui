@@ -118,7 +118,7 @@ public final class AskChatTool {
         // so that the target's thread is not held while the caller's queue takes the message. It is addressed by
         // the caller's name and the request id, and the caller's actors are looked up when it is delivered, as a
         // reply from another instance is (EachActorRecordsItsOwnState_261118_oo01).
-        done.whenCompleteAsync((reply, failure) -> {
+        deliverWhenDone(done, (reply, failure) -> {
             // A request its sender took back with cancel_request leaves no message: the sender knows.
             if (reply != TurnReply.WITHDRAWN) deliverReplyTo(system, myName, targetName, requestId, urgent, reply, failure);
         });
@@ -288,6 +288,26 @@ public final class AskChatTool {
             LOG.log(Level.WARNING, "ask_chat: could not read the organization of " + myProjectId, e);
             return false;
         }
+    }
+
+    /**
+     * Runs {@code delivery} when {@code done} completes, on a job of its own. {@code done} completes inside the
+     * target's actor, and a delivery blocks (it asks the caller's queue, or calls another instance), so it must not run
+     * there: the completion only starts the job. What the delivery throws is logged, as nothing else would see it.
+     *
+     * @param done     the target's answer
+     * @param delivery what to do with the answer or the failure
+     */
+    public static void deliverWhenDone(CompletableFuture<TurnReply> done,
+                                       java.util.function.BiConsumer<TurnReply, Throwable> delivery) {
+        done.whenComplete((reply, failure) -> com.scivicslab.chatui.kernel.BlockingJob.start("reply-delivery", () -> {
+            try {
+                delivery.accept(reply, failure);
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "a reply could not be delivered", e);
+            }
+            return null;
+        }, null));
     }
 
     /**
@@ -695,7 +715,7 @@ public final class AskChatTool {
         CompletableFuture<TurnReply> done = new CompletableFuture<>();
         String localId = localIdOf(senderNode, requestId);
         OpenRequests.RemoteLink link = new OpenRequests.RemoteLink(senderNode, requestId);
-        done.whenCompleteAsync((reply, failure) -> {
+        deliverWhenDone(done, (reply, failure) -> {
             if (reply == TurnReply.WITHDRAWN) return;
             deliverRemoteReply(nodes, link, sender, target, urgent, reply, failure);
         });

@@ -122,7 +122,7 @@ public class PromptQueue {
             CompletableFuture<TurnReply> done = new CompletableFuture<>();
             if (requestId != null && source != null && source.startsWith(ChatSession.ASK_CHAT_SOURCE_PREFIX) && conversation != null) {
                 String asker = source.substring(ChatSession.ASK_CHAT_SOURCE_PREFIX.length());
-                done.whenCompleteAsync((reply, failure) -> {
+                com.scivicslab.chatui.agent.AskChatTool.deliverWhenDone(done, (reply, failure) -> {
                     if (reply == TurnReply.WITHDRAWN) return;
                     if (link != null) {
                         com.scivicslab.chatui.agent.AskChatTool.deliverRemoteReply(system, link, asker, conversation,

@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.llm;
 
+import com.scivicslab.chatui.kernel.BlockingJob;
 import com.scivicslab.llmrelay.proxy.RelayInterceptor;
 import io.vertx.core.Context;
 import io.vertx.core.MultiMap;
@@ -9,7 +10,6 @@ import io.vertx.httpproxy.ProxyRequest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 
@@ -39,7 +39,7 @@ final class ScopeKeyInterceptor implements RelayInterceptor {
         // Vert.x context.
         Context context = Vertx.currentContext();
         Executor onContext = context == null ? Runnable::run : task -> context.runOnContext(v -> task.run());
-        return CompletableFuture.supplyAsync(() -> requests.decide(afterPrefix, headers)).thenApplyAsync(decision -> {
+        return BlockingJob.start("llm-proxy-decision", () -> requests.decide(afterPrefix, headers), null).result().thenApplyAsync(decision -> {
             if (decision instanceof LlmProxyRequests.Refuse refuse) {
                 return new Refusal(refuse.status(), "application/json",
                         "{\"error\":\"" + refuse.message().replace("\"", "'") + "\"}");

@@ -3913,7 +3913,7 @@ public class ChatSession extends Interpreter {
         try {
             openRequests.load(new org.json.JSONObject(json), (id, asker, urgent, link) -> {
                 CompletableFuture<TurnReply> done = new CompletableFuture<>();
-                done.whenCompleteAsync((reply, failure) -> {
+                com.scivicslab.chatui.agent.AskChatTool.deliverWhenDone(done, (reply, failure) -> {
                     if (reply == TurnReply.WITHDRAWN || asker == null) return;
                     if (link != null) {
                         com.scivicslab.chatui.agent.AskChatTool.deliverRemoteReply(system, link, asker, myChatName(), urgent, reply, failure);
