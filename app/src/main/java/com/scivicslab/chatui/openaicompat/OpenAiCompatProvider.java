@@ -10,6 +10,7 @@ import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.provider.ProviderCapabilities;
 import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
+import com.scivicslab.chatui.core.rest.TokenUsage;
 
 import java.net.URI;
 import java.util.ArrayList;
@@ -349,6 +350,7 @@ public class OpenAiCompatProvider implements LlmProvider {
             try {
                 StringBuilder assistantBuf = new StringBuilder();
                 List<ChatMessage.ToolCallRequest.ToolCall> calls = new ArrayList<>();
+                TokenUsage[] usage = {null};
                 client.sendPrompt(currentModel, snapshot, ctx.noThink(), maxTokens,
                     tools, new OpenAiCompatClient.StreamCallback() {
                         @Override public void onDelta(String content) {
@@ -363,6 +365,9 @@ public class OpenAiCompatProvider implements LlmProvider {
                         }
                         @Override public void onToolCalls(List<ChatMessage.ToolCallRequest.ToolCall> toolCalls) {
                             calls.addAll(toolCalls);
+                        }
+                        @Override public void onUsage(TokenUsage reported) {
+                            usage[0] = reported;
                         }
                         @Override public void onComplete(long durationMs, String finishReason) {
                             String response = assistantBuf.toString();
@@ -405,7 +410,7 @@ public class OpenAiCompatProvider implements LlmProvider {
                                         + " trim(s). Session preserved with "
                                         + history.size() + " messages.");
                             }
-                            emitter.accept(ChatEvent.result(null, 0.0, durationMs, currentModel, false));
+                            emitter.accept(ChatEvent.result(null, 0.0, durationMs, currentModel, false, usage[0]));
                         }
                         @Override public void onError(String message) {
                             emitter.accept(ChatEvent.error(message));
