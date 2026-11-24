@@ -81,8 +81,8 @@ class ChatSessionStepLimitTest {
 
     @Test
     void theTurnStopsAtTheNumberTheWorkflowNames() {
-        assertEquals(50, runTurn(null).calls.size(),
-                "chat-session-agent-loop.yaml's step-limit transition names 50");
+        assertEquals(300, runTurn(null).calls.size(),
+                "chat-session-agent-loop.yaml's step-limit transition names 300");
 
         assertEquals(2, runTurn("step-limit-2.yaml").calls.size(),
                 "the same machinery with 2 in the YAML stops after 2 — the number is the workflow's");

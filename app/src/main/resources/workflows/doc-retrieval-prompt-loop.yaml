@@ -46,7 +46,7 @@ steps:
       - actor: this
         method: stepLimitReached
         arguments:
-          maxSteps: 50
+          maxSteps: 300
         execution: direct
       - actor: this
         method: rearmReplyWatches
