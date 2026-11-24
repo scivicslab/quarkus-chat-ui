@@ -25,4 +25,12 @@ public interface McpScopes {
      *         does not exist
      */
     boolean opens(String name, String key);
+
+    /**
+     * @param name the scope a request names
+     * @return who runs that scope's calls instead of its runner, or {@code null} when its runner runs them
+     */
+    default McpCallHandOff handOffOf(String name) {
+        return null;
+    }
 }

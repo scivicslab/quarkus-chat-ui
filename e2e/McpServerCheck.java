@@ -9,7 +9,7 @@ import java.util.regex.Pattern;
 /**
  * Phase 1 of HarnessToolsThroughOneMcpServer_261120_oo01, end to end (ToolCatalogAndChatUiMcpServer_261120_oo01): an
  * MCP client sends stateless requests to chat-ui's {@code /mcp} naming a conversation in
- * {@code X-Chat-Ui-Conversation}, lists that conversation's tools, calls {@code write} and {@code read}, and each call
+ * {@code X-Agent-Connector-Scope} and its key, lists that conversation's tools, calls {@code write} and {@code read}, and each call
  * appears once in the conversation's I/O log.
  *
  * <p>Outside the Maven build, on a throwaway instance whose model is {@code e2e/ScriptedModelServer.java}. The check
@@ -43,7 +43,7 @@ public class McpServerCheck {
     /**
      * Sends one stateless MCP request.
      *
-     * @param conversation the {@code X-Chat-Ui-Conversation} value, or {@code null} to send none
+     * @param conversation the {@code X-Agent-Connector-Scope} and its key value, or {@code null} to send none
      * @param tool         the tool of a {@code tools/call}, or {@code null} for {@code tools/list}
      */
     static String mcp(String base, String conversation, String tool, String argumentsJson) throws Exception {
@@ -59,10 +59,26 @@ public class McpServerCheck {
                 .header("Mcp-Protocol-Version", VERSION)
                 .header("Mcp-Method", method);
         if (tool != null) b.header("Mcp-Name", tool);
-        if (conversation != null) b.header("X-Chat-Ui-Conversation", conversation);
+        if (conversation != null) {
+            b.header("X-Agent-Connector-Scope", conversation);
+            b.header("Authorization", "Bearer " + mcpKey(conversation));
+        }
         HttpResponse<String> r = HTTP.send(b.POST(HttpRequest.BodyPublishers.ofString(body)).build(),
                 HttpResponse.BodyHandlers.ofString());
         return r.statusCode() + " " + r.body();
+    }
+
+    /**
+     * The conversation's MCP key, as chat-ui derives it: HMAC-SHA256 of the conversation's name under the secret the
+     * instance was started with ({@code -Dchat-ui.mcp.key-secret}), given here in {@code CHAT_UI_MCP_KEY_SECRET}.
+     */
+    static String mcpKey(String conversation) throws Exception {
+        String secret = System.getenv("CHAT_UI_MCP_KEY_SECRET");
+        if (secret == null || secret.isBlank()) throw new IllegalStateException("set CHAT_UI_MCP_KEY_SECRET to the "
+                + "instance's -Dchat-ui.mcp.key-secret");
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new javax.crypto.spec.SecretKeySpec(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+        return java.util.HexFormat.of().formatHex(mac.doFinal(conversation.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     }
 
     static void check(boolean ok, String what, String detail) {

@@ -11,21 +11,22 @@ import java.util.List;
  * (TestingStandard_260404_oo01).
  *
  * <pre>
- * java e2e/McpKeyCheck.java &lt;port&gt; no-key      # the instance runs as shipped: require-key=false
- * java e2e/McpKeyCheck.java &lt;port&gt; key-required # the instance runs with -Dagent-connector-kernel.mcp.require-key=true
+ * java e2e/McpKeyCheck.java &lt;port&gt; no-key       # the instance runs with -Dagent-connector-kernel.mcp.require-key=false
+ * CHAT_UI_MCP_KEY_SECRET=s java e2e/McpKeyCheck.java &lt;port&gt; key-required
+ *                                                   # the instance runs as shipped, with -Dchat-ui.mcp.key-secret=s
  * </pre>
  *
  * <ul>
  * <li>no-key: initialize answers 200 with a complete serverInfo (name and version), with no key and no conversation.</li>
- * <li>key-required: chat-ui registers no key, so every MCP request is refused. A request that names no conversation
- * gets 400. A known conversation with no key, a known conversation with a wrong key, and an unknown conversation all
- * get the same 401 with the same body. A path outside the MCP server is not affected.</li>
+ * <li>key-required: a request that names no conversation gets 400. A known conversation with no key, a known
+ * conversation with a wrong key, and an unknown conversation all get the same 401 with the same body. A known
+ * conversation with its own key gets 200. A path outside the MCP server is not affected.</li>
  * </ul>
  * Prints one line per check and exits 1 when any fails.
  */
 public class McpKeyCheck {
 
-    static final String HEADER = "X-Chat-Ui-Conversation";
+    static final String HEADER = "X-Agent-Connector-Scope";
     static final String INIT = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\","
             + "\"capabilities\":{},\"clientInfo\":{\"name\":\"mcp-key-check\",\"version\":\"1\"}}}";
     static final List<String> failures = new ArrayList<>();
@@ -52,6 +53,10 @@ public class McpKeyCheck {
             check(unknown.statusCode() == 401, "an unknown conversation gets 401", describe(unknown));
             check(unknown.body().equals(wrongKey.body()) && unknown.body().equals(noKey.body()),
                     "the three 401s have the same body", "[" + noKey.body() + "] [" + wrongKey.body() + "] [" + unknown.body() + "]");
+            HttpResponse<String> own = post(base, "project1/chat-01", "Bearer " + mcpKey("project1/chat-01"));
+            check(own.statusCode() == 200, "a known conversation with its own key gets 200", describe(own));
+            HttpResponse<String> borrowed = post(base, "project1/chat-01", "Bearer " + mcpKey("project1/chat-02"));
+            check(borrowed.statusCode() == 401, "another conversation's key gets 401", describe(borrowed));
             HttpResponse<String> other = CLIENT.send(HttpRequest.newBuilder(URI.create(base + "/q/health")).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
             check(other.statusCode() == 200, "a path outside the MCP server is not refused", describe(other));
@@ -67,6 +72,19 @@ public class McpKeyCheck {
         if (conversation != null) b.header(HEADER, conversation);
         if (authorization != null) b.header("Authorization", authorization);
         return CLIENT.send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * The conversation's MCP key, as chat-ui derives it: HMAC-SHA256 of the conversation's name under the secret the
+     * instance was started with ({@code -Dchat-ui.mcp.key-secret}), given here in {@code CHAT_UI_MCP_KEY_SECRET}.
+     */
+    static String mcpKey(String conversation) throws Exception {
+        String secret = System.getenv("CHAT_UI_MCP_KEY_SECRET");
+        if (secret == null || secret.isBlank()) throw new IllegalStateException("set CHAT_UI_MCP_KEY_SECRET to the "
+                + "instance's -Dchat-ui.mcp.key-secret");
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new javax.crypto.spec.SecretKeySpec(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+        return java.util.HexFormat.of().formatHex(mac.doFinal(conversation.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     }
 
     static String describe(HttpResponse<String> r) {

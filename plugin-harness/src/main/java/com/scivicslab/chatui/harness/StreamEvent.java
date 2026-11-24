@@ -80,6 +80,18 @@ public record StreamEvent(
      *
      * @param retractedUuids the withdrawn messages' ids, comma-separated, or {@code null} when none were named
      */
+    /**
+     * A call the CLI made to a tool of chat-ui's MCP server, parked until the conversation answers it
+     * ({@link CliProcess#park}). Not from the CLI's output: put into the turn's events by the MCP request.
+     */
+    public static StreamEvent parkedCall(String callId, String toolName, String argumentsJson) {
+        return new StreamEvent(PARKED_CALL, argumentsJson, null, -1, -1, false, null,
+                               null, null, null, toolName, callId);
+    }
+
+    /** The type of a {@link #parkedCall} event. */
+    public static final String PARKED_CALL = "parked_call";
+
     public static StreamEvent retraction(String retractedUuids, String rawJson) {
         return new StreamEvent("retraction", retractedUuids, null, -1, -1, false, rawJson);
     }

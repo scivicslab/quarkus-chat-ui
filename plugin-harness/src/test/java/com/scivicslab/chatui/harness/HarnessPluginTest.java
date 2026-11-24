@@ -25,7 +25,7 @@ class HarnessPluginTest {
 
     private static ProviderCreationContext ctx(Path dir, ToolSet toolSet) {
         return new ProviderCreationContext("project1", "01", dir, toolSet, 28039,
-                key -> key.equals("chat-ui.harness.session-dir") ? Optional.of(dir.toString()) : Optional.empty());
+                key -> key.equals("chat-ui.harness.session-dir") ? Optional.of(dir.toString()) : Optional.empty(), null);
     }
 
     private static LlmProviderFactory factory(String kind) {

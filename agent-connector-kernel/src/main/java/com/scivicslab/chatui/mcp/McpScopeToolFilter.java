@@ -25,6 +25,6 @@ public class McpScopeToolFilter implements ToolFilter {
 
     @Override
     public boolean test(ToolInfo tool, McpConnection connection) {
-        return new McpToolEndpoint(scopes::runnerOf).offers(server.scopeOfCurrentRequest(), tool.name());
+        return new McpToolEndpoint(scopes::runnerOf, scopes::handOffOf).offers(server.scopeOfCurrentRequest(), tool.name());
     }
 }

@@ -2093,10 +2093,19 @@ public class ChatUiActorSystem implements ConversationControls {
      * @param chatId    conversation id within that project
      * @return that conversation's provider, or {@code null} if it has none
      */
-    @SuppressWarnings("unchecked")
     public ActorRef<LlmProvider> getProviderRef(String projectId, String chatId) {
+        return providerRefOf(chatActorName(projectId, chatId));
+    }
+
+    /**
+     * @param conversation a qualified conversation name, e.g. {@code "project1/chat-01"}
+     * @return that conversation's provider, or {@code null} if it has none
+     */
+    @SuppressWarnings("unchecked")
+    public ActorRef<LlmProvider> providerRefOf(String conversation) {
+        if (conversation == null) return null;
         return (ActorRef<LlmProvider>) (ActorRef<?>)
-                actorSystem.getActor(chatSessionActorName(projectId, chatId) + PROVIDER_SUFFIX);
+                actorSystem.getActor(conversation + CHAT_SESSION_SUFFIX + PROVIDER_SUFFIX);
     }
 
     /**
@@ -2418,8 +2427,53 @@ public class ChatUiActorSystem implements ConversationControls {
             throw new IllegalArgumentException("provider kind '" + k + "' cannot take tool set '"
                     + toolSet.id() + "'");
         }
+        String conversation = chatActorName(projectId, chatId);
         return factory.create(new ProviderCreationContext(projectId, chatId, providerWorkingDir(projectId),
-                toolSet, httpPort, ChatUiActorSystem::configValue));
+                toolSet, httpPort, ChatUiActorSystem::configValue,
+                new com.scivicslab.chatui.plugin.ConversationMcp("http://127.0.0.1:" + httpPort + "/mcp",
+                        conversation, mcpKeyOf(conversation))));
+    }
+
+    /**
+     * The secret every conversation's MCP key is derived from: {@code chat-ui.mcp.key-secret} when set (an E2E check
+     * sets it, to compute the keys it sends), otherwise 32 random bytes made at start-up.
+     */
+    private static final byte[] MCP_KEY_SECRET = configValue("chat-ui.mcp.key-secret").filter(v -> !v.isBlank())
+            .map(v -> v.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+            .orElseGet(() -> {
+                byte[] b = new byte[32];
+                new java.security.SecureRandom().nextBytes(b);
+                return b;
+            });
+
+    /**
+     * The key a request to chat-ui's MCP server must carry to act as {@code conversation}: HMAC-SHA256 of its
+     * qualified name under {@link #MCP_KEY_SECRET}, in hex. Derived, not stored, so a conversation made or removed
+     * needs no bookkeeping (tasks/todo.md, "Shrinking the composed prompt").
+     *
+     * @param conversation a qualified conversation name, e.g. {@code "project1/chat-01"}
+     * @return its key
+     */
+    public static String mcpKeyOf(String conversation) {
+        try {
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(MCP_KEY_SECRET, "HmacSHA256"));
+            return java.util.HexFormat.of().formatHex(
+                    mac.doFinal(conversation.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.GeneralSecurityException e) {
+            throw new IllegalStateException("HmacSHA256 is not available", e);
+        }
+    }
+
+    /**
+     * @param conversation a qualified conversation name
+     * @param key          the key a request carries
+     * @return whether {@code key} is that conversation's key and the conversation exists, compared in constant time
+     */
+    public boolean opensMcp(String conversation, String key) {
+        if (conversation == null || key == null || !chatSessions.containsKey(conversation)) return false;
+        return java.security.MessageDigest.isEqual(mcpKeyOf(conversation).getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     /** One configuration value, for a plugin's own keys; empty outside a CDI-managed process. */

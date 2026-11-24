@@ -45,8 +45,21 @@ public class RealModelToolCallingCheck {
         return HTTP.send(HttpRequest.newBuilder(URI.create(base + "/mcp")).timeout(Duration.ofSeconds(30))
                 .header("Content-Type", "application/json").header("Accept", "application/json, text/event-stream")
                 .header("Mcp-Protocol-Version", "2026-07-28").header("Mcp-Method", "tools/call").header("Mcp-Name", tool)
-                .header("X-Chat-Ui-Conversation", conversation)
+                .header("X-Agent-Connector-Scope", conversation).header("Authorization", "Bearer " + mcpKey(conversation))
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString()).body();
+    }
+
+    /**
+     * The conversation's MCP key, as chat-ui derives it: HMAC-SHA256 of the conversation's name under the secret the
+     * instance was started with ({@code -Dchat-ui.mcp.key-secret}), given here in {@code CHAT_UI_MCP_KEY_SECRET}.
+     */
+    static String mcpKey(String conversation) throws Exception {
+        String secret = System.getenv("CHAT_UI_MCP_KEY_SECRET");
+        if (secret == null || secret.isBlank()) throw new IllegalStateException("set CHAT_UI_MCP_KEY_SECRET to the "
+                + "instance's -Dchat-ui.mcp.key-secret");
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new javax.crypto.spec.SecretKeySpec(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+        return java.util.HexFormat.of().formatHex(mac.doFinal(conversation.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     }
 
     static void check(boolean ok, String what, String detail) {

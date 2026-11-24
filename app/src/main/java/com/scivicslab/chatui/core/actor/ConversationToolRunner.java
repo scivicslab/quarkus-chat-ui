@@ -149,6 +149,17 @@ public final class ConversationToolRunner implements ToolCallRecorder {
     }
 
     /**
+     * @return whether a harness CLI whose calls are parked into the conversation's own agent loop is offered
+     *         {@code tool} over chat-ui's MCP server: any built-in tool, those that drive the conversation included,
+     *         or a plugin tool, and in its {@link ToolSet}. The conversation runs these calls itself, on its own
+     *         thread, so the tools that drive it are safe to offer (tasks/todo.md, "Shrinking the composed prompt").
+     */
+    public boolean offersToItsOwnLoop(String tool) {
+        if (!core.scope().toolSet().contains(tool)) return false;
+        return ConversationToolCatalog.builtIn(tool) != null || core.scope().pluginTools().containsKey(tool);
+    }
+
+    /**
      * Runs a tool for chat-ui's MCP server and records it to the I/O log once, under the label of the step the
      * conversation is at.
      *

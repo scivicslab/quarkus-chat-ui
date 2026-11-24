@@ -50,6 +50,28 @@ class McpToolEndpointTest {
         assertTrue(endpoint.call("s3", "calc", "{\"expression\":\"23*47\"}").isError(), "an unknown scope");
     }
 
+    /** A scope with a hand-off has its calls run by the hand-off, never by its runner, and is offered what it offers. */
+    @Test
+    void aHandedOffScopeIsCalledThroughItsHandOff(@TempDir Path root) {
+        ToolRunner full = runner("s1", root, ToolSet.FULL);
+        List<String> handed = new java.util.ArrayList<>();
+        McpCallHandOff handOff = new McpCallHandOff() {
+            @Override public boolean offers(String tool) { return "ask_person".equals(tool) || "calc".equals(tool); }
+            @Override public String call(String tool, String argumentsJson) {
+                handed.add(tool + " " + argumentsJson);
+                return "run by the conversation";
+            }
+        };
+        McpToolEndpoint endpoint = new McpToolEndpoint(name -> "s1".equals(name) ? full : null,
+                name -> "s1".equals(name) ? handOff : null);
+        assertTrue(endpoint.offers("s1", "ask_person"), "a tool the runner does not offer, offered by the hand-off");
+        assertFalse(endpoint.offers("s1", "read"), "the hand-off decides, not the runner");
+        assertEquals(new McpToolEndpoint.Result("run by the conversation", false),
+                endpoint.call("s1", "calc", "{\"expression\":\"23*47\"}"));
+        assertTrue(endpoint.call("s1", "read", "{}").isError(), "a tool the hand-off does not offer is refused");
+        assertEquals(List.of("calc {\"expression\":\"23*47\"}"), handed, "only the offered call was handed over");
+    }
+
     private static ToolRunner runner(String name, Path root, ToolSet set) {
         return new ToolRunner(new ToolScope(name, new FileAccessScope(root, List.of()), set, Map.of()),
                 expression -> "1081", DocsLookup.HTTP, ToolExtension.NONE, ToolCallRecorder.NONE);

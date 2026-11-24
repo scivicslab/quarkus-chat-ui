@@ -2,6 +2,7 @@ package com.scivicslab.chatui.harness;
 
 import com.scivicslab.chatui.agent.ToolSet;
 import com.scivicslab.chatui.core.provider.LlmProvider;
+import com.scivicslab.chatui.plugin.ConversationMcp;
 import com.scivicslab.chatui.core.provider.ProviderCapabilities;
 import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
@@ -50,6 +51,9 @@ public class ClaudeCodeProvider implements LlmProvider {
     private final Path sessionFile;
     private final ClaudeTranscriptLog transcriptLog;
     private final ToolSet toolSet;
+    private final ConversationMcp mcp;
+    /** The ids of the CLI's calls to the conversation's own tools, whose results are not passed on. */
+    private final Set<String> ownToolUseIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<String> pendingPermissionIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<String> pendingPlanApprovalIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
@@ -62,7 +66,24 @@ public class ClaudeCodeProvider implements LlmProvider {
      */
     public ClaudeCodeProvider(HarnessSettings settings, String projectId, String chatId,
                               Path workingDir, ToolSet toolSet) {
+        this(settings, projectId, chatId, workingDir, toolSet, null);
+    }
+
+    /**
+     * @param settings   process-wide harness settings
+     * @param projectId  owning project's id, part of the session file name
+     * @param chatId     conversation id, part of the session file name
+     * @param workingDir the directory the harness works in, or {@code null} for this process's own
+     * @param toolSet    the conversation's tool set; {@link ToolSet#FULL} disables the built-in tools
+     * @param mcp        chat-ui's MCP server for this conversation: the CLI calls the conversation's tools there,
+     *                   and the calls are parked into the conversation's agent loop; {@code null} leaves the
+     *                   conversation's tools to the {@code <invoke>} text (tasks/todo.md, "Shrinking the composed
+     *                   prompt")
+     */
+    public ClaudeCodeProvider(HarnessSettings settings, String projectId, String chatId,
+                              Path workingDir, ToolSet toolSet, ConversationMcp mcp) {
         this.toolSet = toolSet;
+        this.mcp = mcp;
         this.sessionFile = settings.sessionFile(projectId, chatId, ID);
         this.transcriptLog = new ClaudeTranscriptLog(sessionFile, settings.claudeProjectsDir(),
                 ClaudeTranscriptLog.DEFAULT_TAIL_BYTES);
@@ -75,6 +96,33 @@ public class ClaudeCodeProvider implements LlmProvider {
         config = restoreSession(config);
         this.cliProcess = new CliProcess("claude", "ANTHROPIC_API_KEY", config);
         this.commandHandler = new SlashCommandHandler(cliProcess);
+        if (mcp != null) cliProcess.setMcpConfig(writeMcpConfig(sessionFile, mcp).toString());
+    }
+
+    /**
+     * Writes Claude Code's MCP configuration for chat-ui's MCP server next to the session file, readable by this
+     * user only: it holds the conversation's key, which a command line would show to every user of the machine.
+     *
+     * @return the file, which {@code --mcp-config} names
+     */
+    static Path writeMcpConfig(Path sessionFile, ConversationMcp mcp) {
+        org.json.JSONObject headers = new org.json.JSONObject().put("Authorization", "Bearer " + mcp.key())
+                .put(ConversationMcp.SCOPE_HEADER, mcp.scope());
+        org.json.JSONObject server = new org.json.JSONObject().put("type", "http").put("url", mcp.url())
+                .put("headers", headers);
+        String json = new org.json.JSONObject().put("mcpServers",
+                new org.json.JSONObject().put(ConversationMcp.SERVER_NAME, server)).toString();
+        Path file = sessionFile.resolveSibling(sessionFile.getFileName() + ".mcp.json");
+        try {
+            Files.createDirectories(file.getParent());
+            Files.deleteIfExists(file);
+            Files.createFile(file, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")));
+            Files.writeString(file, json);
+        } catch (IOException e) {
+            throw new IllegalStateException("could not write the MCP configuration " + file + ": " + e.getMessage(), e);
+        }
+        return file;
     }
 
     /**
@@ -233,10 +281,69 @@ public class ClaudeCodeProvider implements LlmProvider {
 
             """;
 
+    /**
+     * What Claude Code is told about itself when the conversation's tools come over MCP: the first and the last
+     * paragraph of {@link #PREFACE}, and where the conversation's tools are. It is part of the system message
+     * ({@code --append-system-prompt}), sent once, not before every turn.
+     */
+    static final String MCP_PREFACE = """
+            You are running inside Claude Code, your own coding harness, but in this conversation you             are a general assistant: any topic is in scope, not only code. Your harness has its own             tools — reading and writing files, running shell commands, and web search and web fetch             (WebSearch and WebFetch). Use them directly, the way you always do, whenever they fit the task.
+
+            This conversation's own tools are the tools of the MCP server "chat-ui" (mcp__chat-ui__<name>).             Some of your tools, those among them, are deferred: load one with ToolSearch before you call it.
+
+            Rule for the outside world: when answering needs current information — weather, news,             prices, schedules, anything that changes over time — you MUST get it from the web, either             with your WebSearch or with this conversation's web_search, before answering. You do have web             access here; never reply that you cannot access the web or tell the user to look it up themselves.
+
+            """;
+
+    /** The same as {@link #MCP_PREFACE}, for the case where the harness's own tools are switched off. */
+    static final String MCP_PREFACE_TOOLS_OFF = """
+            This conversation's tools are the tools of the MCP server "chat-ui" (mcp__chat-ui__<name>).             Some of them are deferred: load one with ToolSearch before you call it.
+
+            """;
+
     @Override
     public String promptPreface() {
+        if (mcp != null) return toolSet == ToolSet.FULL ? MCP_PREFACE_TOOLS_OFF : MCP_PREFACE;
         return toolSet == ToolSet.FULL ? "" : PREFACE;
     }
+
+    // ---- Tools over chat-ui's MCP server, parked into the conversation's agent loop ----
+
+    @Override public boolean callsToolsByDefinition() { return mcp != null; }
+    @Override public boolean parksToolCalls() { return mcp != null; }
+
+    @Override
+    public java.util.concurrent.CompletableFuture<String> parkToolCall(String name, String argumentsJson) {
+        return cliProcess.park(name, argumentsJson);
+    }
+
+    @Override
+    public void addToolResults(List<ToolCallResult> results) {
+        for (ToolCallResult r : results) cliProcess.answer(r.callId(), r.content());
+    }
+
+    /** How long an interrupted turn of the CLI may take to reach its result before the process is stopped. */
+    static final long END_TURN_WAIT_MS = 30_000;
+
+    @Override
+    public void endTurn() {
+        cliProcess.endTurn(END_TURN_WAIT_MS);
+    }
+
+    /**
+     * The system message goes in {@code --append-system-prompt}: the CLI keeps it out of the session's history,
+     * and its compaction never summarises it away. A change takes effect when the process starts again, which this
+     * does before the next prompt, resuming the session.
+     */
+    @Override
+    public void setSystemMessage(String text) {
+        if (cliProcess.setAppendSystemPrompt(text) && cliProcess.isAlive() && !cliProcess.isSuspended()) {
+            cliProcess.restartBeforeNextPrompt();
+        }
+    }
+
+    /** The prefix of the names Claude Code gives the tools of chat-ui's MCP server. */
+    static final String MCP_TOOL_PREFIX = "mcp__" + ConversationMcp.SERVER_NAME + "__";
 
     // ---- LlmProvider ----
 
@@ -271,10 +378,14 @@ public class ClaudeCodeProvider implements LlmProvider {
         final boolean[] staleSession = {false};
         final boolean[] sawAssistant = {false};
         try {
-            cliProcess.sendPrompt(prompt, ctx.imageDataUrls(), event -> {
+            CliProcess.StreamCallback callback = event -> {
                 ctx.onActivity().run();
                 dispatch(event, emitter, staleSession, sawAssistant);
-            });
+            };
+            // A turn parked on calls to the conversation's tools goes on where it stopped: the calls' results were
+            // just given, and the blank prompt adds nothing.
+            if (cliProcess.isSuspended()) cliProcess.resume(callback);
+            else cliProcess.sendPrompt(prompt, ctx.imageDataUrls(), callback);
         } catch (CliProcess.EndedWithoutResult e) {
             // A session the CLI cannot find ends the process too; that one is retried below with a new session.
             // Any other end is the prompt's failure, reported with the exit code: the turn fails, and the asker is
@@ -321,9 +432,20 @@ public class ClaudeCodeProvider implements LlmProvider {
             }
             case "thinking" -> emitter.accept(ChatEvent.thinking(
                     event.hasContent() ? event.content() : "Thinking..."));
-            case "tool_use" -> emitter.accept(ChatEvent.toolUse(event.toolUseId(), event.toolName(), event.content()));
+            case StreamEvent.PARKED_CALL -> emitter.accept(ChatEvent.toolCall(event.toolUseId(), event.toolName(),
+                    event.content() == null ? "{}" : event.content()));
+            case "tool_use" -> {
+                // A call to the conversation's own tools is reported by the MCP request instead, and recorded once
+                // by the conversation as its own step; its use and result here would record it twice.
+                if (event.toolName() != null && event.toolName().startsWith(MCP_TOOL_PREFIX)) {
+                    ownToolUseIds.add(event.toolUseId());
+                    return;
+                }
+                emitter.accept(ChatEvent.toolUse(event.toolUseId(), event.toolName(), event.content()));
+            }
             case "retraction" -> emitter.accept(ChatEvent.retraction(event.content()));
             case "tool_result" -> {
+                if (ownToolUseIds.remove(event.toolUseId())) return;
                 // ExitPlanMode is surfaced as a prompt from its tool_use block; the CLI then
                 // auto-denies the tool with this result, which is not an error of the turn.
                 if (event.isError() && "Exit plan mode?".equals(

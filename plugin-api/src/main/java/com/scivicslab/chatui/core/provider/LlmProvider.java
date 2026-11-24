@@ -203,6 +203,41 @@ public interface LlmProvider {
      */
     default String callTool(String name, String argumentsJson) { return null; }
 
+    // ---- Calls a harness CLI makes over MCP, parked into the conversation's agent loop ----
+
+    /**
+     * Whether the model's calls reach this provider from a harness CLI over chat-ui's MCP server and are parked:
+     * the CLI waits for each call's MCP response while the conversation's agent loop runs the call as one of its
+     * own steps (tasks/todo.md, "Shrinking the composed prompt"). Such a provider also gives its tools as
+     * definitions ({@link #callsToolsByDefinition}). The conversation runs every parked call itself, those that
+     * do not drive it included, and never through {@link #callTool}.
+     *
+     * @return {@code true} for such a provider
+     */
+    default boolean parksToolCalls() { return false; }
+
+    /**
+     * Parks one call the CLI made over MCP. Called on the thread that took the MCP request, not on the provider's
+     * own actor thread, which is busy in {@link #sendPrompt}: the provider must take it safely from any thread.
+     * The running {@link #sendPrompt} reports the call as a {@link ChatEvent#toolCall} event and returns; the
+     * future is completed by {@link #addToolResults}, or by {@link #endTurn} when the turn ends first.
+     *
+     * @param name          the tool's name
+     * @param argumentsJson the arguments as a JSON object text
+     * @return the observation the CLI receives as the call's result
+     */
+    default java.util.concurrent.CompletableFuture<String> parkToolCall(String name, String argumentsJson) {
+        return java.util.concurrent.CompletableFuture.completedFuture("error: this conversation takes no MCP calls");
+    }
+
+    /**
+     * The conversation's turn has ended: answered, asked the person, reached its step limit, was paused for an
+     * urgent request, or failed. A provider whose CLI turn may still be running (parked on a call, or not yet at
+     * its result) answers the calls still parked with a text that says the turn has ended, and stops the CLI's
+     * turn, keeping its session for the next prompt.
+     */
+    default void endTurn() { }
+
     /**
      * The result of one tool call, for {@link #addToolResults}.
      *

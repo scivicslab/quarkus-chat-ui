@@ -18,7 +18,8 @@ import java.util.logging.Logger;
  *
  * <p>It sends stateless MCP requests (protocol {@value #PROTOCOL_VERSION}): {@code tools/list} to learn the tools
  * the model may call, and {@code tools/call} to run one. To chat-ui's own MCP server it names its conversation in
- * {@code X-Chat-Ui-Conversation}, so the server lists and runs that conversation's tools.</p>
+ * {@value #CONVERSATION_HEADER} and carries that conversation's key, so the server lists and runs that conversation's
+ * tools.</p>
  */
 public final class McpToolClient {
 
@@ -27,7 +28,7 @@ public final class McpToolClient {
     /** The MCP protocol version of the requests; the first one whose requests stand on their own. */
     public static final String PROTOCOL_VERSION = "2026-07-28";
     /** The header chat-ui's MCP server reads the conversation from. */
-    public static final String CONVERSATION_HEADER = "X-Chat-Ui-Conversation";
+    public static final String CONVERSATION_HEADER = com.scivicslab.chatui.plugin.ConversationMcp.SCOPE_HEADER;
 
     /** How long a tool may run before its call is given up: as long as a turn's longest tool runs. */
     private static final Duration CALL_TIMEOUT = Duration.ofMinutes(30);
@@ -42,7 +43,11 @@ public final class McpToolClient {
 
     private final String endpoint;
     private final String conversation;
+    private final String key;
+    // The client's own work runs on virtual threads: without an executor the JDK HttpClient makes a pool of real
+    // threads of its own.
     private final HttpClient http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+            .executor(java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor())
             .connectTimeout(Duration.ofSeconds(5)).build();
     private int nextId = 1;
 
@@ -52,8 +57,18 @@ public final class McpToolClient {
      *                     {@code project1/chat-01}; {@code null} names none
      */
     public McpToolClient(String endpoint, String conversation) {
+        this(endpoint, conversation, null);
+    }
+
+    /**
+     * @param endpoint     the server's MCP endpoint, e.g. {@code http://127.0.0.1:28030/mcp}
+     * @param conversation the conversation to name in {@value #CONVERSATION_HEADER}; {@code null} names none
+     * @param key          that conversation's key, sent as {@code Authorization: Bearer}; {@code null} sends none
+     */
+    public McpToolClient(String endpoint, String conversation, String key) {
         this.endpoint = endpoint;
         this.conversation = conversation;
+        this.key = key;
     }
 
     /** @return the server's MCP endpoint */
@@ -134,6 +149,7 @@ public final class McpToolClient {
                 .header("Mcp-Method", method);
         if (name != null) b.header("Mcp-Name", name);
         if (conversation != null) b.header(CONVERSATION_HEADER, conversation);
+        if (key != null) b.header("Authorization", "Bearer " + key);
         HttpResponse<String> response;
         try {
             response = http.send(b.POST(HttpRequest.BodyPublishers.ofString(body.toString())).build(),

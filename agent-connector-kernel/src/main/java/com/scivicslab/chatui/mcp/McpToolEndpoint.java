@@ -24,14 +24,27 @@ public final class McpToolEndpoint {
     }
 
     private final Function<String, ToolRunner> scopes;
+    private final Function<String, McpCallHandOff> handOffs;
 
     /** @param scopes finds the runner of a scope name, or returns {@code null} when there is no such scope */
     public McpToolEndpoint(Function<String, ToolRunner> scopes) {
+        this(scopes, name -> null);
+    }
+
+    /**
+     * @param scopes   finds the runner of a scope name, or returns {@code null} when there is no such scope
+     * @param handOffs finds who runs a scope's calls instead of its runner, or returns {@code null} when its runner
+     *                 runs them
+     */
+    public McpToolEndpoint(Function<String, ToolRunner> scopes, Function<String, McpCallHandOff> handOffs) {
         this.scopes = scopes;
+        this.handOffs = handOffs;
     }
 
     /** @return whether scope {@code scopeName} exists and is offered {@code tool} */
     public boolean offers(String scopeName, String tool) {
+        McpCallHandOff handOff = scopeName == null ? null : handOffs.apply(scopeName);
+        if (handOff != null) return handOff.offers(tool);
         ToolRunner runner = scopeName == null ? null : scopes.apply(scopeName);
         return runner != null && runner.offers(tool);
     }
@@ -43,6 +56,12 @@ public final class McpToolEndpoint {
      * @return the observation; a scope that does not exist is an error
      */
     public Result call(String scopeName, String tool, String argsJson) {
+        McpCallHandOff handOff = scopeName == null ? null : handOffs.apply(scopeName);
+        if (handOff != null) {
+            String observation = handOff.offers(tool) ? handOff.call(tool, argsJson)
+                    : "error: tool '" + tool + "' is not available in this conversation";
+            return new Result(observation, observation.startsWith("error: "));
+        }
         ToolRunner runner = scopeName == null ? null : scopes.apply(scopeName);
         if (runner == null) return new Result("error: no such conversation: " + scopeName, true);
         String observation = runner.callFromMcp(tool, argsJson);

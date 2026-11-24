@@ -17,6 +17,7 @@ import java.util.function.Function;
  * @param httpPort   this instance's HTTP port, for per-instance files
  * @param config     reads a configuration key, so a plugin's own keys ({@code chat-ui.harness.*})
  *                   need not be known to the body; empty when the key is unset
+ * @param mcp        how the conversation reaches chat-ui's own MCP server, or {@code null} when it does not
  */
 public record ProviderCreationContext(
     String projectId,
@@ -24,7 +25,8 @@ public record ProviderCreationContext(
     Path workingDir,
     ToolSet toolSet,
     int httpPort,
-    Function<String, Optional<String>> config
+    Function<String, Optional<String>> config,
+    ConversationMcp mcp
 ) {
 
     /** @return the configured value, or {@code fallback} when the key is unset or blank */

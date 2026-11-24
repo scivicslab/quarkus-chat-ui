@@ -56,7 +56,8 @@ public class HarnessPlugin implements ChatUiPlugin {
 
         @Override
         public LlmProvider create(ProviderCreationContext ctx) {
-            return new ClaudeCodeProvider(settings(ctx), ctx.projectId(), ctx.chatId(), ctx.workingDir(), ctx.toolSet());
+            return new ClaudeCodeProvider(settings(ctx), ctx.projectId(), ctx.chatId(), ctx.workingDir(), ctx.toolSet(),
+                    ctx.mcp());
         }
     }
 
@@ -74,7 +75,7 @@ public class HarnessPlugin implements ChatUiPlugin {
             if (ctx.toolSet() != ToolSet.HARNESS) {
                 throw new IllegalArgumentException("codex cannot disable its own tools, so its tool set is always harness");
             }
-            return new CodexProvider(settings(ctx), ctx.projectId(), ctx.chatId(), ctx.workingDir());
+            return new CodexProvider(settings(ctx), ctx.projectId(), ctx.chatId(), ctx.workingDir(), ctx.mcp());
         }
     }
 }

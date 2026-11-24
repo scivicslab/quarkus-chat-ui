@@ -63,7 +63,7 @@ public class KernelMcpServer {
         if (scope == null) {
             return ToolResponse.error("error: the request names no scope; send the " + scopeHeader + " header");
         }
-        McpToolEndpoint.Result result = new McpToolEndpoint(scopes::runnerOf).call(scope, tool,
+        McpToolEndpoint.Result result = new McpToolEndpoint(scopes::runnerOf, scopes::handOffOf).call(scope, tool,
                 new JSONObject(arguments == null ? Map.of() : arguments).toString());
         return result.isError() ? ToolResponse.error(result.text()) : ToolResponse.success(result.text());
     }

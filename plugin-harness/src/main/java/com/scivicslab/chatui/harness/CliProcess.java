@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
@@ -49,13 +50,22 @@ public class CliProcess {
     // Routing by turnActive keeps autonomous output from being mis-delivered as the response to
     // the next user prompt.
     private final LinkedBlockingQueue<StreamEvent> turnQueue = new LinkedBlockingQueue<>();
+    /** Calls to chat-ui's tools the CLI waits on, by the id of their {@link StreamEvent#parkedCall} event. */
+    private final java.util.Map<String, java.util.concurrent.CompletableFuture<String>> parked =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicLong parkedSeq = new java.util.concurrent.atomic.AtomicLong();
+    /** The turn is parked: {@link #sendPrompt} returned {@link #SUSPENDED} and has not been resumed. */
+    private volatile boolean suspended;
+    /** {@code --mcp-config}'s value, or {@code null} for none. */
+    private volatile String mcpConfigJson;
+    /** {@code --append-system-prompt}'s value, or {@code null} for none. */
+    private volatile String appendSystemPrompt;
     private final LinkedBlockingQueue<StreamEvent> autonomousQueue = new LinkedBlockingQueue<>();
     private volatile boolean turnActive;
     // True from the first event of a turn the CLI started by itself until that turn's result.
     // Written only by routeEvent (the reader thread) and reset when the process is restarted or cancelled.
     private volatile boolean autonomousTurnOpen;
     private volatile String apiKey;
-    private volatile HarnessLaunch.McpEntry mcpEntry;
 
     /**
      * Creates a new CLI process manager.
@@ -195,7 +205,128 @@ public class CliProcess {
         // Mark the turn active before writing so the reader routes the response to turnQueue.
         beginTurn();
         writeUserMessage(prompt, imageDataUrls);
+        return readTurn(callback);
+    }
 
+    /**
+     * {@link #sendPrompt} returned this: the CLI is parked on calls to chat-ui's tools, which the callback was given
+     * as {@link StreamEvent#parkedCall} events. Its turn goes on after {@link #answer} and {@link #resume}.
+     */
+    public static final int SUSPENDED = 1;
+
+    /** How long Claude Code waits for one call to chat-ui's tools: a day, as long as any step of a turn. */
+    static final long MCP_TOOL_TIMEOUT_MS = 24L * 60 * 60 * 1000;
+
+    /** How long, after one parked call, the calls the CLI makes alongside it are waited for. */
+    static final long PARK_SETTLE_MS = 300;
+
+    /** What a call still parked when the conversation's turn ends receives as its result. */
+    static final String TURN_ENDED = "error: this conversation's turn has ended before the call ran (it asked the "
+            + "person, reached its step limit, or was paused for an urgent request). Do not go on; the conversation "
+            + "sends a new message when the work continues.";
+
+    /**
+     * Reads the turn's events after {@link #sendPrompt} returned {@link #SUSPENDED} and the parked calls were
+     * answered, until its result or the next parked call.
+     *
+     * @return 0 at the turn's result, {@link #SUSPENDED} when the CLI is parked on calls again, -1 when interrupted
+     * @throws EndedWithoutResult when the process ended before the turn's {@code result}
+     */
+    public int resume(StreamCallback callback) throws IOException {
+        if (!suspended) throw new IllegalStateException("no turn of the CLI is parked");
+        return readTurn(callback);
+    }
+
+    /** @return whether the CLI's turn is parked on calls to chat-ui's tools ({@link #SUSPENDED}) */
+    public boolean isSuspended() { return suspended; }
+
+    /**
+     * Parks a call the CLI made to a tool of chat-ui's MCP server, from the thread that took the MCP request. The
+     * running turn reports it as a {@link StreamEvent#parkedCall} event; the future completes with what
+     * {@link #answer} gives, or with {@link #TURN_ENDED} when {@link #endTurn} comes first.
+     *
+     * @param tool          the tool's name
+     * @param argumentsJson the arguments as a JSON object text
+     * @return the observation the CLI receives
+     */
+    public java.util.concurrent.CompletableFuture<String> park(String tool, String argumentsJson) {
+        java.util.concurrent.CompletableFuture<String> result = new java.util.concurrent.CompletableFuture<>();
+        if (!turnActive) {
+            // A turn the CLI started by itself (a background job, a wake-up) is no turn of the conversation.
+            result.complete("error: no turn of this conversation is running, so the call was not run");
+            return result;
+        }
+        String id = "chat-ui-call-" + parkedSeq.incrementAndGet();
+        parked.put(id, result);
+        turnQueue.offer(StreamEvent.parkedCall(id, tool, argumentsJson));
+        return result;
+    }
+
+    /**
+     * Gives a parked call its result; the CLI receives it as the MCP response.
+     *
+     * @param callId the id of the {@link StreamEvent#parkedCall} event
+     * @param text   the observation
+     */
+    public void answer(String callId, String text) {
+        java.util.concurrent.CompletableFuture<String> call = parked.remove(callId);
+        if (call != null) call.complete(text);
+    }
+
+    /**
+     * The conversation's turn has ended. Calls still parked receive {@link #TURN_ENDED}; a CLI turn not yet at its
+     * result is interrupted and its events up to the result dropped. A CLI that does not reach its result within
+     * {@code waitMs} is stopped; its session is kept, and the next prompt resumes it.
+     *
+     * @param waitMs how long to wait for the interrupted turn's result
+     */
+    public void endTurn(long waitMs) {
+        suspended = false;
+        if (turnActive && currentProcess != null && currentProcess.isAlive()) {
+            try {
+                writeInterrupt();
+            } catch (IOException e) {
+                logger.log(Level.WARNING, binary + " CLI: could not send the interrupt", e);
+            }
+        }
+        answerAllParked();
+        long deadline = System.currentTimeMillis() + waitMs;
+        try {
+            while (turnActive) {
+                long left = deadline - System.currentTimeMillis();
+                StreamEvent event = left <= 0 ? null : pollTurnEvent(left);
+                if (event == null || OUTPUT_CLOSED.equals(event.type())) break;
+                if (StreamEvent.PARKED_CALL.equals(event.type())) answer(event.toolUseId(), TURN_ENDED);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (turnActive) {
+            logger.warning(binary + " CLI did not end its interrupted turn in " + waitMs + " ms; stopping it");
+            cancel();
+        } else {
+            // The interrupted turn's last events, its result included, belong to no prompt.
+            turnQueue.clear();
+        }
+        answerAllParked();
+    }
+
+    private void answerAllParked() {
+        for (String id : List.copyOf(parked.keySet())) answer(id, TURN_ENDED);
+    }
+
+    /** Writes Claude Code's stream-json interrupt, which ends the running turn with a result. */
+    void writeInterrupt() throws IOException {
+        if (stdinStream == null) throw new IOException("No active process stdin");
+        String json = "{\"type\":\"control_request\",\"request_id\":\"interrupt-" + parkedSeq.incrementAndGet()
+                + "\",\"request\":{\"subtype\":\"interrupt\"}}\n";
+        stdinStream.write(json.getBytes(StandardCharsets.UTF_8));
+        stdinStream.flush();
+    }
+
+    /** Reads the in-flight turn's events until its result, or until it is parked on calls. */
+    private int readTurn(StreamCallback callback) throws IOException {
+        suspended = false;
         sendingThread = Thread.currentThread();
         try {
             while (true) {
@@ -216,6 +347,21 @@ public class CliProcess {
                 }
                 if (callback != null) callback.onEvent(event);
                 if ("result".equals(event.type())) return 0;
+                if (StreamEvent.PARKED_CALL.equals(event.type())) {
+                    // The calls the CLI makes alongside this one arrive within a moment; they are handed over
+                    // together, as one step's calls.
+                    StreamEvent more;
+                    while ((more = pollTurnEvent(PARK_SETTLE_MS)) != null) {
+                        if (OUTPUT_CLOSED.equals(more.type())) {
+                            if (callback != null) callback.onComplete(-1);
+                            throw endedWithoutResult();
+                        }
+                        if (callback != null) callback.onEvent(more);
+                        if ("result".equals(more.type())) return 0;
+                    }
+                    suspended = true;
+                    return SUSPENDED;
+                }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -343,6 +489,8 @@ public class CliProcess {
         }
         Thread t = sendingThread;
         if (t != null) t.interrupt();
+        suspended = false;
+        answerAllParked();
         turnActive = false;
         autonomousTurnOpen = false;
         turnQueue.clear();
@@ -448,8 +596,11 @@ public class CliProcess {
      *         variable when one is set, and the configured working directory
      */
     HarnessLaunch launch(List<String> cmd) {
-        java.util.Map<String, String> added = apiKey != null && !apiKey.isBlank()
-                ? java.util.Map.of(apiKeyEnvVar, apiKey) : java.util.Map.of();
+        java.util.Map<String, String> added = new java.util.HashMap<>();
+        if (apiKey != null && !apiKey.isBlank()) added.put(apiKeyEnvVar, apiKey);
+        // A call to chat-ui's tools waits while the conversation runs it as a step of its own; Claude Code must not
+        // give up on it first (https://code.claude.com/docs/en/mcp, MCP_TOOL_TIMEOUT).
+        if (mcpConfigJson != null) added.put("MCP_TOOL_TIMEOUT", String.valueOf(MCP_TOOL_TIMEOUT_MS));
         return new HarnessLaunch(cmd, List.of("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"), added,
                 config.workingDir() == null ? null : java.nio.file.Path.of(config.workingDir()));
     }
@@ -460,7 +611,36 @@ public class CliProcess {
      *
      * @param entry the server, or {@code null} for none
      */
-    public void setMcpEntry(HarnessLaunch.McpEntry entry) { this.mcpEntry = entry; }
+    public void setMcpEntry(HarnessLaunch.McpEntry entry) { this.mcpConfigJson = entry == null ? null : entry.claudeMcpConfig(); }
+
+    /**
+     * Hands the CLI an MCP configuration from the next start of the process on.
+     *
+     * @param json {@code --mcp-config}'s value, or {@code null} for none
+     */
+    public void setMcpConfig(String json) { this.mcpConfigJson = json; }
+
+    /**
+     * Sets {@code --append-system-prompt} for the next start of the process.
+     *
+     * @param text the text, or {@code null} for none
+     * @return whether it differs from the text set before, so a running process must be started again to see it
+     */
+    public boolean setAppendSystemPrompt(String text) {
+        boolean changed = !java.util.Objects.equals(text, appendSystemPrompt);
+        this.appendSystemPrompt = text;
+        return changed;
+    }
+
+    /**
+     * Stops the process between turns, keeping its session, so the next prompt starts it again with the current
+     * options and {@code --resume}.
+     */
+    public void restartBeforeNextPrompt() {
+        if (currentProcess == null) return;
+        if (lastSessionId != null) config = config.withSessionId(lastSessionId);
+        cancel();
+    }
 
     List<String> buildCommand() {
         List<String> cmd = new ArrayList<>();
@@ -498,7 +678,11 @@ public class CliProcess {
         // uses Claude as a bare model and runs this program's own tools instead
         // (CliHarnessProvider_260912_oo01).
         if (config.tools() != null) { cmd.add("--tools"); cmd.add(config.tools()); }
-        if (mcpEntry != null) { cmd.add("--mcp-config"); cmd.add(mcpEntry.claudeMcpConfig()); }
+        if (appendSystemPrompt != null && !appendSystemPrompt.isBlank()) {
+            cmd.add("--append-system-prompt");
+            cmd.add(appendSystemPrompt);
+        }
+        if (mcpConfigJson != null) { cmd.add("--mcp-config"); cmd.add(mcpConfigJson); }
         return cmd;
     }
 

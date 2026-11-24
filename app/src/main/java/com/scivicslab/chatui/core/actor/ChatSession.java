@@ -2375,7 +2375,7 @@ public class ChatSession extends Interpreter {
                 String refusal = byDefinition() ? whyNotRunnable(tc) : null;
                 if (refusal != null) {
                     fullObservation = refusal;
-                } else if (byDefinition() && !drivesConversation(tc.name())
+                } else if (byDefinition() && !provider.parksToolCalls() && !drivesConversation(tc.name())
                         && !(summarizePages && returnsPages(tc.name()))) {
                     turnToolCalls++;
                     fullObservation = providerRef().ask(p -> p.callTool(tc.name(), tc.argumentsJson()),
@@ -2545,6 +2545,10 @@ public class ChatSession extends Interpreter {
         // fixed-size history (TurnResourceLimits_260830_oo01). Replace them with what a later turn
         // actually needs: what was asked, and what was answered.
         try {
+            // A harness CLI may still be parked on a call or short of its result (ask_person, the step limit, a
+            // pause): it is told the turn has ended and its turn is stopped (tasks/todo.md, "Shrinking the composed
+            // prompt"). Told before collapseTurn, so the provider handles them in this order.
+            providerRef().tell(LlmProvider::endTurn);
             String restore = requestMessagesToRestore;
             requestMessagesToRestore = null;
             if (restore != null) providerRef().tell(p -> p.replaceRequestMessages(restore));
