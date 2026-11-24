@@ -59,6 +59,7 @@ public final class IoLogHistory {
                 """;
         // A short-lived connection of its own, as IoLogSearch takes one: a read here never waits
         // on, or holds up, the writer the conversations are being recorded through.
+        ioLog.flush();   // what was told before this read is in the file the connection below reads
         try (Connection c = DriverManager.getConnection(ioLog.jdbcUrl())) {
             if (!hasSession(c, workflowName)) {
                 return PersistedLog.none(SOURCE, "no I/O log session for this conversation");

@@ -267,8 +267,9 @@ public class IoLogStore {
     }
 
     /**
-     * Closes the store after the writes told before this call (an {@code ask} behind them, so none is lost). The owner
-     * stays: what was opened can still be looked up and read through the closed store's read connection, as before.
+     * Closes the store after the writes told before this call (an {@code ask} behind them, so none is lost), then stops
+     * the owner. Later calls behave as if logging were off: {@link #store()} answers {@code null}, a write is dropped
+     * without a word, a lookup finds no session.
      */
     @PreDestroy
     void shutdown() {
@@ -276,11 +277,11 @@ public class IoLogStore {
             b.close();
             return null;
         }, null);
+        book.close();
     }
 
-    /** As {@link #shutdown()}, and then stops the owner for good; later calls behave as if logging were off. */
+    /** The same as {@link #shutdown()}. */
     public void close() {
         shutdown();
-        book.close();
     }
 }

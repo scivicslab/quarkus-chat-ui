@@ -132,13 +132,13 @@ class IoLogStoreActorTest {
     }
 
     @Test
-    void afterTheShutdownWhatWasOpenedCanStillBeLookedUpAndATellIsHarmless(@TempDir Path dir) throws Exception {
+    void afterTheShutdownALateWriteIsHarmlessAndALookupFindsNothing(@TempDir Path dir) throws Exception {
         IoLogStore log = open(dir, "shutdown");
         long sid = log.ensureSession("project1/chat-01");
-        log.shutdown();   // the store closes behind the pending writes; the owner stays
-        log.record(sid, "node", "label", "too late");   // told to a closed store: logged, nothing throws
+        log.shutdown();   // the store closes behind the pending writes, and the owner with it
+        log.record(sid, "node", "label", "too late");   // dropped, nothing throws
         log.flush();
-        assertEquals(sid, log.sessionIdOf("project1/chat-01"));
+        assertEquals(-1, log.sessionIdOf("project1/chat-01"));
     }
 
     @Test

@@ -79,9 +79,11 @@ final class IoLogSessions {
     /** One per project, keyed by the project's id; see ensureProjectSession. */
     private final Map<String, Long> projectSessionIds = new HashMap<>();
     private boolean failed = false;
+    /** Set by {@link #close()}: the store is not opened again, and {@link #store()} answers {@code null}. */
+    private boolean closed = false;
 
     private void ensureStore() {
-        if (store != null || failed) {
+        if (store != null || failed || closed) {
             return;
         }
         try {
@@ -501,12 +503,14 @@ final class IoLogSessions {
 
     /** Closes the store after the writes told before; a store that is already closed is left alone. */
     void close() {
+        closed = true;
         if (store != null) {
             try {
                 store.close();
             } catch (Exception e) {
                 // shutting down; ignore
             }
+            store = null;
         }
     }
 }

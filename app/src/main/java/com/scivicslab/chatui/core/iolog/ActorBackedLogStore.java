@@ -44,7 +44,11 @@ public final class ActorBackedLogStore implements DistributedLogStore {
     /** A write nobody waits for: told to the actor; one that fails is logged, not lost. */
     private void tell(String what, java.util.function.Consumer<DistributedLogStore> write) {
         store.tell(write).exceptionally(e -> {
-            LOG.log(Level.WARNING, "I/O log " + what + " failed", e);
+            // A write told to a closed store is dropped without a word: the log is closed, which is not a failure of the write.
+            if (!(e instanceof com.scivicslab.pojoactor.core.ActorClosedException)
+                    && !(e.getCause() instanceof com.scivicslab.pojoactor.core.ActorClosedException)) {
+                LOG.log(Level.WARNING, "I/O log " + what + " failed", e);
+            }
             return null;
         });
     }

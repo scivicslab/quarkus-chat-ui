@@ -159,6 +159,7 @@ public class IoLogSearch {
      * recorded through.</p>
      */
     private Connection open() throws Exception {
+        ioLog.flush();   // what was told before this search is in the file the connection reads
         return DriverManager.getConnection(ioLog.jdbcUrl());
     }
 
