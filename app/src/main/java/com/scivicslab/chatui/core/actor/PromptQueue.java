@@ -655,10 +655,25 @@ public class PromptQueue {
 
         chat.start(item.prompt(), item.model(), item.emitter(), chatSessionRef, item.done(), item.resultKey(),
                 item.noThink(), item.images(), item.source(), item.requestId(), item.link());
+        // A request's "started" is recorded now that the turn has written the request's own record: until then the
+        // queue still holds it, so an instance that stops inside the start loses nothing (the request runs again).
+        if (recordsStartAfterTheTurnBegins(item)) self.tell(q -> q.recordLeft(item, "started"));
         com.scivicslab.pojoactor.action.ActionResult result = chat.runUntilEnd();
         if (!result.isSuccess()) {
             LOG.warning("Agent loop did not reach 'end': " + result.getResult());
         }
+    }
+
+    /**
+     * Whether the turn that starts for {@code item} writes a record of the request itself (an {@code open-requests} entry)
+     * as it starts: a request, or a reply to one, from another conversation. For such an item the queue's own
+     * {@code started} record is written after that, not at the pop.
+     */
+    private static boolean recordsStartAfterTheTurnBegins(QueueItem item) {
+        String source = item.source();
+        return item.requestId() != null && source != null
+                && (source.startsWith(ChatSession.ASK_CHAT_SOURCE_PREFIX)
+                    || source.startsWith(ChatSession.ASK_CHAT_REPLY_SOURCE_PREFIX));
     }
 
     /**
@@ -671,7 +686,7 @@ public class PromptQueue {
         if (queue.isEmpty()) return null;
         if (respectAuto && !queue.get(0).auto()) return null;
         QueueItem item = queue.remove(0);
-        recordLeft(item, "started");
+        if (!recordsStartAfterTheTurnBegins(item)) recordLeft(item, "started");
         sent.add(new QueueEntry(item.prompt(), item.source(), item.auto(), item.urgent()));
         trimSent();
         // Show the prompt in the pane now that it is actually being sent. The browser used to draw

@@ -162,6 +162,67 @@ class TurnWithoutAnAnswerTellsTheAskerTest {
         }
     }
 
+    /** An I/O log whose write of the open-requests record hangs until the instance is stopped, as a stop inside the window does. */
+    private static final class StoppedBeforeTheOpenRequestsRecord extends IoLogStore {
+        final CountDownLatch inTheWindow = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+
+        @Override
+        public void record(long sessionId, String node, String label, String content) {
+            if (ChatSession.OPEN_REQUESTS_LABEL.equals(label)) {
+                inTheWindow.countDown();
+                try {
+                    release.await(60, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return;   // the instance stopped: this record is never told
+            }
+            super.record(sessionId, node, label, content);
+        }
+    }
+
+    /**
+     * The window of the turn's start: the request has left the queue, the turn is busy, and its open-requests record
+     * is not yet written. An instance that stops there must not lose the request: after the restart the asker is told
+     * something about it (the request runs again from the queue, or it is closed as cut by the restart).
+     */
+    @Test
+    void restart_insideTheStartOfATurn_theRequestIsNotLostAndTheAskerHearsOfIt(@TempDir Path dir) throws Exception {
+        String db = dir.resolve("window").toString();
+        StoppedBeforeTheOpenRequestsRecord log = new StoppedBeforeTheOpenRequestsRecord();
+        log.useDatabaseAt(db);
+        IIActorSystem before = new IIActorSystem("window-before");
+        chat(before, "01", new Scripted("unused"), null);
+        chat(before, "24", new Scripted("unused"), SessionEntries.ofConversation(log, IoLogView.over(log), "project1/chat-24"));
+        AskChatTool.send(before, "project1", "01", "24", "render the video", REQUEST);
+        assertTrue(log.inTheWindow.await(10, TimeUnit.SECONDS), "chat-24's turn is inside the window");
+        log.flush();   // what the instance had written when it stopped
+        log.store().close();
+        before.terminate();
+
+        IoLogStore reopened = new IoLogStore();
+        reopened.useDatabaseAt(db);
+        IoLogView view = IoLogView.over(reopened);
+        try {
+            IIActorSystem after = new IIActorSystem("window-after");
+            Scripted asker = new Scripted("noted");
+            chat(after, "01", asker, null);
+            ChatSessionIIAR again = chat(after, "24", new Scripted("worked"),
+                    SessionEntries.ofConversation(reopened, view, "project1/chat-24"));
+            again.tell(a -> ((ChatSession) a).restoreOpenRequests()).get(5, TimeUnit.SECONDS);
+            ActorRef<PromptQueue> queue = after.getActor("project1/chat-24.queue");
+            queue.tell(q -> q.setLogging(after, "project1/chat-24.log")).get(5, TimeUnit.SECONDS);   // as the instance wires every queue
+            queue.tell(q -> q.restore(again.asChatSessionRef(), e -> { })).get(5, TimeUnit.SECONDS);
+
+            String told = firstMessage(asker);
+            assertTrue(told.contains(REQUEST), "the asker hears of its request after the restart: " + told);
+            after.terminate();
+        } finally {
+            if (reopened.store() != null) reopened.store().close();
+        }
+    }
+
     /** The provider says its CLI ended without a result: the turn fails, and the asker is told why. Not retried. */
     @Test
     void cliEndedWithoutAResult_askerIsToldTheTurnFailed() throws Exception {
