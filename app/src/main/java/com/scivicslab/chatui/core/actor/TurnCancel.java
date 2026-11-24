@@ -91,7 +91,13 @@ public final class TurnCancel implements CancelScope {
 
     @Override
     public Registration register(Runnable canceller) {
-        Long id = owner.ask(s -> s.register(canceller)).join();
+        Long id;
+        try {
+            id = owner.ask(s -> s.register(canceller)).join();
+        } catch (RuntimeException e) {
+            if (e.getCause() instanceof ActorClosedException) return null;   // a closed scope refuses the work
+            throw e;
+        }
         if (id == null || id < 0) return null;
         return () -> owner.tell(s -> s.unregister(id)).exceptionally(e -> null);
     }

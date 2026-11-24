@@ -657,7 +657,7 @@ public class PromptQueue {
                 item.noThink(), item.images(), item.source(), item.requestId(), item.link());
         // A request's "started" is recorded now that the turn has written the request's own record: until then the
         // queue still holds it, so an instance that stops inside the start loses nothing (the request runs again).
-        if (recordsStartAfterTheTurnBegins(item)) self.tell(q -> q.recordLeft(item, "started"));
+        if (recordsStartAfterTheTurnBegins(item)) recordStartedAfterTheTurnBegan(item);
         com.scivicslab.pojoactor.action.ActionResult result = chat.runUntilEnd();
         if (!result.isSuccess()) {
             LOG.warning("Agent loop did not reach 'end': " + result.getResult());
@@ -669,6 +669,19 @@ public class PromptQueue {
      * as it starts: a request, or a reply to one, from another conversation. For such an item the queue's own
      * {@code started} record is written after that, not at the pop.
      */
+    /**
+     * Writes {@code started} for a request after its turn began. A failure is not swallowed: the request stays recorded as
+     * waiting in the queue, so after a restart it runs again rather than being lost, and the log says so (it may then run
+     * twice, which is what a person reading this line needs to know).
+     */
+    void recordStartedAfterTheTurnBegan(QueueItem item) {
+        self.tell(q -> q.recordLeft(item, "started")).exceptionally(failure -> {
+            LOG.log(Level.WARNING, "could not record that request " + item.requestId() + " started; it stays queued in the log, "
+                    + "so a restart may run it again", failure);
+            return null;
+        });
+    }
+
     private static boolean recordsStartAfterTheTurnBegins(QueueItem item) {
         String source = item.source();
         return item.requestId() != null && source != null

@@ -1556,7 +1556,7 @@ public class ChatSession extends Interpreter {
 
     /** @return the external MCP servers, by name */
     public Map<String, String> getMcpServers() {
-        return settings.ask(s -> s.mcpServers).join();
+        return setting(s -> s.mcpServers, Map.of());
     }
 
     /** @return whether {@code tool} is a tool of one of this conversation's external MCP servers, {@code <server>__<tool>} */
@@ -2426,7 +2426,7 @@ public class ChatSession extends Interpreter {
     }
 
     /** @return how many steps one turn of this conversation may make, when its provider takes a step budget */
-    public int getStepLimit() { return settings.ask(s -> s.stepLimit).join(); }
+    public int getStepLimit() { return setting(s -> s.stepLimit, DEFAULT_CONVERSATION_STEP_LIMIT); }
 
     /** @param value steps per turn, at least 1 */
     public void setStepLimit(int value) {
@@ -2435,7 +2435,7 @@ public class ChatSession extends Interpreter {
     }
 
     /** @return minutes one turn may run, {@code 0} for no limit */
-    public int getTimeLimitMinutes() { return settings.ask(s -> s.timeLimitMinutes).join(); }
+    public int getTimeLimitMinutes() { return setting(s -> s.timeLimitMinutes, DEFAULT_TIME_LIMIT_MINUTES); }
 
     /** @param value minutes per turn, {@code 0} for no limit */
     public void setTimeLimitMinutes(int value) {
@@ -2476,7 +2476,22 @@ public class ChatSession extends Interpreter {
 
     /** What other threads may read of this conversation, as the turn last told it; does not wait for a running turn. */
     ChatBoard.Status status() {
-        return board.ask(ChatBoard::status).join();
+        try {
+            return board.ask(ChatBoard::status).join();
+        } catch (java.util.concurrent.CompletionException e) {
+            if (e.getCause() instanceof com.scivicslab.pojoactor.core.ActorClosedException) return ChatBoard.GONE;   // deleted
+            throw e;
+        }
+    }
+
+    /** What a setting is for a conversation that was deleted: its default. */
+    private <R> R setting(java.util.function.Function<ChatSettings, R> read, R whenGone) {
+        try {
+            return settings.ask(read::apply).join();
+        } catch (java.util.concurrent.CompletionException e) {
+            if (e.getCause() instanceof com.scivicslab.pojoactor.core.ActorClosedException) return whenGone;
+            throw e;
+        }
     }
 
 
@@ -4107,7 +4122,7 @@ public class ChatSession extends Interpreter {
 
     /** @return whether this conversation asks its model to skip the thinking phase */
     public boolean isNoThink() {
-        return settings.ask(s -> s.noThink).join();
+        return setting(s -> s.noThink, false);
     }
 
     // ── What this conversation records of itself (EachActorRecordsItsOwnState_261118_oo01) ──────────────

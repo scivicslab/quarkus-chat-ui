@@ -42,6 +42,29 @@ final class ChatBoard {
                   LlmProvider provider, SessionEntries entries, com.scivicslab.chatui.agent.ToolSet toolSet,
                   String promptWorkflowFile, long ioSession, int ioTurnNo, int stepCount) {}
 
+    /**
+     * What a read of a conversation that was deleted gets: a status with nothing in it (not busy, no history, no requests,
+     * a provider that answers {@code null}, {@code false}, {@code 0} or an empty collection to everything). A page that lists
+     * conversations while one is deleted then sees it as empty instead of getting an exception; it is gone from the next list.
+     */
+    static final Status GONE = new Status(false, 0, List.of(), List.of(), Set.of(), Map.of(), List.of(), null, noProvider(),
+            null, com.scivicslab.chatui.agent.ToolSet.FULL, null, -1, 0, 0);
+
+    private static LlmProvider noProvider() {
+        return (LlmProvider) java.lang.reflect.Proxy.newProxyInstance(LlmProvider.class.getClassLoader(),
+                new Class<?>[] {LlmProvider.class}, (proxy, method, args) -> {
+                    Class<?> type = method.getReturnType();
+                    if (type == boolean.class) return false;
+                    if (type == int.class) return 0;
+                    if (type == long.class) return 0L;
+                    if (type == double.class) return 0.0;
+                    if (type == List.class) return List.of();
+                    if (type == Map.class) return Map.of();
+                    if (type == Set.class) return Set.of();
+                    return null;
+                });
+    }
+
     private Status status;
 
     void set(Status status) {

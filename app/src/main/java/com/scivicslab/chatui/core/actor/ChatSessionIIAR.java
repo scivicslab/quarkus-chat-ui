@@ -36,11 +36,15 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      * same file today since it's the only one that exists, not because ConversationSquads are forced to share it.
      */
 
+    private final ChatSession session;
+
     private String agentLoopWorkflowFile = "chat-session-agent-loop.yaml";
 
     public ChatSessionIIAR(String actorName, LlmProvider provider, Optional<String> configApiKey,
                      IoLogStore ioLog, IIActorSystem system) {
         super(actorName, new ChatSession(provider, configApiKey, ioLog), system);
+        // Kept here: closing the actor drops its object, and a read that comes after a delete must still find the session.
+        this.session = (ChatSession) object;
         chatSession().setActorSystem(system);
         // InterpreterIIAR's constructor does not call this itself — without it, "actor: this" in
         // chat-session-agent-loop.yaml resolves through Interpreter.action()'s selfActorRef==null
@@ -305,7 +309,7 @@ public class ChatSessionIIAR extends InterpreterIIAR {
     /** How hard this conversation's provider was told to work, read directly; null when it has no such setting. */
     public String getEffortDirect() { return chatSession().status().provider().getEffort(); }
 
-    private ChatSession chatSession() { return (ChatSession) object; }
+    private ChatSession chatSession() { return session; }
 
     /**
      * {@code this}'s static type is {@code ActorRef<Interpreter>} (inherited from

@@ -22,6 +22,8 @@ public final class RateSlots implements AutoCloseable {
         private final long intervalMillis;
         private long nextFree;
         private long issued;
+        /** The slots not yet due, so a close can let their callers go. */
+        private final java.util.Set<CompletableFuture<Void>> waiting = new java.util.LinkedHashSet<>();
 
         Book(long intervalMillis) {
             this.intervalMillis = intervalMillis;
@@ -71,6 +73,8 @@ public final class RateSlots implements AutoCloseable {
         return owner.ask(b -> b.reserve(System.currentTimeMillis())).thenCompose(slot -> {
             if (slot.delayMillis() <= 0) return CompletableFuture.<Void>completedFuture(null);
             CompletableFuture<Void> due = new CompletableFuture<>();
+            owner.tell(b -> b.waiting.add(due)).exceptionally(e -> null);
+            due.whenComplete((v, e) -> owner.tell(b -> b.waiting.remove(due)).exceptionally(x -> null));
             timer.scheduleOnce(name + "-slot-" + slot.number(), owner, b -> due.complete(null),
                     slot.delayMillis(), TimeUnit.MILLISECONDS);
             return due;
@@ -80,7 +84,18 @@ public final class RateSlots implements AutoCloseable {
     /** Stops the owner and the timer; a caller still waiting is let go. */
     @Override
     public void close() {
+        java.util.List<CompletableFuture<Void>> let;
+        try {
+            let = owner.ask(b -> {
+                java.util.List<CompletableFuture<Void>> all = new java.util.ArrayList<>(b.waiting);
+                b.waiting.clear();
+                return all;
+            }).join();
+        } catch (CompletionException e) {
+            let = java.util.List.of();   // already closed
+        }
         timer.close();
         owner.close();
+        let.forEach(f -> f.complete(null));
     }
 }
