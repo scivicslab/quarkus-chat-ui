@@ -2,6 +2,7 @@ package com.scivicslab.chatui.harness;
 
 import com.scivicslab.chatui.agent.ToolSet;
 import com.scivicslab.chatui.core.provider.LlmProvider;
+import com.scivicslab.chatui.kernel.StateOwner;
 import com.scivicslab.chatui.plugin.ConversationMcp;
 import com.scivicslab.chatui.core.provider.ProviderCapabilities;
 import com.scivicslab.chatui.core.provider.ProviderContext;
@@ -54,9 +55,18 @@ public class ClaudeCodeProvider implements LlmProvider {
     private final ToolSet toolSet;
     private final ConversationMcp mcp;
     /** The ids of the CLI's calls to the conversation's own tools, whose results are not passed on. */
-    private final Set<String> ownToolUseIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    private final Set<String> pendingPermissionIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    private final Set<String> pendingPlanApprovalIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    /**
+     * What the turn's events and the answers to its prompts share: the ids of the tool calls the conversation runs itself,
+     * and of the permission and plan-approval prompts waiting for an answer. The events come from the turn and the answers
+     * from the conversation, on other threads, so one owner, an actor, holds the three sets and every use is a message.
+     */
+    static final class Pending {
+        final Set<String> ownToolUseIds = new java.util.HashSet<>();
+        final Set<String> permissionIds = new java.util.HashSet<>();
+        final Set<String> planApprovalIds = new java.util.HashSet<>();
+    }
+
+    private final StateOwner<Pending> pending = new StateOwner<>("claude-pending", new Pending());
 
     /**
      * @param settings   process-wide harness settings
@@ -453,14 +463,14 @@ public class ClaudeCodeProvider implements LlmProvider {
                 // A call to the conversation's own tools is reported by the MCP request instead, and recorded once
                 // by the conversation as its own step; its use and result here would record it twice.
                 if (event.toolName() != null && event.toolName().startsWith(MCP_TOOL_PREFIX)) {
-                    ownToolUseIds.add(event.toolUseId());
+                    pending.run(p -> p.ownToolUseIds.add(event.toolUseId()));
                     return;
                 }
                 emitter.accept(ChatEvent.toolUse(event.toolUseId(), event.toolName(), event.content()));
             }
             case "retraction" -> emitter.accept(ChatEvent.retraction(event.content()));
             case "tool_result" -> {
-                if (ownToolUseIds.remove(event.toolUseId())) return;
+                if (pending.ask(p -> p.ownToolUseIds.remove(event.toolUseId()))) return;
                 // ExitPlanMode is surfaced as a prompt from its tool_use block; the CLI then
                 // auto-denies the tool with this result, which is not an error of the turn.
                 if (event.isError() && "Exit plan mode?".equals(
@@ -495,9 +505,9 @@ public class ClaudeCodeProvider implements LlmProvider {
             }
             case "prompt" -> {
                 if ("permission".equals(event.promptType()) && event.promptId() != null) {
-                    pendingPermissionIds.add(event.promptId());
+                    pending.run(p -> p.permissionIds.add(event.promptId()));
                 } else if ("exit_plan_mode".equals(event.promptType()) && event.promptId() != null) {
-                    pendingPlanApprovalIds.add(event.promptId());
+                    pending.run(p -> p.planApprovalIds.add(event.promptId()));
                 }
                 emitter.accept(ChatEvent.prompt(
                         event.promptId(), event.content(), event.promptType(), event.options()));
@@ -529,7 +539,7 @@ public class ClaudeCodeProvider implements LlmProvider {
 
     @Override
     public void respond(String promptId, String response) throws IOException {
-        if (pendingPermissionIds.remove(promptId)) {
+        if (pending.ask(p -> p.permissionIds.remove(promptId))) {
             cliProcess.writePermissionResponse(promptId, response);
         } else {
             cliProcess.writeUserMessage(response);
@@ -538,12 +548,12 @@ public class ClaudeCodeProvider implements LlmProvider {
 
     @Override
     public boolean isPlanApproval(String promptId) {
-        return promptId != null && pendingPlanApprovalIds.contains(promptId);
+        return promptId != null && pending.ask(p -> p.planApprovalIds.contains(promptId));
     }
 
     @Override
     public void clearPlanApproval(String promptId) {
-        pendingPlanApprovalIds.remove(promptId);
+        pending.run(p -> p.planApprovalIds.remove(promptId));
     }
 
     // ---- Autonomous events ----

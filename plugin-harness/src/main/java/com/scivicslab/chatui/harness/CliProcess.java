@@ -1,6 +1,8 @@
 package com.scivicslab.chatui.harness;
 
 import com.scivicslab.chatui.kernel.BlockingJob;
+import com.scivicslab.chatui.kernel.EventQueue;
+import com.scivicslab.chatui.kernel.StateOwner;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -11,7 +13,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -43,32 +44,78 @@ public class CliProcess {
     private String lastSessionId;
     private Process currentProcess;
     private OutputStream stdinStream;
-    /** The job that reads the process's stdout; it ends when the output closes. */
-    private volatile BlockingJob<Void> readerJob;
-    private volatile Thread sendingThread;
-    // Events produced while a prompt turn is in flight (between writeUserMessage and the turn's
-    // result event) go to turnQueue and are consumed by sendPrompt. Events produced while no
-    // prompt is active — the CLI emitting autonomously (a background job finishing, a
-    // ScheduleWakeup firing) — go to autonomousQueue and are consumed by pollAutonomousEvent.
-    // Routing by turnActive keeps autonomous output from being mis-delivered as the response to
-    // the next user prompt.
-    private final LinkedBlockingQueue<StreamEvent> turnQueue = new LinkedBlockingQueue<>();
-    /** Calls to chat-ui's tools the CLI waits on, by the id of their {@link StreamEvent#parkedCall} event. */
-    private final java.util.Map<String, java.util.concurrent.CompletableFuture<String>> parked =
-            new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.concurrent.atomic.AtomicLong parkedSeq = new java.util.concurrent.atomic.AtomicLong();
-    /** The turn is parked: {@link #sendPrompt} returned {@link #SUSPENDED} and has not been resumed. */
-    private volatile boolean suspended;
-    /** {@code --mcp-config}'s value, or {@code null} for none. */
-    private volatile String mcpConfigJson;
+    /**
+     * What several threads share of the process: the events of the prompt's turn and the autonomous ones, the calls
+     * the CLI is parked on, and the flags that route them. It is a plain object for one owner, an actor: the reader of the
+     * process's output tells it each event, the turn waits on it, and a call to chat-ui's tools parks through it.
+     *
+     * <p>Events produced while a prompt turn is in flight (between writeUserMessage and the turn's result event) go to
+     * {@code turn} and are consumed by sendPrompt. Events produced while no prompt is active (the CLI emitting by itself:
+     * a background job finishing, a ScheduleWakeup firing) go to {@code autonomous} and are consumed by
+     * pollAutonomousEvent. Routing by {@code turnActive} keeps autonomous output from being mis-delivered as the response
+     * to the next prompt.</p>
+     */
+    static final class CliState {
+        final EventQueue<StreamEvent> turn = new EventQueue<>();
+        final EventQueue<StreamEvent> autonomous = new EventQueue<>();
+        /** Calls to chat-ui's tools the CLI waits on, by the id of their {@link StreamEvent#parkedCall} event. */
+        final java.util.Map<String, java.util.concurrent.CompletableFuture<String>> parked = new java.util.LinkedHashMap<>();
+        long seq;
+        /** The turn is parked: {@link CliProcess#sendPrompt} returned {@link CliProcess#SUSPENDED} and has not been resumed. */
+        boolean suspended;
+        boolean turnActive;
+        /** True from the first event of a turn the CLI started by itself until that turn's result. */
+        boolean autonomousTurnOpen;
+        /** The job that reads the process's stdout; it ends when the output closes. */
+        BlockingJob<Void> readerJob;
+
+        void route(StreamEvent event) {
+            boolean isResult = "result".equals(event.type());
+            if (!turnActive) {
+                autonomous.offer(event);
+                autonomousTurnOpen = !isResult;
+            } else if (autonomousTurnOpen) {
+                // A prompt was written while the CLI was part-way through a turn it started by itself.
+                // The CLI answers the two turns in order, so the events up to the first result still
+                // belong to the autonomous turn; the prompt's own events follow.
+                autonomous.offer(event);
+                if (isResult) autonomousTurnOpen = false;
+            } else {
+                turn.offer(event);
+                if (isResult) turnActive = false;
+            }
+        }
+
+        /** @return the future of the parked call, complete at once when no turn of the conversation is running */
+        java.util.concurrent.CompletableFuture<String> park(String tool, String argumentsJson) {
+            java.util.concurrent.CompletableFuture<String> result = new java.util.concurrent.CompletableFuture<>();
+            if (!turnActive) {
+                // A turn the CLI started by itself (a background job, a wake-up) is no turn of the conversation.
+                result.complete("error: no turn of this conversation is running, so the call was not run");
+                return result;
+            }
+            String id = "chat-ui-call-" + (++seq);
+            parked.put(id, result);
+            turn.offer(StreamEvent.parkedCall(id, tool, argumentsJson));
+            return result;
+        }
+
+        /** Forgets the prompt's turn. */
+        void forgetTurn() {
+            turnActive = false;
+            autonomousTurnOpen = false;
+            turn.clear();
+            autonomous.clear();
+        }
+    }
+
+    private final StateOwner<CliState> state = new StateOwner<>("cli-process", new CliState());
+
+    /** {@code --mcp-config}'s value, or {@code null} for none. Set and read inside the provider's own messages. */
+    private String mcpConfigJson;
     /** {@code --append-system-prompt}'s value, or {@code null} for none. */
-    private volatile String appendSystemPrompt;
-    private final LinkedBlockingQueue<StreamEvent> autonomousQueue = new LinkedBlockingQueue<>();
-    private volatile boolean turnActive;
-    // True from the first event of a turn the CLI started by itself until that turn's result.
-    // Written only by routeEvent (the reader thread) and reset when the process is restarted or cancelled.
-    private volatile boolean autonomousTurnOpen;
-    private volatile String apiKey;
+    private String appendSystemPrompt;
+    private String apiKey;
 
     /**
      * Creates a new CLI process manager.
@@ -138,7 +185,7 @@ public class CliProcess {
         // autonomous queue. Keeps running while the process is alive, picking up both prompted and
         // autonomous (background-job / ScheduleWakeup) turns.
         final Process started = currentProcess;
-        readerJob = BlockingJob.start("cli-stdout", () -> {
+        BlockingJob<Void> stdoutJob = BlockingJob.start("cli-stdout", () -> {
             try {
                 String line;
                 while ((line = stdoutReader.readLine()) != null) {
@@ -162,9 +209,12 @@ public class CliProcess {
             // The output closed: the process is ending. A prompt still waiting for its result is told at once
             // rather than at its next 60-second poll (TurnWithoutAnAnswerTellsTheAsker_261119_oo01).
             // Only for the process this reader reads: a process cancelled earlier must not end a later prompt.
-            if (turnActive && currentProcess == started) turnQueue.offer(StreamEvent.text(OUTPUT_CLOSED, null));
+            if (currentProcess == started) {
+                state.tell(s -> { if (s.turnActive) s.turn.offer(StreamEvent.text(OUTPUT_CLOSED, null)); });
+            }
             return null;
         }, started::destroy);
+        state.run(s -> s.readerJob = stdoutJob);
 
         // stderr is only logged; its job ends with the process and nobody waits for it.
         Process proc = currentProcess;
@@ -202,9 +252,11 @@ public class CliProcess {
      */
     public int sendPrompt(String prompt, List<String> imageDataUrls, StreamCallback callback) throws IOException {
         if (currentProcess == null || !currentProcess.isAlive()) {
-            turnQueue.clear();
-            autonomousQueue.clear();
-            autonomousTurnOpen = false;
+            state.run(s -> {
+                s.turn.clear();
+                s.autonomous.clear();
+                s.autonomousTurnOpen = false;
+            });
             startProcess();
         }
 
@@ -239,12 +291,12 @@ public class CliProcess {
      * @throws EndedWithoutResult when the process ended before the turn's {@code result}
      */
     public int resume(StreamCallback callback) throws IOException {
-        if (!suspended) throw new IllegalStateException("no turn of the CLI is parked");
+        if (!isSuspended()) throw new IllegalStateException("no turn of the CLI is parked");
         return readTurn(callback);
     }
 
     /** @return whether the CLI's turn is parked on calls to chat-ui's tools ({@link #SUSPENDED}) */
-    public boolean isSuspended() { return suspended; }
+    public boolean isSuspended() { return state.ask(s -> s.suspended); }
 
     /**
      * Parks a call the CLI made to a tool of chat-ui's MCP server, from the thread that took the MCP request. The
@@ -256,16 +308,7 @@ public class CliProcess {
      * @return the observation the CLI receives
      */
     public java.util.concurrent.CompletableFuture<String> park(String tool, String argumentsJson) {
-        java.util.concurrent.CompletableFuture<String> result = new java.util.concurrent.CompletableFuture<>();
-        if (!turnActive) {
-            // A turn the CLI started by itself (a background job, a wake-up) is no turn of the conversation.
-            result.complete("error: no turn of this conversation is running, so the call was not run");
-            return result;
-        }
-        String id = "chat-ui-call-" + parkedSeq.incrementAndGet();
-        parked.put(id, result);
-        turnQueue.offer(StreamEvent.parkedCall(id, tool, argumentsJson));
-        return result;
+        return state.ask(s -> s.park(tool, argumentsJson));
     }
 
     /**
@@ -275,7 +318,7 @@ public class CliProcess {
      * @param text   the observation
      */
     public void answer(String callId, String text) {
-        java.util.concurrent.CompletableFuture<String> call = parked.remove(callId);
+        java.util.concurrent.CompletableFuture<String> call = state.ask(s -> s.parked.remove(callId));
         if (call != null) call.complete(text);
     }
 
@@ -287,8 +330,8 @@ public class CliProcess {
      * @param waitMs how long to wait for the interrupted turn's result
      */
     public void endTurn(long waitMs) {
-        suspended = false;
-        if (turnActive && currentProcess != null && currentProcess.isAlive()) {
+        state.run(s -> s.suspended = false);
+        if (isTurnActive() && currentProcess != null && currentProcess.isAlive()) {
             try {
                 writeInterrupt();
             } catch (IOException e) {
@@ -298,7 +341,7 @@ public class CliProcess {
         answerAllParked();
         long deadline = System.currentTimeMillis() + waitMs;
         try {
-            while (turnActive) {
+            while (isTurnActive()) {
                 long left = deadline - System.currentTimeMillis();
                 StreamEvent event = left <= 0 ? null : pollTurnEvent(left);
                 if (event == null || OUTPUT_CLOSED.equals(event.type())) break;
@@ -307,24 +350,24 @@ public class CliProcess {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        if (turnActive) {
+        if (isTurnActive()) {
             logger.warning(binary + " CLI did not end its interrupted turn in " + waitMs + " ms; stopping it");
             cancel();
         } else {
             // The interrupted turn's last events, its result included, belong to no prompt.
-            turnQueue.clear();
+            state.run(s -> s.turn.clear());
         }
         answerAllParked();
     }
 
     private void answerAllParked() {
-        for (String id : List.copyOf(parked.keySet())) answer(id, TURN_ENDED);
+        for (String id : state.ask(s -> List.copyOf(s.parked.keySet()))) answer(id, TURN_ENDED);
     }
 
     /** Writes Claude Code's stream-json interrupt, which ends the running turn with a result. */
     void writeInterrupt() throws IOException {
         if (stdinStream == null) throw new IOException("No active process stdin");
-        String json = "{\"type\":\"control_request\",\"request_id\":\"interrupt-" + parkedSeq.incrementAndGet()
+        String json = "{\"type\":\"control_request\",\"request_id\":\"interrupt-" + state.ask(s -> ++s.seq)
                 + "\",\"request\":{\"subtype\":\"interrupt\"}}\n";
         stdinStream.write(json.getBytes(StandardCharsets.UTF_8));
         stdinStream.flush();
@@ -332,8 +375,7 @@ public class CliProcess {
 
     /** Reads the in-flight turn's events until its result, or until it is parked on calls. */
     private int readTurn(StreamCallback callback) throws IOException {
-        suspended = false;
-        sendingThread = Thread.currentThread();
+        state.run(s -> s.suspended = false);
         try {
             while (true) {
                 StreamEvent event = pollTurnEvent(60_000);
@@ -365,7 +407,7 @@ public class CliProcess {
                         if (callback != null) callback.onEvent(more);
                         if ("result".equals(more.type())) return 0;
                     }
-                    suspended = true;
+                    state.run(s -> s.suspended = true);
                     return SUSPENDED;
                 }
             }
@@ -373,8 +415,6 @@ public class CliProcess {
             Thread.currentThread().interrupt();
             if (callback != null) callback.onComplete(-1);
             return -1;
-        } finally {
-            sendingThread = null;
         }
     }
 
@@ -401,10 +441,7 @@ public class CliProcess {
 
     /** Forgets the prompt's turn and says how the process ended. */
     private EndedWithoutResult endedWithoutResult() {
-        turnActive = false;
-        autonomousTurnOpen = false;
-        turnQueue.clear();
-        autonomousQueue.clear();
+        state.run(CliState::forgetTurn);
         Process p = currentProcess;
         Integer code = null;
         if (p != null) {
@@ -427,8 +464,8 @@ public class CliProcess {
      * @return the next autonomous event, or {@code null} if none arrived within the timeout
      */
     public StreamEvent pollAutonomousEvent(long timeoutMs) throws InterruptedException {
-        if (timeoutMs <= 0) return autonomousQueue.poll();
-        return autonomousQueue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+        if (timeoutMs <= 0) return state.ask(s -> s.autonomous.pollNow());
+        return state.poll(s -> s.autonomous, timeoutMs);
     }
 
     /**
@@ -438,14 +475,14 @@ public class CliProcess {
      * @return {@code true} if at least one autonomous event is waiting
      */
     public boolean hasAutonomousEvent() {
-        return !autonomousQueue.isEmpty();
+        return !state.ask(s -> s.autonomous.isEmpty());
     }
 
     /** Marks a prompt turn as started so subsequent events route to the turn queue. */
-    void beginTurn() { turnActive = true; }
+    void beginTurn() { state.run(s -> s.turnActive = true); }
 
     /** Returns whether a prompt turn is currently in flight (visible for testing). */
-    boolean isTurnActive() { return turnActive; }
+    boolean isTurnActive() { return state.ask(s -> s.turnActive); }
 
     /**
      * Routes one parsed event to the turn queue or the autonomous queue depending on whether a
@@ -458,20 +495,7 @@ public class CliProcess {
      * @param event the parsed stream event to route
      */
     void routeEvent(StreamEvent event) {
-        boolean isResult = "result".equals(event.type());
-        if (!turnActive) {
-            autonomousQueue.offer(event);
-            autonomousTurnOpen = !isResult;
-        } else if (autonomousTurnOpen) {
-            // A prompt was written while the CLI was part-way through a turn it started by itself.
-            // The CLI answers the two turns in order, so the events up to the first result still
-            // belong to the autonomous turn; the prompt's own events follow.
-            autonomousQueue.offer(event);
-            if (isResult) autonomousTurnOpen = false;
-        } else {
-            turnQueue.offer(event);
-            if (isResult) turnActive = false;
-        }
+        state.tell(s -> s.route(event));
     }
 
     /**
@@ -482,26 +506,27 @@ public class CliProcess {
      * @throws InterruptedException if interrupted while waiting
      */
     StreamEvent pollTurnEvent(long timeoutMs) throws InterruptedException {
-        return turnQueue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+        return state.poll(s -> s.turn, timeoutMs);
     }
 
     /**
      * Destroys the running CLI process and resets all I/O handles.
      */
     public void cancel() {
-        BlockingJob<Void> reader = readerJob;
-        if (reader != null) {
-            reader.cancel();
-            readerJob = null;
-        }
-        Thread t = sendingThread;
-        if (t != null) t.interrupt();
-        suspended = false;
+        BlockingJob<Void> reader = state.ask(s -> {
+            BlockingJob<Void> job = s.readerJob;
+            s.readerJob = null;
+            return job;
+        });
+        if (reader != null) reader.cancel();
+        // Ends the wait of a turn that is reading events, as the interrupt of its thread did.
+        state.run(s -> {
+            s.turn.cancelWaiting();
+            s.autonomous.cancelWaiting();
+            s.suspended = false;
+        });
         answerAllParked();
-        turnActive = false;
-        autonomousTurnOpen = false;
-        turnQueue.clear();
-        autonomousQueue.clear();
+        state.run(CliState::forgetTurn);
         Process p = currentProcess;
         currentProcess = null;
         stdinStream = null;

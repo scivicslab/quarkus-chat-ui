@@ -5,6 +5,8 @@ import com.scivicslab.chatui.core.provider.ProviderCapabilities;
 import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.chatui.kernel.BlockingJob;
+import com.scivicslab.chatui.kernel.EventQueue;
+import com.scivicslab.chatui.kernel.StateOwner;
 import com.scivicslab.chatui.plugin.ConversationMcp;
 
 import java.io.BufferedReader;
@@ -22,12 +24,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -69,32 +68,94 @@ public class CodexProvider implements LlmProvider {
     private final Path sessionFile;
     private final Path workingDir;
     private final CodexEventParser parser = new CodexEventParser();
-    private volatile String model;
-    private volatile String effort;
-    private volatile String threadId;
-    private volatile Process currentProcess;
+    private String model;
+    private String effort;
+    private String threadId;
     private final ConversationMcp mcp;
     private final List<String> commandPrefix;
-    /** The run's events and the calls it parks, in the order they happen. */
-    private final LinkedBlockingQueue<StreamEvent> events = new LinkedBlockingQueue<>();
-    /** Calls to chat-ui's tools the run waits on, by the id of their {@link StreamEvent#parkedCall} event. */
-    private final Map<String, CompletableFuture<String>> parked = new ConcurrentHashMap<>();
-    private final AtomicLong parkedSeq = new AtomicLong();
-    /** The ids of the run's calls to the conversation's own tools, whose results are not passed on. */
-    private final Set<String> ownToolUseIds = ConcurrentHashMap.newKeySet();
-    /** The run is parked on calls: {@link #sendPrompt} returned before its end. */
-    private volatile boolean suspended;
-    private volatile String developerInstructions;
+    /**
+     * What several threads share of a run: the events of the run and the calls it parks, the process, what was said on
+     * stderr, the flags the cancel and the turn read, and a copy of the session's settings that other threads read. A plain
+     * object for one owner, an actor: the readers of the process's output tell it, the turn waits on it, and the
+     * conversation's cancel and answers go through it.
+     */
+    static final class CodexState {
+        /** The run's events and the calls it parks, in the order they happen. */
+        final EventQueue<StreamEvent> events = new EventQueue<>();
+        /** Calls to chat-ui's tools the run waits on, by the id of their {@link StreamEvent#parkedCall} event. */
+        final Map<String, CompletableFuture<String>> parked = new java.util.LinkedHashMap<>();
+        long seq;
+        /** The ids of the run's calls to the conversation's own tools, whose results are not passed on. */
+        final Set<String> ownToolUseIds = new java.util.HashSet<>();
+        /** The run is parked on calls: {@link #sendPrompt} returned before its end. */
+        boolean suspended;
+        /** Set by {@link #cancel}: a turn the person stopped shows no failure of its own. */
+        boolean cancelled;
+        Process process;
+        StringBuilder stderr = new StringBuilder();
+        /** The session's settings as the turn last told them; {@link #getCurrentModel} and the like read these. */
+        String model;
+        String effort;
+        String threadId;
+
+        CompletableFuture<String> park(String name, String argumentsJson) {
+            CompletableFuture<String> result = new CompletableFuture<>();
+            if (process == null || !process.isAlive()) {
+                result.complete("error: no turn of this conversation is running, so the call was not run");
+                return result;
+            }
+            String id = "chat-ui-call-" + (++seq);
+            parked.put(id, result);
+            events.offer(StreamEvent.parkedCall(id, name, argumentsJson));
+            return result;
+        }
+
+        void appendStderr(String line) {
+            if (stderr.length() < STDERR_LIMIT) {
+                if (!stderr.isEmpty()) stderr.append('\n');
+                stderr.append(line, 0, Math.min(line.length(), STDERR_LIMIT - stderr.length()));
+            }
+        }
+    }
+
+    private final StateOwner<CodexState> state = new StateOwner<>("codex-run", new CodexState());
+
+    private String developerInstructions;
     private boolean sawResult;
-    /** Set by {@link #cancel}: a turn the person stopped shows no failure of its own. */
-    private volatile boolean cancelled;
-    /** The errors the run reported, shown when the turn ends unless the run is retried. */
+    /** The errors the run reported, shown when the turn ends unless the run is retried; the turn's own thread alone uses it. */
     private final List<String> runErrors = new ArrayList<>();
-    private StringBuilder runStderr = new StringBuilder();
     private BlockingJob<Void> stderrReader;
     private long turnStartedAt;
     /** The turn's image files, kept while its run goes on, also while it is parked on calls. */
     private PreparedImages heldImages;
+
+    private void putModel(String value) {
+        model = value;
+        publishSession();
+    }
+
+    private void putEffort(String value) {
+        effort = value;
+        publishSession();
+    }
+
+    private void putThreadId(String value) {
+        threadId = value;
+        publishSession();
+    }
+
+    private void publishSession() {
+        String m = model, e = effort, id = threadId;
+        state.tell(s -> {
+            s.model = m;
+            s.effort = e;
+            s.threadId = id;
+        });
+    }
+
+    private boolean isCancelled() {
+        return state.ask(s -> s.cancelled);
+    }
 
     /**
      * @param settings   process-wide harness settings
@@ -138,7 +199,7 @@ public class CodexProvider implements LlmProvider {
         this.commandPrefix = List.copyOf(commandPrefix);
         this.sessionFile = settings.sessionFile(projectId, chatId, ID);
         this.workingDir = workingDir;
-        this.model = blankToNull(settings.codexModel());
+        putModel(blankToNull(settings.codexModel()));
         this.mcp = mcp;
         restoreSession();
     }
@@ -179,22 +240,24 @@ public class CodexProvider implements LlmProvider {
     public List<ModelEntry> getAvailableModels() {
         CodexModelCatalog.Snapshot snapshot = MODEL_CATALOG.snapshot();
         if (model == null && snapshot.defaultModel() != null) {
-            model = snapshot.defaultModel();
+            putModel(snapshot.defaultModel());
         }
         return snapshot.models();
     }
     @Override public ProviderCapabilities capabilities() { return ProviderCapabilities.CODEX_CLI; }
-    @Override public String getCurrentModel() { return model; }
-    @Override public void setModel(String model) { this.model = blankToNull(model); }
-    @Override public String getSessionId() { return threadId; }
+    @Override public String getCurrentModel() { return state.ask(s -> s.model); }
+    @Override public void setModel(String model) { putModel(blankToNull(model)); }
+    @Override public String getSessionId() { return state.ask(s -> s.threadId); }
     @Override public String detectEnvApiKey() { return System.getenv("OPENAI_API_KEY"); }
 
     @Override
     public void cancel() {
-        cancelled = true;
-        suspended = false;
+        state.run(s -> {
+            s.cancelled = true;
+            s.suspended = false;
+        });
         closeImages();
-        Process p = currentProcess;
+        Process p = state.ask(s -> s.process);
         if (p != null && p.isAlive()) {
             p.destroy();
             logger.info("codex process cancelled");
@@ -209,16 +272,7 @@ public class CodexProvider implements LlmProvider {
 
     @Override
     public CompletableFuture<String> parkToolCall(String name, String argumentsJson) {
-        CompletableFuture<String> result = new CompletableFuture<>();
-        Process p = currentProcess;
-        if (p == null || !p.isAlive()) {
-            result.complete("error: no turn of this conversation is running, so the call was not run");
-            return result;
-        }
-        String id = "chat-ui-call-" + parkedSeq.incrementAndGet();
-        parked.put(id, result);
-        events.offer(StreamEvent.parkedCall(id, name, argumentsJson));
-        return result;
+        return state.ask(s -> s.park(name, argumentsJson));
     }
 
     @Override
@@ -232,9 +286,9 @@ public class CodexProvider implements LlmProvider {
      */
     @Override
     public void endTurn() {
-        suspended = false;
+        state.run(s -> s.suspended = false);
         closeImages();
-        Process p = currentProcess;
+        Process p = state.ask(s -> s.process);
         if (p != null && p.isAlive()) {
             p.destroy();
             logger.info("codex run stopped at the end of the conversation's turn");
@@ -249,12 +303,12 @@ public class CodexProvider implements LlmProvider {
     }
 
     private void answer(String callId, String text) {
-        CompletableFuture<String> call = parked.remove(callId);
+        CompletableFuture<String> call = state.ask(s -> s.parked.remove(callId));
         if (call != null) call.complete(text);
     }
 
     private void answerAllParked() {
-        for (String id : List.copyOf(parked.keySet())) answer(id, CliProcess.TURN_ENDED);
+        for (String id : state.ask(s -> List.copyOf(s.parked.keySet()))) answer(id, CliProcess.TURN_ENDED);
     }
 
     /** The type of the event the output reader leaves when the run's output closes. */
@@ -262,8 +316,8 @@ public class CodexProvider implements LlmProvider {
 
     @Override
     public void sendPrompt(String prompt, String requestedModel, Consumer<ChatEvent> emitter, ProviderContext ctx) {
-        if (requestedModel != null && !requestedModel.isBlank()) this.model = requestedModel;
-        if (suspended) {
+        if (requestedModel != null && !requestedModel.isBlank()) putModel(requestedModel);
+        if (state.ask(s -> s.suspended)) {
             // A run parked on calls to the conversation's tools goes on where it stopped: the calls' results were
             // just given, and the blank prompt adds nothing. Only a run's start can be retried, so there is no
             // retry here.
@@ -271,7 +325,7 @@ public class CodexProvider implements LlmProvider {
             if (end != null) finishTurn(end, emitter);
             return;
         }
-        cancelled = false;
+        state.run(s -> s.cancelled = false);
         turnStartedAt = System.nanoTime();
         boolean mayRetrySession = threadId != null;
         boolean mayRetryModel = model != null;
@@ -286,14 +340,14 @@ public class CodexProvider implements LlmProvider {
         while (true) {
             RunEnd end = startRun(prompt, ctx, emitter);
             if (end == null) return; // parked: the turn goes on in a later call of this method
-            if (!cancelled && mayRetryModel && end.isUnsupportedModel()) {
+            if (!isCancelled() && mayRetryModel && end.isUnsupportedModel()) {
                 logger.warning("Selected Codex model is unavailable; retrying with Codex's default model");
-                model = null;
+                putModel(null);
                 mayRetryModel = false;
                 emitter.accept(ChatEvent.thinking("Selected model is unavailable. Using the Codex default..."));
                 continue;
             }
-            if (!cancelled && mayRetrySession && end.isStaleSession()) {
+            if (!isCancelled() && mayRetrySession && end.isStaleSession()) {
                 logger.warning("Codex thread is no longer available; retrying as a new thread");
                 clearSession();
                 mayRetrySession = false;
@@ -322,25 +376,26 @@ public class CodexProvider implements LlmProvider {
             logger.log(Level.WARNING, "codex could not be started", e);
             return RunEnd.failed("codex could not be started: " + e.getMessage());
         }
-        events.clear();
         sawResult = false;
-        synchronized (runErrors) { runErrors.clear(); }
-        StringBuilder stderr = new StringBuilder();
-        runStderr = stderr;
-        currentProcess = process;
+        runErrors.clear();
+        state.run(s -> {
+            s.events.clear();
+            s.stderr = new StringBuilder();
+            s.process = process;
+        });
 
-        stderrReader = BlockingJob.start("codex-stderr", () -> { readStderr(process, stderr); return null; }, process::destroy);
+        stderrReader = BlockingJob.start("codex-stderr", () -> { readStderr(process, state); return null; }, process::destroy);
         // The run's output, and the calls it parks, reach the turn through one queue, in the order they happen.
         BlockingJob.start("codex-stdout", () -> {
             try (BufferedReader out = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = out.readLine()) != null) {
-                    for (StreamEvent event : parser.parse(line)) events.offer(event);
+                    for (StreamEvent event : parser.parse(line)) state.tell(s -> s.events.offer(event));
                 }
             } catch (IOException e) {
                 logger.log(Level.FINE, "codex stdout closed", e);
             }
-            events.offer(StreamEvent.text(OUTPUT_CLOSED, null));
+            state.tell(s -> s.events.offer(StreamEvent.text(OUTPUT_CLOSED, null)));
             return null;
         }, process::destroy);
 
@@ -358,11 +413,11 @@ public class CodexProvider implements LlmProvider {
      * @return how the run ended, or {@code null} when it is parked
      */
     private RunEnd readRun(Consumer<ChatEvent> emitter, ProviderContext ctx) {
-        suspended = false;
-        Process process = currentProcess;
+        state.run(s -> s.suspended = false);
+        Process process = state.ask(s -> s.process);
         try {
             while (true) {
-                StreamEvent event = events.poll(60, TimeUnit.SECONDS);
+                StreamEvent event = state.poll(s -> s.events, 60_000);
                 if (event == null) {
                     if (process != null && process.isAlive()) continue;
                     break;
@@ -374,15 +429,16 @@ public class CodexProvider implements LlmProvider {
                     // The calls Codex makes alongside this one arrive within a moment; they are handed over
                     // together, as one step's calls.
                     StreamEvent more;
-                    while ((more = events.poll(CliProcess.PARK_SETTLE_MS, TimeUnit.MILLISECONDS)) != null) {
+                    while ((more = state.poll(s -> s.events, CliProcess.PARK_SETTLE_MS)) != null) {
                         if (OUTPUT_CLOSED.equals(more.type())) {
-                            events.offer(more);
+                            StreamEvent closed = more;
+                            state.run(s -> s.events.offer(closed));
                             break;
                         }
                         handle(more, emitter);
                     }
-                    if (!parked.isEmpty()) {
-                        suspended = true;
+                    if (state.ask(s -> !s.parked.isEmpty())) {
+                        state.run(s -> s.suspended = true);
                         return null;
                     }
                 }
@@ -406,20 +462,18 @@ public class CodexProvider implements LlmProvider {
             if (process != null) process.destroy();
             exit = -1;
         } finally {
-            currentProcess = null;
+            state.run(s -> s.process = null);
         }
         answerAllParked();
-        List<String> errors;
-        synchronized (runErrors) { errors = List.copyOf(runErrors); }
-        String stderr;
-        synchronized (runStderr) { stderr = runStderr.toString().trim(); }
+        List<String> errors = List.copyOf(runErrors);
+        String stderr = state.ask(s -> s.stderr.toString().trim());
         return new RunEnd(sawResult, exit, stderr, errors);
     }
 
     /** Shows what the run reported and ends the turn: the errors, then the result. */
     private void finishTurn(RunEnd end, Consumer<ChatEvent> emitter) {
         closeImages();
-        if (!cancelled) {
+        if (!isCancelled()) {
             Set<String> errors = new LinkedHashSet<>(end.errors());
             if (!end.completed() && errors.isEmpty()) {
                 errors.add(end.stderr().isBlank()
@@ -454,18 +508,18 @@ public class CodexProvider implements LlmProvider {
                 // A call to the conversation's own tools is reported by the MCP request instead, and recorded once
                 // by the conversation as its own step.
                 if (event.toolName() != null && event.toolName().startsWith(MCP_TOOL_PREFIX)) {
-                    ownToolUseIds.add(event.toolUseId());
+                    state.run(s -> s.ownToolUseIds.add(event.toolUseId()));
                     return;
                 }
                 emitter.accept(ChatEvent.toolUse(event.toolUseId(), event.toolName(), event.content()));
             }
             case "tool_result" -> {
-                if (ownToolUseIds.remove(event.toolUseId())) return;
+                if (state.ask(s -> s.ownToolUseIds.remove(event.toolUseId()))) return;
                 emitter.accept(ChatEvent.toolResult(event.toolUseId(),
                         event.content() == null ? "" : event.content(), event.isError()));
             }
             case "error" -> {
-                synchronized (runErrors) { runErrors.add(event.content()); }
+                runErrors.add(event.content());
             }
             case "result" -> sawResult = true;
             default -> { }
@@ -573,7 +627,7 @@ public class CodexProvider implements LlmProvider {
         String arg = parts.length == 2 ? parts[1].trim() : "";
         return switch (command) {
             case "/model" -> {
-                if (!arg.isEmpty()) model = arg;
+                if (!arg.isEmpty()) putModel(arg);
                 yield List.of(ChatEvent.info(arg.isEmpty() ? "Current model: " + shown(model) : "Model changed to: " + model));
             }
             case "/effort" -> handleEffort(arg);
@@ -605,7 +659,7 @@ public class CodexProvider implements LlmProvider {
         if (!List.of("low", "medium", "high", "xhigh", "max").contains(value)) {
             return List.of(ChatEvent.error("Unknown effort level: " + arg));
         }
-        effort = value;
+        putEffort(value);
         return List.of(ChatEvent.info("Effort changed to: " + effort));
     }
 
@@ -615,9 +669,9 @@ public class CodexProvider implements LlmProvider {
         try {
             if (!Files.exists(sessionFile)) return;
             for (String line : Files.readAllLines(sessionFile)) {
-                if (line.startsWith("sessionId=")) threadId = blankToNull(line.substring("sessionId=".length()).trim());
-                else if (line.startsWith("model=")) model = blankToNull(line.substring("model=".length()).trim());
-                else if (line.startsWith("effort=")) effort = blankToNull(line.substring("effort=".length()).trim());
+                if (line.startsWith("sessionId=")) putThreadId(blankToNull(line.substring("sessionId=".length()).trim()));
+                else if (line.startsWith("model=")) putModel(blankToNull(line.substring("model=".length()).trim()));
+                else if (line.startsWith("effort=")) putEffort(blankToNull(line.substring("effort=".length()).trim()));
             }
             if (threadId != null) logger.info("Restored codex thread " + threadId + " from " + sessionFile);
         } catch (Exception e) {
@@ -627,7 +681,7 @@ public class CodexProvider implements LlmProvider {
 
     private void saveSession(String id) {
         if (id == null || id.isBlank()) return;
-        threadId = id;
+        putThreadId(id);
         try {
             Files.createDirectories(sessionFile.getParent());
             Files.writeString(sessionFile, "sessionId=" + id + "\nmodel=" + value(model)
@@ -638,7 +692,7 @@ public class CodexProvider implements LlmProvider {
     }
 
     private void clearSession() {
-        threadId = null;
+        putThreadId(null);
         try {
             Files.deleteIfExists(sessionFile);
         } catch (Exception e) {
@@ -646,19 +700,14 @@ public class CodexProvider implements LlmProvider {
         }
     }
 
-    private static void readStderr(Process process, StringBuilder target) {
+    private static void readStderr(Process process, StateOwner<CodexState> state) {
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String message = line;
                 logger.fine(() -> "codex stderr: " + message);
-                synchronized (target) {
-                    if (target.length() < STDERR_LIMIT) {
-                        if (!target.isEmpty()) target.append('\n');
-                        target.append(line, 0, Math.min(line.length(), STDERR_LIMIT - target.length()));
-                    }
-                }
+                state.tell(s -> s.appendStderr(message));
             }
         } catch (IOException ignored) { }
     }

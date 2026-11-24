@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scivicslab.chatui.core.provider.LlmProvider.ModelEntry;
 import com.scivicslab.chatui.kernel.BlockingJob;
+import com.scivicslab.chatui.kernel.StateOwner;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -38,8 +39,10 @@ final class CodexModelCatalog {
     private final List<String> command;
     private final Duration timeout;
     private final Duration ttl;
-    private volatile Snapshot cached;
-    private volatile long cachedAtNanos;
+    /** The one owner of the cache: a read of the catalog is one message to it, so two never query the server together. */
+    private final StateOwner<Object> owner = new StateOwner<>("codex-model-catalog", new Object());
+    private Snapshot cached;
+    private long cachedAtNanos;
 
     CodexModelCatalog() {
         this(List.of("codex", "app-server", "--listen", "stdio://"), DEFAULT_TIMEOUT, DEFAULT_TTL);
@@ -51,7 +54,12 @@ final class CodexModelCatalog {
         this.ttl = ttl;
     }
 
-    synchronized Snapshot snapshot() {
+    Snapshot snapshot() {
+        return owner.ask(o -> snapshotNow());
+    }
+
+    /** {@link #snapshot()}, run as a message of the owner. */
+    private Snapshot snapshotNow() {
         long now = System.nanoTime();
         if (cached != null && now - cachedAtNanos < ttl.toNanos()) return cached;
         try {

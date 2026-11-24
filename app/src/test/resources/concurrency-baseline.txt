@@ -15,12 +15,4 @@ app/src/main/java/com/scivicslab/chatui/openaicompat/McpToolClient.java synchron
 app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java concurrent-class 1
 app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java volatile 2
 app/src/main/java/com/scivicslab/chatui/openaicompat/client/OpenAiCompatClient.java volatile 3
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/ClaudeCodeProvider.java concurrent-class 3
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CliProcess.java concurrent-class 4
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CliProcess.java volatile 8
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexModelCatalog.java synchronized 1
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexModelCatalog.java volatile 2
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java concurrent-class 4
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java synchronized 5
-plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java volatile 7
 ssh-tools/src/main/java/com/scivicslab/sshtools/SshRunner.java concurrent-class 2
