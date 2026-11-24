@@ -14,7 +14,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -35,6 +38,11 @@ import java.util.logging.Logger;
  * prompt goes in on stdin (the {@code -} argument), the events come out on stdout as JSON Lines,
  * and the process exiting is the end of the turn.</p>
  *
+ * <p>A process that fails shows its stderr and still ends the turn. A resume whose thread Codex no longer has
+ * is retried once as a fresh conversation, and a model Codex does not accept is dropped for Codex's own default,
+ * once. The {@code /model} and {@code /effort} commands set the model and the reasoning effort of the turns that
+ * follow; an image data URL is written to a temporary file and passed with {@code -i}.</p>
+ *
  * <p>Codex runs its own tools: its command executions, file changes and MCP calls are reported
  * as {@code tool_use}/{@code tool_result} events for the conversation to record. Codex has no
  * switch that disables those tools, so this provider only exists with the harness tool
@@ -43,6 +51,9 @@ import java.util.logging.Logger;
 public class CodexProvider implements LlmProvider {
 
     private static final Logger logger = Logger.getLogger(CodexProvider.class.getName());
+
+    /** How much of a failed run's stderr is kept to show. */
+    private static final int STDERR_LIMIT = 16_384;
 
     public static final String ID = "codex";
 
@@ -56,10 +67,11 @@ public class CodexProvider implements LlmProvider {
     private final Path workingDir;
     private final CodexEventParser parser = new CodexEventParser();
     private volatile String model;
+    private volatile String effort;
     private volatile String threadId;
     private volatile Process currentProcess;
     private final ConversationMcp mcp;
-    private final String binary;
+    private final List<String> commandPrefix;
     /** The run's events and the calls it parks, in the order they happen. */
     private final LinkedBlockingQueue<StreamEvent> events = new LinkedBlockingQueue<>();
     /** Calls to chat-ui's tools the run waits on, by the id of their {@link StreamEvent#parkedCall} event. */
@@ -71,7 +83,15 @@ public class CodexProvider implements LlmProvider {
     private volatile boolean suspended;
     private volatile String developerInstructions;
     private boolean sawResult;
-    private boolean sawAssistant;
+    /** Set by {@link #cancel}: a turn the person stopped shows no failure of its own. */
+    private volatile boolean cancelled;
+    /** The errors the run reported, shown when the turn ends unless the run is retried. */
+    private final List<String> runErrors = new ArrayList<>();
+    private StringBuilder runStderr = new StringBuilder();
+    private Thread stderrReader;
+    private long turnStartedAt;
+    /** The turn's image files, kept while its run goes on, also while it is parked on calls. */
+    private PreparedImages heldImages;
 
     /**
      * @param settings   process-wide harness settings
@@ -80,7 +100,7 @@ public class CodexProvider implements LlmProvider {
      * @param workingDir the directory Codex works in, or {@code null} for this process's own
      */
     public CodexProvider(HarnessSettings settings, String projectId, String chatId, Path workingDir) {
-        this(settings, projectId, chatId, workingDir, null);
+        this(settings, projectId, chatId, workingDir, (ConversationMcp) null);
     }
 
     /**
@@ -95,16 +115,27 @@ public class CodexProvider implements LlmProvider {
      */
     public CodexProvider(HarnessSettings settings, String projectId, String chatId, Path workingDir,
                          ConversationMcp mcp) {
-        this(settings, projectId, chatId, workingDir, mcp, "codex");
+        this(settings, projectId, chatId, workingDir, mcp, List.of("codex"));
     }
 
     /** As the public constructor, running {@code binary} instead of {@code codex}: a test's fake CLI. */
     CodexProvider(HarnessSettings settings, String projectId, String chatId, Path workingDir,
                   ConversationMcp mcp, String binary) {
-        this.binary = binary;
+        this(settings, projectId, chatId, workingDir, mcp, List.of(binary));
+    }
+
+    /** As the public constructor, running {@code commandPrefix} instead of {@code codex}: a test's fake CLI. */
+    CodexProvider(HarnessSettings settings, String projectId, String chatId, Path workingDir,
+                  List<String> commandPrefix) {
+        this(settings, projectId, chatId, workingDir, null, commandPrefix);
+    }
+
+    private CodexProvider(HarnessSettings settings, String projectId, String chatId, Path workingDir,
+                          ConversationMcp mcp, List<String> commandPrefix) {
+        this.commandPrefix = List.copyOf(commandPrefix);
         this.sessionFile = settings.sessionFile(projectId, chatId, ID);
         this.workingDir = workingDir;
-        this.model = settings.codexModel();
+        this.model = blankToNull(settings.codexModel());
         this.mcp = mcp;
         restoreSession();
     }
@@ -144,20 +175,22 @@ public class CodexProvider implements LlmProvider {
     @Override
     public List<ModelEntry> getAvailableModels() {
         CodexModelCatalog.Snapshot snapshot = MODEL_CATALOG.snapshot();
-        if ((model == null || model.isBlank()) && snapshot.defaultModel() != null) {
+        if (model == null && snapshot.defaultModel() != null) {
             model = snapshot.defaultModel();
         }
         return snapshot.models();
     }
-    @Override public ProviderCapabilities capabilities() { return ProviderCapabilities.CLI; }
+    @Override public ProviderCapabilities capabilities() { return ProviderCapabilities.CODEX_CLI; }
     @Override public String getCurrentModel() { return model; }
-    @Override public void setModel(String model) { this.model = model; }
+    @Override public void setModel(String model) { this.model = blankToNull(model); }
     @Override public String getSessionId() { return threadId; }
     @Override public String detectEnvApiKey() { return System.getenv("OPENAI_API_KEY"); }
 
     @Override
     public void cancel() {
+        cancelled = true;
         suspended = false;
+        closeImages();
         Process p = currentProcess;
         if (p != null && p.isAlive()) {
             p.destroy();
@@ -197,6 +230,7 @@ public class CodexProvider implements LlmProvider {
     @Override
     public void endTurn() {
         suspended = false;
+        closeImages();
         Process p = currentProcess;
         if (p != null && p.isAlive()) {
             p.destroy();
@@ -224,15 +258,57 @@ public class CodexProvider implements LlmProvider {
     private static final String OUTPUT_CLOSED = "output_closed";
 
     @Override
-    public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
-        if (model != null && !model.isBlank()) this.model = model;
+    public void sendPrompt(String prompt, String requestedModel, Consumer<ChatEvent> emitter, ProviderContext ctx) {
+        if (requestedModel != null && !requestedModel.isBlank()) this.model = requestedModel;
         if (suspended) {
             // A run parked on calls to the conversation's tools goes on where it stopped: the calls' results were
-            // just given, and the blank prompt adds nothing.
-            readRun(emitter, ctx);
+            // just given, and the blank prompt adds nothing. Only a run's start can be retried, so there is no
+            // retry here.
+            RunEnd end = readRun(emitter, ctx);
+            if (end != null) finishTurn(end, emitter);
             return;
         }
-        List<String> cmd = buildCommand();
+        cancelled = false;
+        turnStartedAt = System.nanoTime();
+        boolean mayRetrySession = threadId != null;
+        boolean mayRetryModel = model != null;
+        closeImages();
+        try {
+            heldImages = PreparedImages.from(ctx.imageDataUrls());
+        } catch (IOException e) {
+            logger.log(Level.WARNING, "codex image could not be prepared", e);
+            finishTurn(RunEnd.failed("Codex image could not be prepared: " + e.getMessage()), emitter);
+            return;
+        }
+        while (true) {
+            RunEnd end = startRun(prompt, ctx, emitter);
+            if (end == null) return; // parked: the turn goes on in a later call of this method
+            if (!cancelled && mayRetryModel && end.isUnsupportedModel()) {
+                logger.warning("Selected Codex model is unavailable; retrying with Codex's default model");
+                model = null;
+                mayRetryModel = false;
+                emitter.accept(ChatEvent.thinking("Selected model is unavailable. Using the Codex default..."));
+                continue;
+            }
+            if (!cancelled && mayRetrySession && end.isStaleSession()) {
+                logger.warning("Codex thread is no longer available; retrying as a new thread");
+                clearSession();
+                mayRetrySession = false;
+                emitter.accept(ChatEvent.thinking("Session expired. Starting a new Codex session..."));
+                continue;
+            }
+            finishTurn(end, emitter);
+            return;
+        }
+    }
+
+    /**
+     * Starts one codex process for the turn and reads its run.
+     *
+     * @return how the run ended, or {@code null} when it is parked on calls to the conversation's tools
+     */
+    private RunEnd startRun(String prompt, ProviderContext ctx, Consumer<ChatEvent> emitter) {
+        List<String> cmd = buildCommand(heldImages == null ? List.of() : heldImages.paths());
         logger.fine(() -> "Starting codex: " + String.join(" ", cmd));
         ProcessBuilder pb = launch(cmd, ctx.apiKey()).processBuilder();
 
@@ -241,23 +317,16 @@ public class CodexProvider implements LlmProvider {
             process = pb.start();
         } catch (IOException e) {
             logger.log(Level.WARNING, "codex could not be started", e);
-            emitter.accept(ChatEvent.error("codex could not be started: " + e.getMessage()));
-            return;
+            return RunEnd.failed("codex could not be started: " + e.getMessage());
         }
         events.clear();
         sawResult = false;
-        sawAssistant = false;
+        synchronized (runErrors) { runErrors.clear(); }
+        StringBuilder stderr = new StringBuilder();
+        runStderr = stderr;
         currentProcess = process;
 
-        Thread.ofVirtual().start(() -> {
-            try (BufferedReader err = new BufferedReader(new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = err.readLine()) != null) {
-                    String msg = line;
-                    logger.fine(() -> "codex stderr: " + msg);
-                }
-            } catch (IOException ignored) { }
-        });
+        stderrReader = Thread.ofVirtual().name("codex-stderr").start(() -> readStderr(process, stderr));
         // The run's output, and the calls it parks, reach the turn through one queue, in the order they happen.
         Thread.ofVirtual().start(() -> {
             try (BufferedReader out = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
@@ -276,11 +345,15 @@ public class CodexProvider implements LlmProvider {
         } catch (IOException e) {
             logger.log(Level.WARNING, "codex stdin could not be written", e);
         }
-        readRun(emitter, ctx);
+        return readRun(emitter, ctx);
     }
 
-    /** Reads the run's events until it ends, or until it is parked on calls to the conversation's tools. */
-    private void readRun(Consumer<ChatEvent> emitter, ProviderContext ctx) {
+    /**
+     * Reads the run's events until it ends, or until it is parked on calls to the conversation's tools.
+     *
+     * @return how the run ended, or {@code null} when it is parked
+     */
+    private RunEnd readRun(Consumer<ChatEvent> emitter, ProviderContext ctx) {
         suspended = false;
         Process process = currentProcess;
         try {
@@ -306,7 +379,7 @@ public class CodexProvider implements LlmProvider {
                     }
                     if (!parked.isEmpty()) {
                         suspended = true;
-                        return;
+                        return null;
                     }
                 }
             }
@@ -316,17 +389,43 @@ public class CodexProvider implements LlmProvider {
         int exit;
         try {
             exit = process == null ? -1 : process.waitFor();
+            Thread reader = stderrReader;
+            if (reader != null) reader.join(1_000);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            if (process != null) process.destroy();
             exit = -1;
         } finally {
             currentProcess = null;
         }
         answerAllParked();
-        if (!sawResult && !sawAssistant && exit != 0) {
-            emitter.accept(ChatEvent.error("codex exited with status " + exit + " before completing the turn"));
+        List<String> errors;
+        synchronized (runErrors) { errors = List.copyOf(runErrors); }
+        String stderr;
+        synchronized (runStderr) { stderr = runStderr.toString().trim(); }
+        return new RunEnd(sawResult, exit, stderr, errors);
+    }
+
+    /** Shows what the run reported and ends the turn: the errors, then the result. */
+    private void finishTurn(RunEnd end, Consumer<ChatEvent> emitter) {
+        closeImages();
+        if (!cancelled) {
+            Set<String> errors = new LinkedHashSet<>(end.errors());
+            if (!end.completed() && errors.isEmpty()) {
+                errors.add(end.stderr().isBlank()
+                        ? "Codex exited before completing the turn (status " + end.exitCode() + ")"
+                        : "Codex failed: " + end.stderr());
+            }
+            errors.forEach(message -> emitter.accept(ChatEvent.error(message)));
         }
-        emitter.accept(ChatEvent.result(threadId, -1, -1, this.model, false));
+        long durationMs = (System.nanoTime() - turnStartedAt) / 1_000_000;
+        emitter.accept(ChatEvent.result(threadId, -1, durationMs, this.model, false));
+    }
+
+    private void closeImages() {
+        PreparedImages images = heldImages;
+        heldImages = null;
+        if (images != null) images.close();
     }
 
     /** Passes one event of the run on to the conversation. */
@@ -336,10 +435,7 @@ public class CodexProvider implements LlmProvider {
                 if (event.sessionId() != null) saveSession(event.sessionId());
             }
             case "assistant" -> {
-                if (event.hasContent()) {
-                    sawAssistant = true;
-                    emitter.accept(ChatEvent.delta(event.content()));
-                }
+                if (event.hasContent()) emitter.accept(ChatEvent.delta(event.content()));
             }
             case "thinking" -> emitter.accept(ChatEvent.thinking(event.hasContent() ? event.content() : "Thinking..."));
             case StreamEvent.PARKED_CALL -> emitter.accept(ChatEvent.toolCall(event.toolUseId(), event.toolName(),
@@ -358,7 +454,9 @@ public class CodexProvider implements LlmProvider {
                 emitter.accept(ChatEvent.toolResult(event.toolUseId(),
                         event.content() == null ? "" : event.content(), event.isError()));
             }
-            case "error" -> emitter.accept(ChatEvent.error(event.content()));
+            case "error" -> {
+                synchronized (runErrors) { runErrors.add(event.content()); }
+            }
             case "result" -> sawResult = true;
             default -> { }
         }
@@ -385,8 +483,12 @@ public class CodexProvider implements LlmProvider {
 
     /** The command of one turn: a fresh thread, or a resume of the one this conversation holds. */
     List<String> buildCommand() {
-        List<String> cmd = new ArrayList<>();
-        cmd.add(binary);
+        return buildCommand(List.of());
+    }
+
+    /** As {@link #buildCommand()}, with each of {@code images} passed as {@code -i <file>}. */
+    List<String> buildCommand(List<Path> images) {
+        List<String> cmd = new ArrayList<>(commandPrefix);
         cmd.add("exec");
         if (threadId != null) {
             cmd.add("resume");
@@ -397,6 +499,14 @@ public class CodexProvider implements LlmProvider {
         cmd.add("-c");
         cmd.add("sandbox_mode=\"" + SANDBOX_MODE + "\"");
         if (model != null && !model.isBlank()) { cmd.add("-m"); cmd.add(model); }
+        if (effort != null) {
+            cmd.add("-c");
+            cmd.add("model_reasoning_effort=\"" + effort + "\"");
+        }
+        for (Path image : images) {
+            cmd.add("-i");
+            cmd.add(image.toString());
+        }
         if (mcp != null) {
             // https://developers.openai.com/codex/mcp: a streamable HTTP server, its bearer token from an
             // environment variable, its tools run without asking, and a call waits as long as the conversation runs it.
@@ -437,19 +547,67 @@ public class CodexProvider implements LlmProvider {
         return sb.append('"').toString();
     }
 
+    // ---- Commands typed into the conversation ----
+
+    @Override public boolean isCommand(String input) { return input != null && input.startsWith("/"); }
+
+    /**
+     * {@code /model [name]}, {@code /effort [level]}, {@code /session [id]}, {@code /clear} and {@code /help}. A model
+     * named here is used as given: the catalog of {@link #getAvailableModels} only lists what Codex offers, and a
+     * name Codex refuses is dropped for its default on the next turn.
+     */
+    @Override
+    public List<ChatEvent> handleCommand(String input) {
+        String[] parts = input.trim().split("\\s+", 2);
+        String command = parts[0].toLowerCase(Locale.ROOT);
+        String arg = parts.length == 2 ? parts[1].trim() : "";
+        return switch (command) {
+            case "/model" -> {
+                if (!arg.isEmpty()) model = arg;
+                yield List.of(ChatEvent.info(arg.isEmpty() ? "Current model: " + shown(model) : "Model changed to: " + model));
+            }
+            case "/effort" -> handleEffort(arg);
+            case "/session" -> {
+                if (!arg.isEmpty()) saveSession(arg);
+                yield List.of(ChatEvent.info(arg.isEmpty()
+                        ? (threadId == null ? "No active session." : "Current session: " + threadId)
+                        : "Session set to: " + threadId));
+            }
+            case "/clear" -> {
+                cancel();
+                clearSession();
+                yield List.of(ChatEvent.info("Session cleared. Starting fresh conversation."));
+            }
+            case "/help", "/?" -> List.of(ChatEvent.info("""
+                    Available commands:
+                      /help, /?          Show this help
+                      /model [name]      Show or change the model
+                      /effort [level]    Show or change reasoning effort
+                      /session [id]      Show or set the Codex thread ID
+                      /clear             Start a fresh Codex conversation"""));
+            default -> List.of(ChatEvent.error("Unknown command: " + command + " (type /help for available commands)"));
+        };
+    }
+
+    private List<ChatEvent> handleEffort(String arg) {
+        if (arg.isEmpty()) return List.of(ChatEvent.info("Current effort: " + shown(effort)));
+        String value = arg.toLowerCase(Locale.ROOT);
+        if (!List.of("low", "medium", "high", "xhigh", "max").contains(value)) {
+            return List.of(ChatEvent.error("Unknown effort level: " + arg));
+        }
+        effort = value;
+        return List.of(ChatEvent.info("Effort changed to: " + effort));
+    }
+
     // ---- Session persistence ----
 
     private void restoreSession() {
         try {
             if (!Files.exists(sessionFile)) return;
             for (String line : Files.readAllLines(sessionFile)) {
-                if (line.startsWith("sessionId=")) {
-                    String id = line.substring("sessionId=".length()).trim();
-                    if (!id.isEmpty()) threadId = id;
-                } else if (line.startsWith("model=")) {
-                    String m = line.substring("model=".length()).trim();
-                    if (!m.isEmpty()) model = m;
-                }
+                if (line.startsWith("sessionId=")) threadId = blankToNull(line.substring("sessionId=".length()).trim());
+                else if (line.startsWith("model=")) model = blankToNull(line.substring("model=".length()).trim());
+                else if (line.startsWith("effort=")) effort = blankToNull(line.substring("effort=".length()).trim());
             }
             if (threadId != null) logger.info("Restored codex thread " + threadId + " from " + sessionFile);
         } catch (Exception e) {
@@ -458,12 +616,110 @@ public class CodexProvider implements LlmProvider {
     }
 
     private void saveSession(String id) {
+        if (id == null || id.isBlank()) return;
         threadId = id;
         try {
             Files.createDirectories(sessionFile.getParent());
-            Files.writeString(sessionFile, "sessionId=" + id + "\nmodel=" + (model == null ? "" : model) + "\n");
+            Files.writeString(sessionFile, "sessionId=" + id + "\nmodel=" + value(model)
+                    + "\neffort=" + value(effort) + "\n");
         } catch (Exception e) {
             logger.log(Level.WARNING, "Failed to write session file " + sessionFile, e);
+        }
+    }
+
+    private void clearSession() {
+        threadId = null;
+        try {
+            Files.deleteIfExists(sessionFile);
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "Failed to delete session file " + sessionFile, e);
+        }
+    }
+
+    private static void readStderr(Process process, StringBuilder target) {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String message = line;
+                logger.fine(() -> "codex stderr: " + message);
+                synchronized (target) {
+                    if (target.length() < STDERR_LIMIT) {
+                        if (!target.isEmpty()) target.append('\n');
+                        target.append(line, 0, Math.min(line.length(), STDERR_LIMIT - target.length()));
+                    }
+                }
+            }
+        } catch (IOException ignored) { }
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private static String shown(String value) { return value == null ? "unset (Codex default)" : value; }
+
+    private static String value(String value) { return value == null ? "" : value; }
+
+    /** How one codex process ended: whether it reported the turn complete, its exit status, its stderr and its errors. */
+    private record RunEnd(boolean completed, int exitCode, String stderr, List<String> errors) {
+        static RunEnd failed(String message) { return new RunEnd(false, -1, "", List.of(message)); }
+
+        boolean isStaleSession() {
+            String text = (stderr + "\n" + String.join("\n", errors)).toLowerCase(Locale.ROOT);
+            return text.contains("no conversation found") || text.contains("session not found")
+                    || text.contains("unable to find session") || text.contains("thread not found")
+                    || text.contains("no rollout found for thread id");
+        }
+
+        boolean isUnsupportedModel() {
+            String text = (stderr + "\n" + String.join("\n", errors)).toLowerCase(Locale.ROOT);
+            return text.contains("model") && (text.contains("not supported")
+                    || text.contains("unknown model") || text.contains("model is unavailable"));
+        }
+    }
+
+    /** The turn's images as files: a data URL is written to a temporary file, which codex takes with {@code -i}. */
+    private record PreparedImages(Path directory, List<Path> paths) implements AutoCloseable {
+        static PreparedImages from(List<String> dataUrls) throws IOException {
+            if (dataUrls == null || dataUrls.isEmpty()) return new PreparedImages(null, List.of());
+            Path dir = Files.createTempDirectory("chat-ui-codex-images-");
+            List<Path> paths = new ArrayList<>();
+            try {
+                for (int i = 0; i < dataUrls.size(); i++) {
+                    String dataUrl = dataUrls.get(i);
+                    int comma = dataUrl.indexOf(',');
+                    if (!dataUrl.startsWith("data:image/") || comma < 0
+                            || !dataUrl.substring(0, comma).contains(";base64")) {
+                        throw new IOException("Codex image must be a base64 image data URL");
+                    }
+                    String media = dataUrl.substring(5, dataUrl.indexOf(';'));
+                    String extension = switch (media) {
+                        case "image/jpeg" -> ".jpg";
+                        case "image/gif" -> ".gif";
+                        case "image/webp" -> ".webp";
+                        default -> ".png";
+                    };
+                    Path path = dir.resolve("image-" + i + extension);
+                    Files.write(path, Base64.getDecoder().decode(dataUrl.substring(comma + 1)));
+                    paths.add(path);
+                }
+                return new PreparedImages(dir, List.copyOf(paths));
+            } catch (Exception e) {
+                for (Path path : paths) Files.deleteIfExists(path);
+                Files.deleteIfExists(dir);
+                if (e instanceof IOException io) throw io;
+                throw new IOException("Invalid Codex image data", e);
+            }
+        }
+
+        @Override public void close() {
+            try {
+                for (Path path : paths) Files.deleteIfExists(path);
+                if (directory != null) Files.deleteIfExists(directory);
+            } catch (IOException e) {
+                logger.log(Level.FINE, "Failed to remove temporary Codex image", e);
+            }
         }
     }
 }

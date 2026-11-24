@@ -25,6 +25,10 @@ public record ProviderCapabilities(
     public static final ProviderCapabilities CLI = new ProviderCapabilities(
             true, true, true, false, false, true);
 
+    /** Non-interactive Codex exec supports resume and images, but no mid-turn approval dialog. */
+    public static final ProviderCapabilities CODEX_CLI = new ProviderCapabilities(
+            false, true, true, true, false, true);
+
     public static final ProviderCapabilities OPENAI_COMPAT = new ProviderCapabilities(
             false, false, false, true, true, false);
 }
