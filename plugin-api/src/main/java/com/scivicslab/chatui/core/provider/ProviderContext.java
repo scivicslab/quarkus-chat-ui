@@ -30,8 +30,20 @@ public record ProviderContext(
      * {@code cut_off} event instead of an {@code error}; when {@code false}, it reports an error and
      * keeps nothing, as before.
      */
-    boolean handlesCutOff
+    boolean handlesCutOff,
+    /**
+     * Whether this request must be answered in text: a provider that sends tool definitions sends them with
+     * {@code tool_choice: "none"}, so the model cannot call a tool. The agent loop sets it for the one request it makes
+     * after a call repeated itself ({@code ending: repeated-call}).
+     */
+    boolean noToolCalls
 ) {
+    /** Constructor for callers that do not ask for a text-only answer. */
+    public ProviderContext(String apiKey, List<String> imageDataUrls, boolean noThink, Runnable onActivity,
+                           Consumer<String> onRequestBody, boolean handlesCutOff) {
+        this(apiKey, imageDataUrls, noThink, onActivity, onRequestBody, handlesCutOff, false);
+    }
+
     /** Constructor for callers that want the request body but not cut-off handling. */
     public ProviderContext(String apiKey, List<String> imageDataUrls, boolean noThink, Runnable onActivity,
                            Consumer<String> onRequestBody) {

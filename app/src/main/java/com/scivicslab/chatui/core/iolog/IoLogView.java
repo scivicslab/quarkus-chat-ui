@@ -246,7 +246,15 @@ public class IoLogView {
     /** A conversation's provider kind, tool set and model, as one settings record holds them. */
     public record Settings(String provider, String tools, String model, Double temperature,
                            Long urgentWaitMinutes, Long childReplyWarnMinutes, Boolean noThink, String effort,
-                           java.util.Map<String, String> mcpServers) {
+                           java.util.Map<String, String> mcpServers, Integer stepLimit, Integer timeLimitMinutes) {
+        /** A record written before the step and time limits were kept: neither is set, and a restore leaves the defaults. */
+        public Settings(String provider, String tools, String model, Double temperature,
+                        Long urgentWaitMinutes, Long childReplyWarnMinutes, Boolean noThink, String effort,
+                        java.util.Map<String, String> mcpServers) {
+            this(provider, tools, model, temperature, urgentWaitMinutes, childReplyWarnMinutes, noThink, effort,
+                    mcpServers, null, null);
+        }
+
         /**
          * A record written before the external MCP servers were kept: none is set
          * ({@code ExternalMcpServersOfAConversation_261120_oo01}).
@@ -437,7 +445,9 @@ public class IoLogView {
                             ? o.optLong("childReplyWarnMinutes") : null,
                     o.has("noThink") && !o.isNull("noThink") ? o.optBoolean("noThink") : null,
                     o.has("effort") && !o.isNull("effort") ? o.optString("effort") : null,
-                    mcpServersOf(o.optJSONObject("mcpServers")));
+                    mcpServersOf(o.optJSONObject("mcpServers")),
+                    o.has("stepLimit") && !o.isNull("stepLimit") ? o.optInt("stepLimit") : null,
+                    o.has("timeLimitMinutes") && !o.isNull("timeLimitMinutes") ? o.optInt("timeLimitMinutes") : null);
         } catch (Exception e) {
             return null;
         }

@@ -39,6 +39,8 @@ public final class GetChatStatusTool {
         status.put("provider", chat.getProviderIdDirect());
         status.put("tools", chat.getToolSetDirect());
         status.put("noThink", chat.isNoThinkDirect());
+        status.put("stepLimit", chat.getStepLimitDirect());
+        status.put("timeLimitMinutes", chat.getTimeLimitMinutesDirect());
         String effort = chat.getEffortDirect();
         if (effort != null) status.put("effort", effort);
         return ChatInspection.formatStatus(status);

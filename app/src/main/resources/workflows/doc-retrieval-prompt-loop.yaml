@@ -42,6 +42,9 @@ steps:
       through to think-action. Four steps is the minimum for one search and one read, so a turn
       that searches, reads and only then answers needs many more than that; 6 was reached in
       ordinary use and cut turns off before they could answer.
+      For a provider that takes a budget (openai-compat) the number below is only the fallback: the limit is the
+      conversation's own stepLimit (100 unless it sets another), and at it stepLimitReached does not end the turn but
+      queues one last request that must be answered in text; the turn then ends with the ending step-limit.
     actions:
       - actor: this
         method: stepLimitReached
@@ -56,6 +59,46 @@ steps:
         execution: direct
       - actor: this
         method: finish
+        execution: direct
+
+  - states: ["think", "think"]
+    label: time-limit
+    note: |
+      A turn of a conversation whose provider takes a budget may run for the conversation's time limit (10 minutes
+      unless it sets another; 0 sets none). timeLimitReached succeeds once, before the model is called, when the turn
+      has run that long: it queues a note saying so as the next step's prompt, and that step is the turn's last model
+      request, sent with tool_choice "none", so the model must answer in text. The turn then ends with the ending
+      time-limit. It fails for a provider that runs its tool loop in its own CLI. No LLM call here.
+    actions:
+      - actor: this
+        method: timeLimitReached
+        execution: direct
+
+  - states: ["think", "think"]
+    label: step-warning
+    note: |
+      When 80% of the conversation's steps (rounded up) are used, stepBudgetWarning queues one note, once per turn:
+      "N of M steps used. Start wrapping up: answer in text soon." It is the next step's prompt. It fails for a
+      provider that runs its tool loop in its own CLI. No LLM call here.
+    actions:
+      - actor: this
+        method: stepBudgetWarning
+        execution: direct
+
+  - states: ["think", "think"]
+    label: repeated-call
+    note: |
+      The last three tool calls of this turn were the same call (same tool, same arguments) with the same
+      result: the model is going round in a circle, and another call would only repeat it. repeatedCallReached
+      queues a note saying so as the next step's prompt, and that step is the turn's last model request: it is
+      sent with tool_choice "none", so the model must answer in text, and a call it makes anyway is not run. The
+      turn then ends with the ending repeated-call. It succeeds once per turn, before the model is called, so the
+      call the model would have made next is never run; the number three is RepeatedCallDetector's. No LLM call
+      here. A provider that parks tool calls (Claude Code and Codex over MCP) runs its tool loop inside its CLI, which
+      takes no tool choice, so this transition fails for it and the turn goes on as before.
+    actions:
+      - actor: this
+        method: repeatedCallReached
         execution: direct
 
   - states: ["think", "act"]
