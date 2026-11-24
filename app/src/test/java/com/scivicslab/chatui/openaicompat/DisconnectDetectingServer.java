@@ -20,9 +20,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * lasts ({@link Mode#STREAM}). {@link #connectionClosed()} completes with the time, in {@code System.nanoTime()}, at
  * which the client's end of the held request was seen closed.</p>
  */
-final class DisconnectDetectingServer implements AutoCloseable {
+public final class DisconnectDetectingServer implements AutoCloseable {
 
-    enum Mode { HOLD, STREAM }
+    public enum Mode { HOLD, STREAM }
 
     private final ServerSocket socket;
     private final Mode mode;
@@ -31,23 +31,23 @@ final class DisconnectDetectingServer implements AutoCloseable {
     private final CompletableFuture<Long> connectionClosed = new CompletableFuture<>();
     private final CopyOnWriteArrayList<String> requestLines = new CopyOnWriteArrayList<>();
 
-    DisconnectDetectingServer(Mode mode) throws IOException {
+    public DisconnectDetectingServer(Mode mode) throws IOException {
         this.mode = mode;
         this.socket = new ServerSocket();
         socket.bind(new InetSocketAddress("127.0.0.1", 0));
         Thread.ofVirtual().start(this::acceptLoop);
     }
 
-    String url() { return "http://127.0.0.1:" + socket.getLocalPort(); }
+    public String url() { return "http://127.0.0.1:" + socket.getLocalPort(); }
 
-    CompletableFuture<Void> requestSeen() { return requestSeen; }
+    public CompletableFuture<Void> requestSeen() { return requestSeen; }
 
-    CompletableFuture<Void> firstEventSent() { return firstEventSent; }
+    public CompletableFuture<Void> firstEventSent() { return firstEventSent; }
 
-    CompletableFuture<Long> connectionClosed() { return connectionClosed; }
+    public CompletableFuture<Long> connectionClosed() { return connectionClosed; }
 
     /** The request lines (method and path) seen so far, in order. */
-    java.util.List<String> requestLines() { return requestLines; }
+    public java.util.List<String> requestLines() { return requestLines; }
 
     private void acceptLoop() {
         try {

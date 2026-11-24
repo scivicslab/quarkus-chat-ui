@@ -71,8 +71,22 @@ public final class RemoteNodes implements AutoCloseable {
     private final FileMessageIdStore messageIds;
     /** The workspace's peer list, or {@code null} when the peers were set by hand in {@code chat-ui.peers}. */
     private final WorkspaceNodeDiscovery workspace;
-    /** This object as the actor of the local system that runs it; every change of the peer list goes through it. */
+    /**
+     * This object as an actor that runs every change of the peer list and the announcer, one at a time; its messages
+     * block on the workspace, so nothing that must answer at once is asked of it.
+     */
     private com.scivicslab.pojoactor.core.ActorRef<RemoteNodes> self;
+    /** What {@link #of} asks: an actor that only holds this object, so a lookup never waits for a refresh. */
+    private com.scivicslab.pojoactor.core.ActorRef<Holder> holder;
+
+    /** The plain state of {@link #holder}. */
+    private static final class Holder {
+        final RemoteNodes remote;
+
+        Holder(RemoteNodes remote) {
+            this.remote = remote;
+        }
+    }
     private com.scivicslab.pojoactor.core.scheduler.Scheduler refresher;
     private com.scivicslab.pojoactor.core.scheduler.Scheduler announcer;
 
@@ -132,7 +146,8 @@ public final class RemoteNodes implements AutoCloseable {
                 .build();
         RemoteNodes remote = new RemoteNodes(local, node, ids, workspace);
         if (local.hasActor(ACTOR_NAME)) local.removeActor(ACTOR_NAME);
-        remote.self = local.actorOf(ACTOR_NAME, remote);
+        remote.self = new com.scivicslab.pojoactor.core.ActorRef<>(ACTOR_NAME + ".changes", remote);
+        remote.holder = local.actorOf(ACTOR_NAME, new Holder(remote));
         // The discovery gives the system its chat-ui peers; the tool nodes of the same read are registered here.
         if (workspace != null) {
             for (ToolNode t : workspace.toolNodes()) node.registerRemoteNode(t.name(), t.host(), t.actorPort());
@@ -195,8 +210,8 @@ public final class RemoteNodes implements AutoCloseable {
     /** @return the remote path of {@code local}, or {@code null} when it has none */
     public static RemoteNodes of(IIActorSystem local) {
         if (local == null || !local.hasActor(ACTOR_NAME)) return null;
-        com.scivicslab.pojoactor.core.ActorRef<RemoteNodes> remote = local.getActor(ACTOR_NAME);
-        return remote == null ? null : remote.ask(r -> r).join();
+        com.scivicslab.pojoactor.core.ActorRef<Holder> holder = local.getActor(ACTOR_NAME);
+        return holder == null ? null : holder.ask(h -> h.remote).join();
     }
 
     /**
@@ -392,6 +407,7 @@ public final class RemoteNodes implements AutoCloseable {
         if (refresher != null) refresher.close();
         if (announcer != null) announcer.close();
         if (self != null) self.close();
+        if (holder != null) holder.close();
         node.close();
         messageIds.close();
     }

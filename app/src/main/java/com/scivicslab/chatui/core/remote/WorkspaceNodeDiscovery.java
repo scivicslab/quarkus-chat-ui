@@ -55,6 +55,8 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
     }
 
     private final StateOwner<Lists> lists = new StateOwner<>("workspace-node-lists", new Lists());
+    /** Makes refreshes take turns; its message is the blocking read, so the owner of the lists stays free to answer. */
+    private final StateOwner<Object> refreshing = new StateOwner<>("workspace-node-refresh", new Object());
 
     /**
      * @param me           this instance's node
@@ -73,11 +75,15 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
      * @return whether the list was read
      */
     public boolean refresh() {
-        return lists.ask(l -> refreshInto(l));
+        return refreshing.ask(o -> readLists());
     }
 
-    /** {@link #refresh()}, run as a message of the owner. */
-    private boolean refreshInto(Lists l) {
+    /**
+     * {@link #refresh()}, run as a message of the owner that makes refreshes take turns. The two blocking reads (3 s each at
+     * most) are done here, outside the owner of the lists, which only swaps the new lists in: a read of the lists never
+     * waits for a refresh.
+     */
+    private boolean readLists() {
         try {
             HttpResponse<String> r = http.send(HttpRequest.newBuilder(peersUri).timeout(Duration.ofSeconds(3)).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
@@ -85,8 +91,12 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
                 LOG.warning("The workspace answered " + r.statusCode() + " at " + peersUri + "; the last peer list stays");
                 return false;
             }
-            l.peers = parse(r.body(), me.getNodeId());
-            readToolNodes(l);
+            List<NodeInfo> newPeers = parse(r.body(), me.getNodeId());
+            List<RemoteNodes.ToolNode> newTools = readToolNodes();
+            lists.run(l -> {
+                l.peers = newPeers;
+                if (newTools != null) l.toolNodes = newTools;
+            });
             return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -98,23 +108,27 @@ public final class WorkspaceNodeDiscovery implements NodeDiscovery {
         }
     }
 
-    /** Reads {@code /api/nodes}; keeps the last tool nodes when it cannot, and has none when the workspace has no such list. */
-    private void readToolNodes(Lists l) throws InterruptedException {
+    /**
+     * Reads {@code /api/nodes}.
+     *
+     * @return the tool nodes, none when the workspace has no such list, or {@code null} when it cannot be read (the last stay)
+     */
+    private List<RemoteNodes.ToolNode> readToolNodes() throws InterruptedException {
         try {
             HttpResponse<String> r = http.send(HttpRequest.newBuilder(nodesUri).timeout(Duration.ofSeconds(3)).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
-            if (r.statusCode() == 404) {
-                l.toolNodes = List.of();
-            } else if (r.statusCode() != 200) {
+            if (r.statusCode() == 404) return List.of();
+            if (r.statusCode() != 200) {
                 LOG.warning("The workspace answered " + r.statusCode() + " at " + nodesUri + "; the last tool nodes stay");
-            } else {
-                l.toolNodes = parseToolNodes(r.body(), me.getNodeId());
+                return null;
             }
+            return parseToolNodes(r.body(), me.getNodeId());
         } catch (InterruptedException e) {
             throw e;
         } catch (Exception e) {
             LOG.warning("The workspace's node list could not be read at " + nodesUri + " (" + e.getClass().getSimpleName()
                     + ": " + e.getMessage() + "); the last tool nodes stay");
+            return null;
         }
     }
 
