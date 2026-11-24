@@ -3,10 +3,8 @@ package com.scivicslab.chatui.core.remote;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 import com.scivicslab.pojoactor.action.ActionResult;
@@ -62,7 +60,8 @@ public final class RemoteNodes implements AutoCloseable {
     /** The start of the answer to a send to a node that is not registered. */
     public static final String NODE_NOT_KNOWN = "node not known";
 
-    private static final Map<IIActorSystem, RemoteNodes> BY_SYSTEM = new ConcurrentHashMap<>();
+    /** The name this remote path has as an actor of the local system: its one owner, and how {@link #of} finds it. */
+    private static final String ACTOR_NAME = "chat-ui-remote-nodes";
 
     /** How often the peer list is read again from the workspace. */
     public static final long WORKSPACE_REFRESH_SECONDS = 60;
@@ -72,6 +71,8 @@ public final class RemoteNodes implements AutoCloseable {
     private final FileMessageIdStore messageIds;
     /** The workspace's peer list, or {@code null} when the peers were set by hand in {@code chat-ui.peers}. */
     private final WorkspaceNodeDiscovery workspace;
+    /** This object as the actor of the local system that runs it; every change of the peer list goes through it. */
+    private com.scivicslab.pojoactor.core.ActorRef<RemoteNodes> self;
     private com.scivicslab.pojoactor.core.scheduler.Scheduler refresher;
     private com.scivicslab.pojoactor.core.scheduler.Scheduler announcer;
 
@@ -130,6 +131,8 @@ public final class RemoteNodes implements AutoCloseable {
                 .callTimeout(STATE_TIMEOUT)
                 .build();
         RemoteNodes remote = new RemoteNodes(local, node, ids, workspace);
+        if (local.hasActor(ACTOR_NAME)) local.removeActor(ACTOR_NAME);
+        remote.self = local.actorOf(ACTOR_NAME, remote);
         // The discovery gives the system its chat-ui peers; the tool nodes of the same read are registered here.
         if (workspace != null) {
             for (ToolNode t : workspace.toolNodes()) node.registerRemoteNode(t.name(), t.host(), t.actorPort());
@@ -137,7 +140,6 @@ public final class RemoteNodes implements AutoCloseable {
         node.addIIActor(new RemoteGatewayIIAR(GATEWAY, new RemoteGateway(local, remote), node));
         node.startHttpServer("127.0.0.1", actorPort);
         if (workspace != null) remote.startRefreshing();
-        BY_SYSTEM.put(local, remote);
         LOG.info("Remote path on 127.0.0.1:" + actorPort + " as node " + myName + "; peers "
                 + (workspace == null ? "set by hand: " + byHand : "from the workspace " + workspaceUrl + ": " + workspace.peers()));
         return remote;
@@ -145,9 +147,8 @@ public final class RemoteNodes implements AutoCloseable {
 
     /** Reads the workspace's list every {@link #WORKSPACE_REFRESH_SECONDS} seconds, as a scheduled actor message. */
     private void startRefreshing() {
-        com.scivicslab.pojoactor.core.ActorRef<RemoteNodes> self = node.actorOf("chat-ui-peer-list", this);
         refresher = new com.scivicslab.pojoactor.core.scheduler.Scheduler(1);
-        refresher.scheduleWithFixedDelay("chat-ui-peer-list", self, RemoteNodes::refreshPeers,
+        refresher.scheduleWithFixedDelay("chat-ui-peer-list", self, RemoteNodes::refresh,
                 WORKSPACE_REFRESH_SECONDS, WORKSPACE_REFRESH_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
     }
 
@@ -157,7 +158,16 @@ public final class RemoteNodes implements AutoCloseable {
      * registered again by the next refresh. Nothing when the peers were set by hand, or when the workspace cannot be
      * reached (the last list stays).
      */
-    public synchronized void refreshPeers() {
+    public void refreshPeers() {
+        if (workspace == null || self == null) return;
+        self.ask(r -> {
+            r.refresh();
+            return null;
+        }).join();
+    }
+
+    /** {@link #refreshPeers()}, run as a message of this object's own actor. */
+    void refresh() {
         if (workspace == null || !workspace.refresh()) return;
         List<NodeInfo> peers = workspace.peers();
         List<ToolNode> tools = workspace.toolNodes();
@@ -184,7 +194,9 @@ public final class RemoteNodes implements AutoCloseable {
 
     /** @return the remote path of {@code local}, or {@code null} when it has none */
     public static RemoteNodes of(IIActorSystem local) {
-        return local == null ? null : BY_SYSTEM.get(local);
+        if (local == null || !local.hasActor(ACTOR_NAME)) return null;
+        com.scivicslab.pojoactor.core.ActorRef<RemoteNodes> remote = local.getActor(ACTOR_NAME);
+        return remote == null ? null : remote.ask(r -> r).join();
     }
 
     /**
@@ -253,7 +265,13 @@ public final class RemoteNodes implements AutoCloseable {
      * @param httpPort this instance's HTTP port
      * @return whether announcing started
      */
-    public synchronized boolean announceTo(String aiWorkspaceNode, int httpPort) {
+    public boolean announceTo(String aiWorkspaceNode, int httpPort) {
+        if (self == null) return false;
+        return self.ask(r -> r.startAnnouncing(aiWorkspaceNode, httpPort)).join();
+    }
+
+    /** {@link #announceTo}, run as a message of this object's own actor. */
+    boolean startAnnouncing(String aiWorkspaceNode, int httpPort) {
         Optional<String> ws = WorkspaceAnnouncer.parse(aiWorkspaceNode);
         if (ws.isEmpty() || workspace == null || announcer != null) return false;
         WorkspaceAnnouncer a = new WorkspaceAnnouncer(this, ws.get(), httpPort, System::currentTimeMillis);
@@ -373,7 +391,7 @@ public final class RemoteNodes implements AutoCloseable {
     public void close() {
         if (refresher != null) refresher.close();
         if (announcer != null) announcer.close();
-        BY_SYSTEM.remove(local, this);
+        if (self != null) self.close();
         node.close();
         messageIds.close();
     }
