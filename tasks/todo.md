@@ -22,7 +22,7 @@ Naming rule: in docs, comments and commit messages, always write `agent-connecto
 
 1. `CliProcess` stays in `plugin-harness`. It does not move to the `agent-connector-kernel` module.
 2. The tools that operate ConversationSquad actors (`create_chat`, `set_agent_loop` and the others) stay on `/mcp`, reached through the app's `ToolExtension`.
-3. Harnesses reach the core's tools over MCP on the nigsc-connector side. Inside chat-ui, the claude and codex conversations stay on `<invoke>` (the recommendation in the open question below, now decided).
+3. ~~Harnesses reach the core's tools over MCP on the nigsc-connector side. Inside chat-ui, the claude and codex conversations stay on `<invoke>` (the recommendation in the open question below, now decided).~~ **Withdrawn by the person on 2026-11-24.** Inside quarkus-chat-ui the claude and codex conversations also reach the tools over MCP. Reason: the `<invoke>` path needs the tool descriptions and calling rules as prompt text, about 22,000 characters, prefixed to every turn and kept in the CLI's history (3,068 copies in one liaison session). See "Shrinking the composed prompt" at the end of this file.
 4. The module is named `agent-connector-kernel`, both as the directory and as the artifactId (decided 2026-11-21).
 5. **The harness reaches the MCP server over HTTP on localhost** (the person's decision, 2026-11-21, relayed by chat-01 and chat-48). There is no stdio option. This answers `AgentConnectorKernelConcept_261121_oo01` line 101. It is built in this rebuild, in stage 6, and not left to the nigsc-connector work:
    - every request carries the scope (conversation) name and a key;
@@ -1691,3 +1691,28 @@ ssh-connector never connects to the user's own computer. If its ssh_config point
   - W206: the namespace `chat77-sshd-e2e` was deleted by the run's `trap` and `kubectl get namespace` answers NotFound; the Kaniko and helper pods and the Jobs are deleted. The sshd image's manifest was deleted from the registry (HTTP 202; the blobs go at the registry's next garbage collection).
   - 5.14: the OpenCode image is removed; `podman ps -a` none; `podman images -a` only `docker.io/library/ubuntu:24.04`; `~/.ssh` 36 entries, no marker; no key file left.
 
+
+## Shrinking the composed prompt (2026-11-24, the person's decision: withdraw Decisions 3, do every measure)
+
+Measured in the liaison's own Claude Code transcript: the text prefixed to every turn is 24,804 chars (preface, rules and tool descriptions 21,982; skill catalog 2,299; position 523). It grew from 10,295 (09-26). `firstStepPrompt()` prefixes it to every turn, and Claude Code and Codex keep every copy in the resumed session (3,068 copies in one session).
+
+### Design: the CLI's MCP call becomes a step of ChatSession's own agent loop
+
+The objection in `HarnessToolsThroughOneMcpServer_261120_oo01` was two agent loops: the four guarantees (ask_person ends the turn, the step limit, the pause for an urgent request, the I/O log in step order) would happen inside the CLI's loop. They stay in ChatSession's loop if the CLI's call is *parked*:
+
+1. The CLI calls a chat-ui tool over MCP (`/mcp`, the conversation named in `X-Chat-Ui-Conversation`). For a conversation whose provider parks calls, the MCP handler does not run the tool: it hands the call to that provider and waits for the result. The CLI waits for its MCP response.
+2. The provider's `sendPrompt`, reading the CLI's stream, sees the parked call(s), emits `tool_call` events and returns. The CLI process stays alive, blocked on the MCP response.
+3. ChatSession runs the tools in its `run-tool` transition exactly as for openai-compat (`callsToolsByDefinition() == true`), including the tools that drive the conversation (`ask_chat`, `ask_person`, ...), on its own thread, and records them in step order. It hands the results back with `addToolResults`, which completes the parked MCP responses.
+4. The next step's `sendPrompt` (empty prompt) goes on reading the same CLI stream.
+5. When the turn ends with calls still parked or the CLI still running (ask_person, step limit, pause for an urgent request), the provider answers the parked calls with "this turn has ended" and interrupts the CLI (Claude Code: stream-json `control_request` interrupt; Codex: the per-turn process is stopped, the thread resumes next turn).
+
+No deadlock: ChatSession is not blocked while the CLI waits, because `sendPrompt` has returned.
+
+### Steps
+- [ ] 1. `/mcp`: a conversation whose provider parks calls gets its calls handed to the provider; `tools/list` returns that conversation's whole tool set, the conversation-driving tools included (they run in ChatSession, not on the HTTP thread). Unit tests.
+- [ ] 2. plugin-harness, Claude Code: `--mcp-config` with chat-ui's `/mcp` and the conversation header; MCP tools allowed; `callsToolsByDefinition`; parking in `sendPrompt`; `addToolResults`; turn end interrupts. The system message (`systemMessageText()`) goes in `--append-system-prompt`; the process restarts (with `--resume`) when it changes. Tests with a fake CLI.
+- [ ] 3. plugin-harness, Codex: `-c mcp_servers.chat-ui.*` (url, `http_headers`, tool approval, `tool_timeout_sec`), `-c developer_instructions=` for the system message, same parking. Tests with a fake CLI.
+- [ ] 4. ChatSession: a CLI provider's calls are all run by ChatSession (`executeTool`), not sent back through `callTool`; the turn-end hook. Update the pin tests of the `<invoke>` path for claude/codex.
+- [ ] 5. Tool descriptions: the node/chatId rule said once instead of in five tools; a worker's tool set without the management tools.
+- [ ] 6. Build and full tests on W206; E2E with real `claude` and `codex` on a scratch instance (not the live ports), measuring the characters sent per turn before and after.
+- [ ] 7. Design docs in `doc_SCIVICS003` (270, 280) rewritten to this design.
