@@ -17,7 +17,8 @@ import java.util.List;
  * ({@code GetChatLogReadsPersistedHistory_261119_oo01}).
  *
  * <p>Each turn's question and answer ({@code turnN/conversation}) become a {@code user} and an
- * {@code assistant} entry; each step's record ({@code turnN/stepM/...}) becomes a {@code step}
+ * {@code assistant} entry; a turn that has only its question ({@code turnN/question}, written when it started)
+ * becomes a {@code user} entry and nothing else; each step's record ({@code turnN/stepM/...}) becomes a {@code step}
  * entry. Records that are not a turn's ({@code settings}, {@code name}) and a turn's bookkeeping
  * ({@code ids}, {@code answer-meta}) are left out. Every session the conversation's name was
  * recorded under is read, ended ones included, newest record first and no more than asked for.</p>
@@ -51,7 +52,7 @@ public final class IoLogHistory {
                 SELECT l.id, l.timestamp, l.label, l.message
                 FROM logs l JOIN sessions s ON s.id = l.session_id
                 WHERE s.workflow_name = ?
-                  AND (l.label LIKE 'turn%/conversation' OR l.label LIKE 'turn%/step%')
+                  AND (l.label LIKE 'turn%/conversation' OR l.label LIKE 'turn%/question' OR l.label LIKE 'turn%/step%')
                 """ + (before == Long.MAX_VALUE ? "" : "  AND l.timestamp < ?\n") + """
                 ORDER BY l.timestamp DESC, l.id DESC
                 LIMIT ?
@@ -63,6 +64,7 @@ public final class IoLogHistory {
                 return PersistedLog.none(SOURCE, "no I/O log session for this conversation");
             }
             List<PersistedLog.Entry> newestFirst = new ArrayList<>();
+            List<Object[]> rows = new ArrayList<>();
             try (PreparedStatement ps = c.prepareStatement(sql)) {
                 int i = 1;
                 ps.setString(i++, workflowName);
@@ -70,10 +72,22 @@ public final class IoLogHistory {
                 ps.setInt(i, limit);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        long time = rs.getTimestamp("timestamp").getTime();
-                        addNewestFirst(newestFirst, time, rs.getString("label"), rs.getString("message"));
+                        rows.add(new Object[] {rs.getTimestamp("timestamp").getTime(), rs.getString("label"),
+                                rs.getString("message")});
                     }
                 }
+            }
+            // A turn's question entry stands for it only until its conversation entry exists: when both were read,
+            // the conversation entry is the turn and the question entry is left out.
+            java.util.Set<String> finished = new java.util.HashSet<>();
+            for (Object[] row : rows) {
+                String label = (String) row[1];
+                if (label.endsWith("/conversation")) finished.add(label.substring(0, label.length() - "/conversation".length()));
+            }
+            for (Object[] row : rows) {
+                String label = (String) row[1];
+                if (label.endsWith("/question") && finished.contains(label.substring(0, label.length() - "/question".length()))) continue;
+                addNewestFirst(newestFirst, (Long) row[0], label, (String) row[2]);
             }
             List<PersistedLog.Entry> kept = newestFirst.subList(0, Math.min(limit, newestFirst.size()));
             List<PersistedLog.Entry> oldestFirst = new ArrayList<>(kept);
@@ -101,6 +115,9 @@ public final class IoLogHistory {
             out.add(new PersistedLog.Entry(time, "assistant",
                     turn.error() != null ? "Error: " + turn.error() : turn.answer()));
             out.add(new PersistedLog.Entry(time, "user", turn.question()));
+        } else if (label.endsWith("/question")) {
+            String question = IoLogView.parseQuestionEntry(message);
+            if (question != null) out.add(new PersistedLog.Entry(time, "user", question));
         } else {
             out.add(new PersistedLog.Entry(time, "step", label + " " + (message == null ? "" : message)));
         }
