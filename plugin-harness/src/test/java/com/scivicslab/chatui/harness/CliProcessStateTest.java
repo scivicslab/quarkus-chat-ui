@@ -129,4 +129,20 @@ class CliProcessStateTest {
             assertTrue(!process.isAlive(), "round " + round + ": the cancel was lost, the process still runs");
         }
     }
+
+    /** A setter on one thread and the turn's own update of the session id on another do not overwrite each other. */
+    @Test
+    void twoThreadsUpdatingTheOptionsLoseNeitherUpdate() throws Exception {
+        for (int round = 0; round < 200; round++) {
+            CliProcess process = new CliProcess("claude", "K", CliConfig.defaults(null));
+            CompletableFuture<Void> a = CompletableFuture.runAsync(() -> process.updateConfig(c -> c.withModel("m")),
+                    command -> Thread.ofVirtual().start(command));
+            CompletableFuture<Void> b = CompletableFuture.runAsync(() -> process.updateConfig(c -> c.withSessionId("s")),
+                    command -> Thread.ofVirtual().start(command));
+            a.get(5, TimeUnit.SECONDS);
+            b.get(5, TimeUnit.SECONDS);
+            assertEquals("m", process.getConfig().model(), "round " + round);
+            assertEquals("s", process.getConfig().sessionId(), "round " + round);
+        }
+    }
 }

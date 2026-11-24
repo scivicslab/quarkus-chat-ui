@@ -40,7 +40,6 @@ public class CliProcess {
     private final String apiKeyEnvVar;
     private final StreamEventParser parser = new StreamEventParser();
 
-    private CliConfig config;
     /**
      * What several threads share of the process: the events of the prompt's turn and the autonomous ones, the calls
      * the CLI is parked on, and the flags that route them. It is a plain object for one owner, an actor: the reader of the
@@ -63,6 +62,8 @@ public class CliProcess {
         boolean turnActive;
         /** True from the first event of a turn the CLI started by itself until that turn's result. */
         boolean autonomousTurnOpen;
+        /** The process's options (model, effort, session id ...): set by the conversation's setters and by the turn. */
+        CliConfig config;
         /** The job that reads the process's stdout; it ends when the output closes. */
         BlockingJob<Void> readerJob;
         /** The CLI process, or {@code null} when none runs, and its standard input. */
@@ -144,7 +145,7 @@ public class CliProcess {
     public CliProcess(String binary, String apiKeyEnvVar, CliConfig config) {
         this.binary = binary;
         this.apiKeyEnvVar = apiKeyEnvVar;
-        this.config = config;
+        state.run(s -> s.config = config);
     }
 
     /**
@@ -152,14 +153,20 @@ public class CliProcess {
      *
      * @return the active {@link CliConfig}
      */
-    public CliConfig getConfig() { return config; }
+    public CliConfig getConfig() { return state.ask(s -> s.config); }
 
     /**
      * Replaces the current configuration. Takes effect on the next process start.
      *
      * @param config the new configuration
      */
-    public void setConfig(CliConfig config) { this.config = config; }
+    public void setConfig(CliConfig config) { state.run(s -> s.config = config); }
+
+    /**
+     * Changes the options as one step of the owner: a setter on any thread and the turn's own update of the session id
+     * cannot overwrite each other.
+     */
+    public void updateConfig(java.util.function.UnaryOperator<CliConfig> change) { state.run(s -> s.config = change.apply(s.config)); }
 
     /**
      * Sets the API key to be passed to the subprocess via its environment variable.
@@ -683,6 +690,7 @@ public class CliProcess {
         // A call to chat-ui's tools waits while the conversation runs it as a step of its own; Claude Code must not
         // give up on it first (https://code.claude.com/docs/en/mcp, MCP_TOOL_TIMEOUT).
         if (mcpConfigJson != null) added.put("MCP_TOOL_TIMEOUT", String.valueOf(MCP_TOOL_TIMEOUT_MS));
+        CliConfig config = getConfig();
         return new HarnessLaunch(cmd, List.of("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"), added,
                 config.workingDir() == null ? null : java.nio.file.Path.of(config.workingDir()));
     }
@@ -721,11 +729,12 @@ public class CliProcess {
     public void restartBeforeNextPrompt() {
         if (currentProcess() == null) return;
         String lastSessionId = getLastSessionId();
-        if (lastSessionId != null) config = config.withSessionId(lastSessionId);
+        if (lastSessionId != null) updateConfig(c -> c.withSessionId(lastSessionId));
         cancel();
     }
 
     List<String> buildCommand() {
+        CliConfig config = getConfig();   // one set of options for the whole command
         List<String> cmd = new ArrayList<>();
         // The CLI writes to a pipe here, not a TTY, so libc switches its stdout from line
         // buffering to 4KB block buffering. Events then sit in the buffer instead of reaching

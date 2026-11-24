@@ -201,7 +201,7 @@ public class ClaudeCodeProvider implements LlmProvider {
         if (!cliProcess.isAlive()) {
             String lastSessionId = cliProcess.getLastSessionId();
             if (lastSessionId != null) {
-                cliProcess.setConfig(cliProcess.getConfig().withSessionId(lastSessionId));
+                cliProcess.updateConfig(c -> c.withSessionId(lastSessionId));
             }
         }
         List<ChatEvent> produced = new ArrayList<>();
@@ -371,10 +371,10 @@ public class ClaudeCodeProvider implements LlmProvider {
     @Override public List<ModelEntry> getAvailableModels() { return MODELS; }
     @Override public ProviderCapabilities capabilities() { return ProviderCapabilities.CLI; }
     @Override public String getCurrentModel() { return cliProcess.getConfig().model(); }
-    @Override public void setModel(String model) { cliProcess.setConfig(cliProcess.getConfig().withModel(model)); }
+    @Override public void setModel(String model) { cliProcess.updateConfig(c -> c.withModel(model)); }
 
     /** Applied to the command line the next time the process starts, as the model is. */
-    @Override public void setEffort(String effort) { cliProcess.setConfig(cliProcess.getConfig().withEffort(effort)); }
+    @Override public void setEffort(String effort) { cliProcess.updateConfig(c -> c.withEffort(effort)); }
 
     @Override public String getEffort() { return cliProcess.getConfig().effort(); }
     @Override public String getSessionId() { return cliProcess.getLastSessionId(); }
@@ -385,12 +385,12 @@ public class ClaudeCodeProvider implements LlmProvider {
     public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
         if (ctx.apiKey() != null) cliProcess.setApiKey(ctx.apiKey());
         if (model != null && !model.equals(cliProcess.getConfig().model())) {
-            cliProcess.setConfig(cliProcess.getConfig().withModel(model));
+            cliProcess.updateConfig(c -> c.withModel(model));
         }
         if (!cliProcess.isAlive()) {
             String lastSessionId = cliProcess.getLastSessionId();
             if (lastSessionId != null) {
-                cliProcess.setConfig(cliProcess.getConfig().withSessionId(lastSessionId));
+                cliProcess.updateConfig(c -> c.withSessionId(lastSessionId));
             }
         }
 
@@ -421,7 +421,7 @@ public class ClaudeCodeProvider implements LlmProvider {
             logger.warning("Stale claude session detected; clearing it and retrying once");
             cliProcess.cancel();
             deleteSessionFile();
-            cliProcess.setConfig(cliProcess.getConfig().withSessionId(null));
+            cliProcess.updateConfig(c -> c.withSessionId(null));
             emitter.accept(ChatEvent.thinking("Session expired. Starting new session..."));
             try {
                 final boolean[] retrySawAssistant = {false};

@@ -107,7 +107,7 @@ public final class Chats {
     public String setModel(String chat, String model) {
         require(chat, "chat");
         if (blank(model)) return "no model named; " + chat.strip() + " stays as it was";
-        provider(chat).tell(p -> p.setModel(model.strip())).join();
+        provider(chat).tellNow(p -> p.setModel(model.strip())).join();
         // The conversation records it, as it records every change of its settings (EachActorRecordsItsOwnState_261118_oo01).
         recordSettings(chat, model.strip());
         return chat.strip() + " runs on " + model.strip();
@@ -145,7 +145,7 @@ public final class Chats {
     public String setEffort(String chat, String effort) {
         require(chat, "chat");
         if (blank(effort)) return "no effort named; " + chat.strip() + " stays as it was";
-        provider(chat).tell(p -> p.setEffort(effort.strip())).join();
+        provider(chat).tellNow(p -> p.setEffort(effort.strip())).join();
         recordSettings(chat, null);
         return chat.strip() + " works at " + effort.strip();
     }

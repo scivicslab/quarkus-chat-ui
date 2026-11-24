@@ -41,7 +41,6 @@ public class OpenAiCompatProvider implements LlmProvider {
     // volatile because GET .../status reads it from the request thread while this provider's own
     // thread writes it (ModelBelongsToTheConversation_260906_oo01) — the same reason
     // ChatSession.busy is volatile (BusyStateReadableSnapshot_260828_oo01).
-    private String currentModel;
     /**
      * What other threads read of this provider's settings (the REST views read the model and the temperature while a turn
      * runs): a copy the provider tells its one owner, an actor, at each change.
@@ -55,6 +54,11 @@ public class OpenAiCompatProvider implements LlmProvider {
 
     private final StateOwner<Shown> shown = new StateOwner<>("openai-compat-settings", new Shown());
 
+    /** The model the next request uses: the owner's, so a setter on any thread is seen by the request that follows. */
+    private String currentModel() {
+        return shown.ask(s -> s.model);
+    }
+
     /** Tells the owner a copy of the history; the turn calls this after each change of it. */
     private void publishHistory() {
         List<ChatMessage> copy = List.copyOf(history);
@@ -62,7 +66,6 @@ public class OpenAiCompatProvider implements LlmProvider {
     }
 
     private void putCurrentModel(String value) {
-        currentModel = value;
         shown.run(s -> s.model = value);
     }
     /** The client of chat-ui's MCP server for this conversation, or {@code null} when it has none (a test). */
@@ -297,9 +300,9 @@ public class OpenAiCompatProvider implements LlmProvider {
             }
         }
         // Auto-select the first available model if currentModel is still a placeholder
-        if (!models.isEmpty() && (currentModel == null || currentModel.isBlank() || currentModel.equals("default"))) {
+        if (!models.isEmpty() && (currentModel() == null || currentModel().isBlank() || currentModel().equals("default"))) {
             putCurrentModel(models.get(0).name());
-            logger.info("Auto-selected model: " + currentModel);
+            logger.info("Auto-selected model: " + currentModel());
         }
         return models;
     }
@@ -315,7 +318,6 @@ public class OpenAiCompatProvider implements LlmProvider {
      * @param ctx     provider context containing images and other request metadata
      */
     /** What this conversation asks the server to sample at; {@code null} asks for nothing. */
-    private Double temperature;
 
     /**
      * {@inheritDoc}
@@ -330,7 +332,6 @@ public class OpenAiCompatProvider implements LlmProvider {
 
     @Override
     public void setTemperature(Double temperature) {
-        this.temperature = temperature;
         shown.run(s -> s.temperature = temperature);
         for (OpenAiCompatClient c : clients) {
             c.setTemperature(temperature);
@@ -347,10 +348,10 @@ public class OpenAiCompatProvider implements LlmProvider {
         if (model != null && !model.isBlank()) putCurrentModel(model);
 
         // If model is still a placeholder, try to resolve it from the server
-        if (currentModel == null || currentModel.isBlank() || currentModel.equals("default")) {
+        if (currentModel() == null || currentModel().isBlank() || currentModel().equals("default")) {
             getAvailableModels();
         }
-        if (currentModel == null || currentModel.isBlank() || currentModel.equals("default")) {
+        if (currentModel() == null || currentModel().isBlank() || currentModel().equals("default")) {
             emitter.accept(ChatEvent.error("No model available. Please check that your LLM server is running and reachable."));
             return;
         }
@@ -362,9 +363,10 @@ public class OpenAiCompatProvider implements LlmProvider {
         if (addsUserMessage) { history.addLast(new ChatMessage.User(prompt == null ? "" : prompt, imageDataUrls)); publishHistory(); }
         fitHistoryToBudget();
 
-        OpenAiCompatClient client = selectClient(currentModel);
+        String requestModel = currentModel();   // one model for the whole request, whatever a setter does meanwhile
+        OpenAiCompatClient client = selectClient(requestModel);
         if (client == null) {
-            emitter.accept(ChatEvent.error("No server available for model: " + currentModel));
+            emitter.accept(ChatEvent.error("No server available for model: " + requestModel));
             if (addsUserMessage) { history.pollLast(); publishHistory(); }
             return;
         }
@@ -378,14 +380,14 @@ public class OpenAiCompatProvider implements LlmProvider {
             if (ctx.cancel().isCancelled()) return;
             List<ChatMessage> snapshot = List.copyOf(history);
             final int currentRetry = retries;
-            int estimated = estimateRequestTokens(currentModel, snapshot, tools);
-            int window = serverWindow > 0 ? serverWindow : client.getMaxModelLen(currentModel);
+            int estimated = estimateRequestTokens(requestModel, snapshot, tools);
+            int window = serverWindow > 0 ? serverWindow : client.getMaxModelLen(requestModel);
             int maxTokens = replyBudgetTokens(window, (int) Math.ceil(estimated * correction), maxReplyTokens);
             try {
                 StringBuilder assistantBuf = new StringBuilder();
                 List<ChatMessage.ToolCallRequest.ToolCall> calls = new ArrayList<>();
                 TokenUsage[] usage = {null};
-                client.sendPrompt(currentModel, snapshot, ctx.noThink(), maxTokens,
+                client.sendPrompt(requestModel, snapshot, ctx.noThink(), maxTokens,
                     tools, new OpenAiCompatClient.StreamCallback() {
                         @Override public void onDelta(String content) {
                             assistantBuf.append(content);
@@ -447,7 +449,7 @@ public class OpenAiCompatProvider implements LlmProvider {
                                         + " trim(s). Session preserved with "
                                         + history.size() + " messages.");
                             }
-                            emitter.accept(ChatEvent.result(null, 0.0, durationMs, currentModel, false, usage[0]));
+                            emitter.accept(ChatEvent.result(null, 0.0, durationMs, requestModel, false, usage[0]));
                         }
                         @Override public void onError(String message) {
                             emitter.accept(ChatEvent.error(message));
@@ -716,9 +718,9 @@ public class OpenAiCompatProvider implements LlmProvider {
         // Guard the model name: selectClient asks each client whether it serves this model, and
         // servesModel does contains() on an immutable list, which rejects null before any model
         // list has been fetched. collapseTurn can reach here before a model has been resolved.
-        if (currentModel != null && !currentModel.isBlank()) {
-            OpenAiCompatClient client = selectClient(currentModel);
-            if (client != null) contextTokens = client.getMaxModelLen(currentModel);
+        if (currentModel() != null && !currentModel().isBlank()) {
+            OpenAiCompatClient client = selectClient(currentModel());
+            if (client != null) contextTokens = client.getMaxModelLen(currentModel());
         }
         if (contextTokens <= 0) contextTokens = DEFAULT_CONTEXT_TOKENS;
         return (int) (contextTokens * HISTORY_SHARE);
@@ -879,7 +881,7 @@ public class OpenAiCompatProvider implements LlmProvider {
         }
         List<ChatMessage> oneShot = List.of(new ChatMessage.User(prompt));
         OpenAiCompatClient.NonStreamingResponse response = client.sendNonStreaming(
-                currentModel, oneShot, true, maxTokensFor(client, currentModel, oneShot), List.of());
+                currentModel(), oneShot, true, maxTokensFor(client, currentModel(), oneShot), List.of());
         String reason = response.finishReason();
         if (reason != null && reason.startsWith("error")) {
             return null;
@@ -907,7 +909,7 @@ public class OpenAiCompatProvider implements LlmProvider {
         }
         boolean named = model != null && !model.isBlank();
         OpenAiCompatClient client = named ? selectClient(model) : clientForCompletionOutsideConversation();
-        String useModel = named ? model : currentModel;
+        String useModel = named ? model : currentModel();
         if (client == null || useModel == null || useModel.isBlank()) {
             return com.scivicslab.chatui.core.provider.OneShotReply.refused("no server available for the model");
         }
@@ -938,7 +940,7 @@ public class OpenAiCompatProvider implements LlmProvider {
         }
         try {
             List<ChatMessage> oneShot = List.of(new ChatMessage.User(prompt));
-            return client.sendPrompt(currentModel, oneShot, true, maxTokensFor(client, currentModel, oneShot),
+            return client.sendPrompt(currentModel(), oneShot, true, maxTokensFor(client, currentModel(), oneShot),
                     new OpenAiCompatClient.StreamCallback() {
                         @Override public void onDelta(String content) { onDelta.accept(content); }
                         @Override public void onComplete(long durationMs, String finishReason) { }
@@ -962,13 +964,13 @@ public class OpenAiCompatProvider implements LlmProvider {
         // client is first, which is asked for a model named "" and answers an error. Observed on
         // the activity summary, which is asked for as soon as the process is up
         // (ActivitySummary_260905_oo01).
-        if (currentModel == null || currentModel.isBlank() || currentModel.equals("default")) {
+        if (currentModel() == null || currentModel().isBlank() || currentModel().equals("default")) {
             getAvailableModels();
         }
-        if (currentModel == null || currentModel.isBlank() || currentModel.equals("default")) {
+        if (currentModel() == null || currentModel().isBlank() || currentModel().equals("default")) {
             return null;
         }
-        return selectClient(currentModel);
+        return selectClient(currentModel());
     }
 
     /**

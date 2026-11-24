@@ -2298,7 +2298,9 @@ public class ChatUiActorSystem implements ConversationControls {
     private boolean setModel(String projectId, String chatId, String model, boolean wait) {
         ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
         if (providerRef == null) return false;
-        java.util.concurrent.CompletableFuture<Void> set = providerRef.tell(p -> p.setModel(model));
+        // tellNow: a stream running on the provider holds its mailbox, and the setting is the provider owner's, which the next
+        // request reads; the wait (for a project workflow's next step) is then for the setting, not for the stream.
+        java.util.concurrent.CompletableFuture<Void> set = providerRef.tellNow(p -> p.setModel(model));
         if (wait) set.join();
         ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
         if (session != null) session.recordSettingsDirect(model);
@@ -2370,7 +2372,7 @@ public class ChatUiActorSystem implements ConversationControls {
     public boolean setEffort(String projectId, String chatId, String effort) {
         ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
         if (providerRef == null) return false;
-        providerRef.tell(p -> p.setEffort(effort)).join();
+        providerRef.tellNow(p -> p.setEffort(effort)).join();
         // The conversation, which holds the provider, records it, so a restart puts it back.
         ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
         if (session != null) session.recordSettingsDirect(null);
@@ -2411,7 +2413,7 @@ public class ChatUiActorSystem implements ConversationControls {
     public boolean setTemperature(String projectId, String chatId, Double temperature) {
         ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
         if (providerRef == null) return false;
-        providerRef.tell(p -> p.setTemperature(temperature)).join();
+        providerRef.tellNow(p -> p.setTemperature(temperature)).join();
         ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
         if (session != null) session.recordSettingsDirect(null);
         return true;
@@ -2505,14 +2507,14 @@ public class ChatUiActorSystem implements ConversationControls {
             ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
             if (providerRef != null) {
                 String model = s.model();
-                providerRef.tell(p -> p.setModel(model));
+                providerRef.tellNow(p -> p.setModel(model));
             }
         }
         if (s.temperature() != null) {
             ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
             if (providerRef != null) {
                 Double t = s.temperature();
-                providerRef.tell(p -> p.setTemperature(t));
+                providerRef.tellNow(p -> p.setTemperature(t));
             }
         }
         // Absent in a record written before they were kept: left at their defaults.
@@ -2530,7 +2532,7 @@ public class ChatUiActorSystem implements ConversationControls {
         if (s.effort() != null && !s.effort().isBlank()) {
             ActorRef<LlmProvider> providerRef = getProviderRef(projectId, chatId);
             String effort = s.effort();
-            if (providerRef != null) providerRef.tell(p -> p.setEffort(effort));
+            if (providerRef != null) providerRef.tellNow(p -> p.setEffort(effort));
         }
         if (s.mcpServers() != null && !s.mcpServers().isEmpty()) {
             ChatSessionIIAR session = chatSessions.get(conversationSquadName);
