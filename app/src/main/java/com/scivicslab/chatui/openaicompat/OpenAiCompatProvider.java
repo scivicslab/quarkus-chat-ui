@@ -49,9 +49,17 @@ public class OpenAiCompatProvider implements LlmProvider {
     private static final class Shown {
         String model;
         Double temperature;
+        /** The history as the provider last told it, for a read that must not wait for a running turn. */
+        List<ChatMessage> history = List.of();
     }
 
     private final StateOwner<Shown> shown = new StateOwner<>("openai-compat-settings", new Shown());
+
+    /** Tells the owner a copy of the history; the turn calls this after each change of it. */
+    private void publishHistory() {
+        List<ChatMessage> copy = List.copyOf(history);
+        shown.tell(s -> s.history = copy);
+    }
 
     private void putCurrentModel(String value) {
         currentModel = value;
@@ -156,8 +164,10 @@ public class OpenAiCompatProvider implements LlmProvider {
     public void setSystemMessage(String text) {
         if (!history.isEmpty() && history.getFirst() instanceof ChatMessage.System) {
             history.set(0, new ChatMessage.System(text));
+            publishHistory();
         } else {
             history.addFirst(new ChatMessage.System(text));
+            publishHistory();
             collapsedCount++;
         }
         tools = readTools();
@@ -221,6 +231,7 @@ public class OpenAiCompatProvider implements LlmProvider {
     public void addToolResults(List<ToolCallResult> results) {
         for (ToolCallResult r : results) {
             history.addLast(new ChatMessage.ToolResult(r.callId(), r.toolName(), r.content()));
+            publishHistory();
         }
     }
 
@@ -348,13 +359,13 @@ public class OpenAiCompatProvider implements LlmProvider {
         // A blank prompt follows the tool results just added: the model answers them, and no user
         // message is added (OpenAiCompatStandardToolCalling_261120_oo01).
         boolean addsUserMessage = prompt != null && !prompt.isBlank() || !imageDataUrls.isEmpty();
-        if (addsUserMessage) history.addLast(new ChatMessage.User(prompt == null ? "" : prompt, imageDataUrls));
+        if (addsUserMessage) { history.addLast(new ChatMessage.User(prompt == null ? "" : prompt, imageDataUrls)); publishHistory(); }
         fitHistoryToBudget();
 
         OpenAiCompatClient client = selectClient(currentModel);
         if (client == null) {
             emitter.accept(ChatEvent.error("No server available for model: " + currentModel));
-            if (addsUserMessage) history.pollLast();
+            if (addsUserMessage) { history.pollLast(); publishHistory(); }
             return;
         }
 
@@ -402,6 +413,7 @@ public class OpenAiCompatProvider implements LlmProvider {
                                 logger.warning("Reply cut off at the token limit after "
                                         + response.length() + " chars; partial reply kept");
                                 history.addLast(new ChatMessage.Assistant(response));
+                                publishHistory();
                                 fitHistoryToBudget();
                                 emitter.accept(ChatEvent.cutOff(String.valueOf(response.length())));
                                 return;
@@ -419,10 +431,12 @@ public class OpenAiCompatProvider implements LlmProvider {
                             }
                             if (calls.isEmpty()) {
                                 history.addLast(new ChatMessage.Assistant(response));
+                                publishHistory();
                             } else {
                                 // The calls and the text written with them are one message; each call's
                                 // result follows it under the call's id (addToolResults).
                                 history.addLast(new ChatMessage.ToolCallRequest(response, List.copyOf(calls)));
+                                publishHistory();
                                 for (ChatMessage.ToolCallRequest.ToolCall c : calls) {
                                     emitter.accept(ChatEvent.toolCall(c.id(), c.name(), c.arguments()));
                                 }
@@ -488,12 +502,13 @@ public class OpenAiCompatProvider implements LlmProvider {
     @Override
     public void clearHistory() {
         history.clear();
+        publishHistory();
         collapsedCount = 0;
     }
 
     @Override
     public String requestMessagesJson() {
-        return RequestMessagesJson.toJson(List.copyOf(history));
+        return RequestMessagesJson.toJson(shown.ask(s -> s.history));
     }
 
     /**
@@ -517,7 +532,9 @@ public class OpenAiCompatProvider implements LlmProvider {
             return "too long: about " + used + " tokens, the budget for this model is " + budget;
         }
         history.clear();
+        publishHistory();
         history.addAll(messages);
+        publishHistory();
         collapsedCount = history.size();
         return null;
     }
@@ -547,7 +564,9 @@ public class OpenAiCompatProvider implements LlmProvider {
         if (question == null || question.isBlank()) return;
         List<ChatMessage> turn = new ArrayList<>(history.subList(Math.min(collapsedCount, history.size()), history.size()));
         while (history.size() > collapsedCount) history.removeLast();
+        publishHistory();
         history.addLast(new ChatMessage.User(question, List.of()));
+        publishHistory();
         java.util.Set<String> answered = new java.util.HashSet<>();
         for (ChatMessage m : turn) if (m instanceof ChatMessage.ToolResult r) answered.add(r.toolCallId());
         java.util.Set<String> kept = new java.util.HashSet<>();
@@ -564,8 +583,10 @@ public class OpenAiCompatProvider implements LlmProvider {
             }
         }
         history.addAll(endedWithoutAnswer ? collapseRepeatedCalls(turnPart) : turnPart);
+        publishHistory();
         if (answer != null && !answer.isBlank()) {
             history.addLast(new ChatMessage.Assistant(answer));
+            publishHistory();
         }
         collapsedCount = history.size();
         fitHistoryToBudget();
@@ -654,6 +675,7 @@ public class OpenAiCompatProvider implements LlmProvider {
         if (collapsedCount > at) collapsedCount--;
         while (history.size() > at && history.get(at) instanceof ChatMessage.ToolResult r) {
             history.remove(at);
+            publishHistory();
             tokens += ContextBudget.estimateMessageTokens(contentOf(r));
             if (collapsedCount > at) collapsedCount--;
         }

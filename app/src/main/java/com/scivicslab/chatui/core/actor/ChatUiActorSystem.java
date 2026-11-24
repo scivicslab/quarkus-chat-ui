@@ -1811,11 +1811,8 @@ public class ChatUiActorSystem implements ConversationControls {
         ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
         if (session == null) return List.of();
         try {
-            return session.ask(a -> ((ChatSession) a).getAvailableModels()).get(60, TimeUnit.SECONDS).stream()
+            return session.getAvailableModelsDirect().stream()
                     .map(m -> m.name()).toList();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return List.of();
         } catch (Exception e) {
             LOG.log(Level.WARNING, "could not read the models of " + chatActorName(projectId, chatId), e);
             return List.of();
@@ -2327,12 +2324,9 @@ public class ChatUiActorSystem implements ConversationControls {
         String name = chatActorName(projectId, chatId);
         ChatSessionIIAR session = chatSessions.get(name);
         if (session == null) return false;
-        // The conversation records it with the change, so a restart puts it back.
-        session.tell(a -> {
-            ChatSession c = (ChatSession) a;
-            c.setNoThink(value);
-            c.recordSettings(null);
-        }).join();
+        // The setting's owner takes it at once, even in the middle of a turn (the turn reads it at its next step), and the
+        // conversation records it with the change, so a restart puts it back.
+        session.setNoThinkDirect(value);
         return true;
     }
 
@@ -2344,11 +2338,7 @@ public class ChatUiActorSystem implements ConversationControls {
     public boolean setStepLimit(String projectId, String chatId, int value) {
         ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
         if (session == null) return false;
-        session.tell(a -> {
-            ChatSession c = (ChatSession) a;
-            c.setStepLimit(value);
-            c.recordSettings(null);
-        }).join();
+        session.setStepLimitDirect(value);
         return true;
     }
 
@@ -2361,11 +2351,7 @@ public class ChatUiActorSystem implements ConversationControls {
     public boolean setTimeLimitMinutes(String projectId, String chatId, int value) {
         ChatSessionIIAR session = chatSessions.get(chatActorName(projectId, chatId));
         if (session == null) return false;
-        session.tell(a -> {
-            ChatSession c = (ChatSession) a;
-            c.setTimeLimitMinutes(value);
-            c.recordSettings(null);
-        }).join();
+        session.setTimeLimitMinutesDirect(value);
         return true;
     }
 
@@ -2470,10 +2456,10 @@ public class ChatUiActorSystem implements ConversationControls {
 
     /** @return what that conversation asks to sample at, or {@code null} when it asks for nothing */
     private Double temperatureOf(String conversationSquadName) {
-        ActorRef<LlmProvider> providerRef = actorSystem.getActor(conversationSquadName + CHAT_SESSION_SUFFIX + PROVIDER_SUFFIX);
-        if (providerRef == null) return null;
+        ChatSessionIIAR session = chatSessions.get(conversationSquadName);
+        if (session == null) return null;
         try {
-            return providerRef.ask(LlmProvider::getTemperature).join();
+            return session.getTemperatureDirect();   // not through the provider's mailbox: a running stream would hold it
         } catch (Exception e) {
             return null;
         }
@@ -2657,11 +2643,11 @@ public class ChatUiActorSystem implements ConversationControls {
         String name = resolveChatName(myProjectId, target);
         ChatSessionIIAR session = chatSessions.get(name);
         if (session == null) return "error: no such conversation: " + name;
-        session.tell(a -> {
-            ChatSession c = (ChatSession) a;
-            c.setMcpServers(servers);
-            c.recordSettings(null);
-        }).join();
+        try {
+            session.setMcpServersDirect(servers);
+        } catch (IllegalArgumentException e) {
+            return "error: " + e.getMessage();
+        }
         return servers.isEmpty() ? "ok: " + name + " has no external MCP server"
                 : "ok: " + name + " uses the MCP servers " + String.join(", ", servers.keySet())
                         + "; their tools are given to the model from its next turn as <server>__<tool>";
@@ -2675,7 +2661,7 @@ public class ChatUiActorSystem implements ConversationControls {
         ChatSessionIIAR session = chatSessions.get(conversation);
         if (session == null) return null;
         try {
-            return session.<Map<String, String>>ask(a -> ((ChatSession) a).getMcpServers()).get(10, TimeUnit.SECONDS);
+            return session.getMcpServersDirect();
         } catch (Exception e) {
             LOG.log(Level.WARNING, "Could not read the MCP servers of " + conversation, e);
             return null;

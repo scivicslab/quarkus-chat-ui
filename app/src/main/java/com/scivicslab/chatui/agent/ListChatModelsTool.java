@@ -55,7 +55,6 @@ public final class ListChatModelsTool {
             throw new IllegalArgumentException("error: chat not found: " + target
                     + OtherInstances.notFoundHint(targetName));
         }
-        return chat.<List<LlmProvider.ModelEntry>>ask(interp -> ((ChatSession) interp).getAvailableModels())
-                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        return chat.getAvailableModelsDirect();
     }
 }

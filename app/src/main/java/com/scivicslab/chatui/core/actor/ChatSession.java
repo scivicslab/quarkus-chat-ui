@@ -161,10 +161,9 @@ public class ChatSession extends Interpreter {
     public static final int DEFAULT_CONVERSATION_STEP_LIMIT = 100;
     /** Minutes one such turn may run, unless the conversation sets it; {@code 0} sets no time limit. */
     public static final int DEFAULT_TIME_LIMIT_MINUTES = 10;
-    private int stepLimit = DEFAULT_CONVERSATION_STEP_LIMIT;
-    private int timeLimitMinutes = DEFAULT_TIME_LIMIT_MINUTES;
-    /** Where other threads read the two limits above; this conversation tells it every change. Null in a bare session. */
-    private com.scivicslab.pojoactor.core.ActorRef<ChatLimits> limitsBoard;
+    /** The step limit, the time limit, no-think and the MCP servers: an outside thread may change them while a turn runs. */
+    private final com.scivicslab.pojoactor.core.ActorRef<ChatSettings> settings =
+            new com.scivicslab.pojoactor.core.ActorRef<>("chat-settings", new ChatSettings());
     /** The time the turn's limit is measured on; a test sets its own. */
     private java.util.function.LongSupplier clock = System::currentTimeMillis;
     /** Whether this turn ended on a repeated call, whatever the model answered then. */
@@ -380,7 +379,6 @@ public class ChatSession extends Interpreter {
      * says. A setting of the conversation, as the model and the temperature are
      * ({@code ThinkingAndEffortAreConversationSettings_260917_oo01}).
      */
-    private boolean noThinkAlways;
     /**
      * Open I/O-log session id for this turn, or -1 when logging is disabled. Set in start(). Volatile, like
      * {@link #ioTurnNo} and {@link #stepCount}: chat-ui's MCP server reads all three from its own thread to label
@@ -773,7 +771,10 @@ public class ChatSession extends Interpreter {
      * @param promptWorkflowFile classpath-relative workflow file, resolved the same way
      *                           {@link Interpreter#call(String)} resolves any sub-workflow
      */
-    public void setPromptWorkflowFile(String promptWorkflowFile) { this.promptWorkflowFile = promptWorkflowFile; }
+    public void setPromptWorkflowFile(String promptWorkflowFile) {
+        this.promptWorkflowFile = promptWorkflowFile;
+        publishStatus();
+    }
 
     /** @return this session's prompt-construction sub-workflow file name (classpath-relative, under {@code /workflows/}) */
     public String getPromptWorkflowFile() { return promptWorkflowFile; }
@@ -1008,7 +1009,9 @@ public class ChatSession extends Interpreter {
         final long ioSession = (ioLog != null) ? ioLog.ensureSession(myChatName()) : -1;
         final int ioTurnNo = ++ioTurn;
         this.ioSession = ioSession;
+        publishStatus();
         this.ioTurnNo = ioTurnNo;
+        publishStatus();
         this.turnRequestId = null;
         this.askCount = 0;
         this.turnOriginal = null;
@@ -1260,7 +1263,9 @@ public class ChatSession extends Interpreter {
         applyWorkflowBaseDir();
         this.turnSource = source;
         this.ioSession = (ioLog != null) ? ioLog.ensureSession(myChatName()) : -1;
+        publishStatus();
         this.ioTurnNo = ++ioTurn;
+        publishStatus();
         this.turnRequestId = requestId;
         this.askCount = 0;
         this.turnAnswer = null;
@@ -1327,7 +1332,7 @@ public class ChatSession extends Interpreter {
         this.turnSelf = self;
         this.turnDone = done;
         // Either side may ask for it: the conversation's own setting, or this one prompt.
-        this.turnNoThink = noThink || noThinkAlways;
+        this.turnNoThink = noThink || isNoThink();
         this.turnStartedAt = clock.getAsLong();
         publishStatus();
         if (byDefinition()) handSystemMessage();
@@ -1335,6 +1340,7 @@ public class ChatSession extends Interpreter {
         this.finalAnswer = null;
         this.turnError = null;
         this.stepCount = 0;
+        publishStatus();
         this.turnToolCalls = 0;
         this.stepLimitHit = false;
         this.repeatedCalls.reset();
@@ -1540,25 +1546,23 @@ public class ChatSession extends Interpreter {
 
     /**
      * This conversation's external MCP servers, by name ({@code ExternalMcpServersOfAConversation_261120_oo01}). Kept
-     * here rather than by the provider, which another provider replaces. Volatile: the REST view reads it.
+     * here rather than by the provider, which another provider replaces. Held by the settings board, which the REST view reads.
      */
-    private Map<String, String> mcpServers = Map.of();
-
     /** @param servers the external MCP servers, checked by {@link McpServerList#check}; recorded by the caller */
     public void setMcpServers(Map<String, String> servers) {
-        this.mcpServers = McpServerList.check(servers);
-        publishStatus();
+        Map<String, String> checked = McpServerList.check(servers);
+        settings.ask(s -> s.mcpServers = checked).join();
     }
 
     /** @return the external MCP servers, by name */
     public Map<String, String> getMcpServers() {
-        return mcpServers;
+        return settings.ask(s -> s.mcpServers).join();
     }
 
     /** @return whether {@code tool} is a tool of one of this conversation's external MCP servers, {@code <server>__<tool>} */
     private boolean isExternalTool(String tool) {
         int at = tool == null ? -1 : tool.indexOf(com.scivicslab.chatui.openaicompat.OpenAiCompatProvider.EXTERNAL_SEPARATOR);
-        return at > 0 && mcpServers.containsKey(tool.substring(0, at));
+        return at > 0 && getMcpServers().containsKey(tool.substring(0, at));
     }
 
     /**
@@ -1567,7 +1571,7 @@ public class ChatSession extends Interpreter {
      */
     private void handSystemMessage() {
         String text = systemMessageText();
-        Map<String, String> servers = mcpServers;
+        Map<String, String> servers = getMcpServers();
         try {
             providerRef().ask(p -> { p.setMcpServers(servers); p.setSystemMessage(text); return null; },
                     system.getManagedThreadPool()).get();
@@ -1601,7 +1605,7 @@ public class ChatSession extends Interpreter {
      */
     private String stepBudgetNote() {
         if (!provider.takesStepBudget()) return "";
-        return "\n\nYou may make at most " + stepLimit + " tool-call steps in a turn; answer in text before you run out.";
+        return "\n\nYou may make at most " + getStepLimit() + " tool-call steps in a turn; answer in text before you run out.";
     }
 
     /** @return where read and write may reach, with its leading blank line; {@code ""} without read */
@@ -1691,6 +1695,7 @@ public class ChatSession extends Interpreter {
             return new ActionResult(false, "cancelled");
         }
         stepCount++;
+        publishStatus();
 
         if (constructedPrompts.isEmpty()) {
             ActionResult built = call(promptWorkflowFile);
@@ -1753,6 +1758,7 @@ public class ChatSession extends Interpreter {
             turnEmitter.accept(ChatEvent.thinking(
                     "\n→ retrying: the reply had no text and no tool call\n"));
             stepCount++;
+            publishStatus();
             try {
                 outcome = callLlmStep(promptToSend, stepImages);
             } catch (Exception e) {
@@ -2328,7 +2334,7 @@ public class ChatSession extends Interpreter {
         if (provider.takesStepBudget()) {
             // This conversation's own limit, not the workflow's: at it, the turn makes one more request that must be
             // answered in text, and the workflow goes on to it (the guard fails).
-            int own = stepLimit;
+            int own = getStepLimit();
             if (stepCount < own || finalRequest != FinalRequest.NONE) {
                 return new ActionResult(false, stepCount + "/" + own + " steps used");
             }
@@ -2375,8 +2381,8 @@ public class ChatSession extends Interpreter {
     /** What the turn answers when the request for an answer in text returned none. */
     private String noAnswerText() {
         return switch (finalRequest) {
-            case STEP_LIMIT -> "The step limit of " + stepLimit + " was reached and the model gave no answer";
-            case TIME_LIMIT -> "The time limit of " + timeLimitMinutes + " minutes was reached and the model gave no answer";
+            case STEP_LIMIT -> "The step limit of " + getStepLimit() + " was reached and the model gave no answer";
+            case TIME_LIMIT -> "The time limit of " + getTimeLimitMinutes() + " minutes was reached and the model gave no answer";
             default -> "The model repeated the same call " + repeatedCalls.count() + " times and gave no answer";
         };
     }
@@ -2388,12 +2394,13 @@ public class ChatSession extends Interpreter {
      * limit; the default is {@link #DEFAULT_TIME_LIMIT_MINUTES} and {@code 0} sets none. Makes no model call.
      */
     public ActionResult timeLimitReached() {
-        if (!provider.takesStepBudget() || timeLimitMinutes <= 0) return new ActionResult(false, "no time limit");
+        int timeLimit = getTimeLimitMinutes();
+        if (!provider.takesStepBudget() || timeLimit <= 0) return new ActionResult(false, "no time limit");
         if (finalRequest != FinalRequest.NONE || cancelScope.isCancelled() || cancelScope.isPauseRequested()) return new ActionResult(false, "not now");
-        long limitMs = timeLimitMinutes * 60_000L;
+        long limitMs = timeLimit * 60_000L;
         if (clock.getAsLong() - turnStartedAt < limitMs) return new ActionResult(false, "within the time limit");
         askForAnAnswerInText(FinalRequest.TIME_LIMIT,
-                "You reached the time limit of " + timeLimitMinutes + " minutes; say what you found and what is left.");
+                "You reached the time limit of " + timeLimit + " minutes; say what you found and what is left.");
         return new ActionResult(true, "time limit reached: asking for an answer in text");
     }
 
@@ -2406,7 +2413,7 @@ public class ChatSession extends Interpreter {
                 || cancelScope.isCancelled() || cancelScope.isPauseRequested()) {
             return new ActionResult(false, "no warning to give");
         }
-        int max = stepLimit;
+        int max = getStepLimit();
         int warnAt = (int) Math.ceil(max * 0.8);
         if (stepCount < warnAt || stepCount >= max) return new ActionResult(false, stepCount + "/" + max + " steps used");
         stepWarningGiven = true;
@@ -2419,30 +2426,34 @@ public class ChatSession extends Interpreter {
     }
 
     /** @return how many steps one turn of this conversation may make, when its provider takes a step budget */
-    public int getStepLimit() { return stepLimit; }
+    public int getStepLimit() { return settings.ask(s -> s.stepLimit).join(); }
 
     /** @param value steps per turn, at least 1 */
     public void setStepLimit(int value) {
         if (value < 1) throw new IllegalArgumentException("stepLimit must be at least 1");
-        this.stepLimit = value;
-        publishLimits();
+        settings.ask(s -> s.stepLimit = value).join();
     }
 
     /** @return minutes one turn may run, {@code 0} for no limit */
-    public int getTimeLimitMinutes() { return timeLimitMinutes; }
+    public int getTimeLimitMinutes() { return settings.ask(s -> s.timeLimitMinutes).join(); }
 
     /** @param value minutes per turn, {@code 0} for no limit */
     public void setTimeLimitMinutes(int value) {
         if (value < 0) throw new IllegalArgumentException("timeLimitMinutes must not be negative");
-        this.timeLimitMinutes = value;
-        publishLimits();
+        settings.ask(s -> s.timeLimitMinutes = value).join();
     }
 
     /** Stops the cancel state's owner and the board with the conversation. */
     void closeCancelScope() {
         cancelScope.close();
         board.close();
+        settings.close();
         calculator.close();   // its JShell is a child JVM
+    }
+
+    /** @return the board of the settings an outside thread may change while a turn runs. */
+    com.scivicslab.pojoactor.core.ActorRef<ChatSettings> settingsBoard() {
+        return settings;
     }
 
     /** For a test: this conversation's {@code calc} evaluator. */
@@ -2453,8 +2464,8 @@ public class ChatSession extends Interpreter {
     /** The state other threads read, as it is now; only the turn's own thread calls this. */
     private ChatBoard.Status currentStatus() {
         return new ChatBoard.Status(busy, turnStartedAt, historySnapshot, outstandingSnapshot, promisedSnapshot,
-                unansweredSnapshot, mcpServers, lastReplyWatchLines, lastReminderDecision, provider, entries, toolSet,
-                noThinkAlways);
+                unansweredSnapshot, lastReplyWatchLines, lastReminderDecision, provider, entries, toolSet,
+                promptWorkflowFile, ioSession, ioTurnNo, stepCount);
     }
 
     /** Tells the board the state other threads read. Called by the turn after each change of one of its values. */
@@ -2468,18 +2479,6 @@ public class ChatSession extends Interpreter {
         return board.ask(ChatBoard::status).join();
     }
 
-    /** Gives the limits a board other threads read them from, and tells it the current ones. */
-    void attachLimitsBoard(com.scivicslab.pojoactor.core.ActorRef<ChatLimits> board) {
-        this.limitsBoard = board;
-        publishLimits();
-    }
-
-    private void publishLimits() {
-        var board = limitsBoard;
-        if (board == null) return;
-        int step = stepLimit, time = timeLimitMinutes;
-        board.tell(l -> l.set(step, time));
-    }
 
     /** Lets a test say what time it is: the turn's time limit is measured on this clock. */
     void setClock(java.util.function.LongSupplier clock) { this.clock = clock; }
@@ -2568,7 +2567,11 @@ public class ChatSession extends Interpreter {
     private void renewToolRunner() {
         toolRunner = new ConversationToolRunner(system, projectId, chatId, fileScope, conversationControls,
                 roleTableRef, skillRegistryRef, pluginTools, toolSet, calculator, ioLog,
-                () -> new ConversationToolRunner.IoPosition(ioSession, ioTurnNo, stepCount));
+                () -> {
+                    // Read on the thread of chat-ui's MCP server, while the turn runs: from the board, not from the turn's fields.
+                    ChatBoard.Status s = status();
+                    return new ConversationToolRunner.IoPosition(s.ioSession(), s.ioTurnNo(), s.stepCount());
+                });
         if (conversationControls != null && projectId != null && chatId != null) {
             conversationControls.publishToolRunner(toolRunner);
         }
@@ -3200,7 +3203,7 @@ public class ChatSession extends Interpreter {
         publishStatus();
         logToConversationSquad("INFO", "turn" + ioTurnNo + ": reminder decision: " + decision);
         turnEmitter.accept(ChatEvent.thinking("\n→ reminder: " + decision + "\n"));
-        if (prompt != null) stepCount++;   // a model call was made: it is counted like the others
+        if (prompt != null) { stepCount++; publishStatus(); }   // a model call was made: it is counted like the others
         if (ioLog == null || ioSession < 0) return;
         try {
             String m = "TOOL: reminder_decision\nINPUT:\n" + (prompt == null ? "(no model call)" : prompt)
@@ -3225,6 +3228,7 @@ public class ChatSession extends Interpreter {
         if (ioLog == null || ioSession < 0) return;
         try {
             stepCount++;
+            publishStatus();
             String m = "TOOL: ask_worker\nINPUT:\n" + workerChatName + "\n" + prompt
                     + "\nOBSERVATION:\n" + (reply == null ? "no reply from worker" : reply);
             ioLog.record(ioSession, "agent", "turn" + ioTurnNo + "/step" + stepCount + "/tool", m);
@@ -3243,6 +3247,7 @@ public class ChatSession extends Interpreter {
     private void recordJudgeIo(String prompt, String verdict) {
         if (ioLog == null || ioSession < 0) return;
         stepCount++;
+        publishStatus();
         recordStepIo(prompt, verdict, null, List.of());
     }
 
@@ -3845,7 +3850,9 @@ public class ChatSession extends Interpreter {
     public void recordAutonomousTurn(long ioSession, String assistant, String thinking) {
         // A turn of its own, numbered like any other, so its line in the record carries its own id.
         this.ioSession = ioSession;
+        publishStatus();
         this.ioTurnNo = ++ioTurn;
+        publishStatus();
         this.askCount = 0;
         recordHistory("assistant", assistant);
         recordTurnIo(ioSession, ioTurnNo, "(autonomous continuation)", assistant, thinking);
@@ -4095,13 +4102,12 @@ public class ChatSession extends Interpreter {
      * the way it says which model to run on.</p>
      */
     public void setNoThink(boolean value) {
-        this.noThinkAlways = value;
-        publishStatus();
+        settings.ask(s -> s.noThink = value).join();
     }
 
     /** @return whether this conversation asks its model to skip the thinking phase */
     public boolean isNoThink() {
-        return noThinkAlways;
+        return settings.ask(s -> s.noThink).join();
     }
 
     // ── What this conversation records of itself (EachActorRecordsItsOwnState_261118_oo01) ──────────────
@@ -4130,7 +4136,7 @@ public class ChatSession extends Interpreter {
      * @param model the model just set, when the provider may not be on it yet; {@code null} reads the provider's
      */
     public void recordSettings(String model) {
-        recordSettings(currentStatus(), stepLimit, timeLimitMinutes, model);
+        recordSettings(currentStatus(), getStepLimit(), getTimeLimitMinutes(), isNoThink(), getMcpServers(), model);
     }
 
     /**
@@ -4138,7 +4144,8 @@ public class ChatSession extends Interpreter {
      * turn's own state; it reads nothing of a running turn, so another thread may call it
      * (see {@link ChatSessionIIAR#recordSettingsDirect}).
      */
-    static void recordSettings(ChatBoard.Status s, int stepLimit, int timeLimitMinutes, String model) {
+    static void recordSettings(ChatBoard.Status s, int stepLimit, int timeLimitMinutes, boolean noThink,
+                               Map<String, String> mcpServers, String model) {
         com.scivicslab.chatui.core.iolog.SessionEntries e = s.entries();
         if (e == null) return;
         org.json.JSONObject o = new org.json.JSONObject();
@@ -4151,11 +4158,11 @@ public class ChatSession extends Interpreter {
         o.put("tools", s.toolSet() == null ? org.json.JSONObject.NULL : s.toolSet().id());
         o.put("model", m == null ? org.json.JSONObject.NULL : m);
         o.put("temperature", temperature == null ? org.json.JSONObject.NULL : temperature);
-        o.put("noThink", s.noThink());
+        o.put("noThink", noThink);
         o.put("stepLimit", stepLimit);
         o.put("timeLimitMinutes", timeLimitMinutes);
         o.put("effort", effort == null ? org.json.JSONObject.NULL : effort);
-        o.put("mcpServers", new org.json.JSONObject(s.mcpServers()));
+        o.put("mcpServers", new org.json.JSONObject(mcpServers));
         e.write(com.scivicslab.chatui.core.iolog.IoLogView.SETTINGS_LABEL, o.toString());
     }
 

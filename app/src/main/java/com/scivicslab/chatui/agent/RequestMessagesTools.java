@@ -28,7 +28,7 @@ public final class RequestMessagesTools {
         if (chat == null) return notFound(target);
         if (chat.isBusyDirect()) return BUSY;
         try {
-            String json = chat.ask(a -> ((ChatSession) a).requestMessagesJson()).get(10, TimeUnit.SECONDS);
+            String json = chat.requestMessagesJsonDirect();
             return json == null ? "error: this conversation's provider keeps no request history" : json;
         } catch (Exception e) {
             return "error: get_request_messages failed: " + e.getMessage();

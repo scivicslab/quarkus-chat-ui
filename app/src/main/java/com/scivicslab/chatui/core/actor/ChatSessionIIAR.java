@@ -35,8 +35,6 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      * picks which one it runs; multiple ConversationSquads may point at the same file. All ConversationSquads default to the
      * same file today since it's the only one that exists, not because ConversationSquads are forced to share it.
      */
-    /** Where this conversation's step and time limits are read from by other threads; the turn tells it every change. */
-    private final ActorRef<ChatLimits> limits;
 
     private String agentLoopWorkflowFile = "chat-session-agent-loop.yaml";
 
@@ -44,8 +42,6 @@ public class ChatSessionIIAR extends InterpreterIIAR {
                      IoLogStore ioLog, IIActorSystem system) {
         super(actorName, new ChatSession(provider, configApiKey, ioLog), system);
         chatSession().setActorSystem(system);
-        this.limits = new ActorRef<>(actorName + ".limits", new ChatLimits());
-        chatSession().attachLimitsBoard(limits);
         // InterpreterIIAR's constructor does not call this itself — without it, "actor: this" in
         // chat-session-agent-loop.yaml resolves through Interpreter.action()'s selfActorRef==null
         // fallback (system.getIIActor("this")), which finds nothing ("Actor not found: this").
@@ -217,7 +213,8 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      * @param model the model just set, which the provider may not be on yet, or {@code null}
      */
     public void recordSettingsDirect(String model) {
-        ChatSession.recordSettings(chatSession().status(), getStepLimitDirect(), getTimeLimitMinutesDirect(), model);
+        ChatSession.recordSettings(chatSession().status(), getStepLimitDirect(), getTimeLimitMinutesDirect(), isNoThinkDirect(),
+                getMcpServersDirect(), model);
     }
 
     /** Has the conversation write the agent loop just put on it, without waiting for a running turn. */
@@ -243,21 +240,67 @@ public class ChatSessionIIAR extends InterpreterIIAR {
     public String getToolSetDirect() { return chatSession().status().toolSet().id(); }
 
     /** Whether this conversation asks its model to skip the thinking phase, read directly. */
-    public boolean isNoThinkDirect() { return chatSession().status().noThink(); }
+    public boolean isNoThinkDirect() { return chatSession().isNoThink(); }
 
     /** Closes the conversation's limits board with the conversation. */
     @Override
     public void close() {
-        limits.close();
         chatSession().closeCancelScope();
         super.close();
     }
 
+    /** The external MCP servers of this conversation, by name, as the turn last told them; does not wait for a running turn. */
+    public java.util.Map<String, String> getMcpServersDirect() { return chatSession().getMcpServers(); }
+
+    /**
+     * The models the conversation's provider offers; does not wait for a running turn (it asks the provider's servers, which
+     * answer within their own timeout).
+     */
+    public java.util.List<LlmProvider.ModelEntry> getAvailableModelsDirect() {
+        return chatSession().status().provider().getAvailableModels();
+    }
+
+    /** The prompt-construction sub-workflow file of this conversation, as the turn last told it. */
+    public String getPromptWorkflowFileDirect() { return chatSession().status().promptWorkflowFile(); }
+
+    /** What this conversation asks to sample at, as its provider's owner last held it; does not wait for a running stream. */
+    public Double getTemperatureDirect() { return chatSession().status().provider().getTemperature(); }
+
+    /** The messages the provider's next request carries, as its owner last held them; {@code null} when it keeps none. */
+    public String requestMessagesJsonDirect() { return chatSession().status().provider().requestMessagesJson(); }
+
+    /**
+     * Sets the steps one turn may make, from any thread and at once (the turn reads it at its next step), and has the
+     * conversation record its settings.
+     */
+    public void setStepLimitDirect(int value) {
+        chatSession().setStepLimit(value);
+        recordSettingsDirect(null);
+    }
+
+    /** As {@link #setStepLimitDirect}, for the minutes one turn may run. */
+    public void setTimeLimitMinutesDirect(int value) {
+        chatSession().setTimeLimitMinutes(value);
+        recordSettingsDirect(null);
+    }
+
+    /** As {@link #setStepLimitDirect}, for whether the conversation always asks its model to skip thinking. */
+    public void setNoThinkDirect(boolean value) {
+        chatSession().setNoThink(value);
+        recordSettingsDirect(null);
+    }
+
+    /** As {@link #setStepLimitDirect}, for the external MCP servers; they are given to the model from its next turn. */
+    public void setMcpServersDirect(java.util.Map<String, String> servers) {
+        chatSession().setMcpServers(servers);
+        recordSettingsDirect(null);
+    }
+
     /** @return the steps one turn of this conversation may make */
-    public int getStepLimitDirect() { return limits.ask(ChatLimits::stepLimit).join(); }
+    public int getStepLimitDirect() { return chatSession().getStepLimit(); }
 
     /** @return the minutes one turn of this conversation may run, {@code 0} for no limit */
-    public int getTimeLimitMinutesDirect() { return limits.ask(ChatLimits::timeLimitMinutes).join(); }
+    public int getTimeLimitMinutesDirect() { return chatSession().getTimeLimitMinutes(); }
 
     /** How hard this conversation's provider was told to work, read directly; null when it has no such setting. */
     public String getEffortDirect() { return chatSession().status().provider().getEffort(); }

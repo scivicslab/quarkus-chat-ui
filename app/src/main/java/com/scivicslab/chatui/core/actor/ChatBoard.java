@@ -26,19 +26,21 @@ final class ChatBoard {
      * @param outstanding         the requests the conversation sent that are still out
      * @param promised            the requests promised a report
      * @param unanswered          the received requests not yet answered, and who asked each
-     * @param mcpServers          the external MCP servers, by name
      * @param replyWatchLines     what the last reply watch said
      * @param lastReminderDecision what the last reminder decision was, or {@code null}
      * @param provider            the conversation's provider
      * @param entries             where the conversation records itself, or {@code null}
      * @param toolSet             the conversation's tool set
-     * @param noThink             whether the conversation always asks its model to skip thinking
+     * @param promptWorkflowFile  the prompt-construction sub-workflow file of the conversation
+     * @param ioSession           the I/O-log session of the turn, or -1
+     * @param ioTurnNo            the number of the turn in the log
+     * @param stepCount           the step the turn is at
      */
     record Status(boolean busy, long turnStartedAt, List<ChatSession.HistoryEntry> history,
                   List<OpenRequests.Outstanding> outstanding, Set<String> promised, Map<String, String> unanswered,
-                  Map<String, String> mcpServers, List<String> replyWatchLines, String lastReminderDecision,
+                  List<String> replyWatchLines, String lastReminderDecision,
                   LlmProvider provider, SessionEntries entries, com.scivicslab.chatui.agent.ToolSet toolSet,
-                  boolean noThink) {}
+                  String promptWorkflowFile, long ioSession, int ioTurnNo, int stepCount) {}
 
     private Status status;
 

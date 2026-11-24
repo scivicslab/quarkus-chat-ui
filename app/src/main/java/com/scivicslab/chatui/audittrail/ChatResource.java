@@ -607,8 +607,7 @@ public class ChatResource {
                     "message", "busy: the conversation is answering; try again when it has finished")).build();
         }
         try {
-            String json = chatSessionIIAR.ask(a -> ((ChatSession) a).requestMessagesJson())
-                    .get(10, TimeUnit.SECONDS);
+            String json = chatSessionIIAR.requestMessagesJsonDirect();
             if (json == null) {
                 return Response.status(409).entity(Map.of("type", "error",
                         "message", "this conversation's provider keeps no request history")).build();
@@ -1155,13 +1154,7 @@ public class ChatResource {
         requireChat(projectId, chatId);
         ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
         try {
-            return chatSessionIIAR.ask(interp -> ((ChatSession) interp).getAvailableModels())
-                    .get(MODEL_LIST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (java.util.concurrent.TimeoutException e) {
-            LOG.warning("Failed to list models for ConversationSquad " + chatId + ": timed out after "
-                    + MODEL_LIST_TIMEOUT_SECONDS + " s");
-            noteTimeout(projectId, chatId, chatSessionIIAR);
-            return List.of();
+            return chatSessionIIAR.getAvailableModelsDirect();
         } catch (Exception e) {
             LOG.warning("Failed to list models for ConversationSquad " + chatId + ": " + e.getMessage());
             return List.of();
@@ -1191,8 +1184,7 @@ public class ChatResource {
         String agentLoopFile = chatSessionIIAR.getAgentLoopWorkflowFile();
         String promptFile;
         try {
-            promptFile = chatSessionIIAR.ask(interp -> ((ChatSession) interp).getPromptWorkflowFile())
-                    .get(5, TimeUnit.SECONDS);
+            promptFile = chatSessionIIAR.getPromptWorkflowFileDirect();
         } catch (Exception e) {
             LOG.warning("Failed to read prompt workflow file for ConversationSquad " + chatId + ": " + e.getMessage());
             promptFile = null;
