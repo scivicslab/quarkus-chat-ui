@@ -100,6 +100,11 @@ class TurnWithoutAnAnswerTellsTheAskerTest {
         }
     }
 
+    private static boolean hasOpenRequest(SessionEntries entries) {
+        String json = entries.latest(ChatSession.OPEN_REQUESTS_LABEL);
+        return json != null && json.contains(REQUEST);
+    }
+
     /**
      * The real path: chat-24 is in a long turn for chat-01's request when the instance stops; then it starts again.
      * As at a JVM shutdown, the I/O log closes first (on 28012 the trace shows "Database is already closed ... at VM
@@ -112,17 +117,23 @@ class TurnWithoutAnAnswerTellsTheAskerTest {
         log.useDatabaseAt(db);
         IIActorSystem before = new IIActorSystem("restart-before");
         chat(before, "01", new Scripted("unused"), null);
+        SessionEntries workerEntries = SessionEntries.ofConversation(log, IoLogView.over(log), "project1/chat-24");
         ChatSessionIIAR worker = chat(before, "24", new Scripted("unused") {
             @Override public void sendPrompt(String p, String m, Consumer<ChatEvent> e, ProviderContext c) {
                 // A Bash render step of several minutes: the instance stops before the step ends.
                 e.accept(ChatEvent.toolUse("toolu_1", "Bash", "{\"command\":\"render 480-599\"}"));
                 try { Thread.sleep(60_000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
             }
-        }, SessionEntries.ofConversation(log, IoLogView.over(log), "project1/chat-24"));
+        }, workerEntries);
         AskChatTool.send(before, "project1", "01", "24", "render the video", REQUEST);
         long deadline = System.currentTimeMillis() + 10_000;
         while (!worker.isBusyDirect() && System.currentTimeMillis() < deadline) Thread.sleep(20);
         assertTrue(worker.isBusyDirect(), "chat-24 is in its turn for the request");
+        // The turn is busy before the request's record is written (the turn opens its I/O-log session first), so
+        // "busy" does not say the record reached the database. Wait for the record itself, read back through the log.
+        deadline = System.currentTimeMillis() + 10_000;
+        while (!hasOpenRequest(workerEntries) && System.currentTimeMillis() < deadline) Thread.sleep(20);
+        assertTrue(hasOpenRequest(workerEntries), "the request's record has reached the I/O log before it is closed");
         log.store().close();
         before.terminate();
 
