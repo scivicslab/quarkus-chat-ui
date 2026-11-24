@@ -45,4 +45,3 @@ plugin-harness/src/main/java/com/scivicslab/chatui/harness/CodexProvider.java vo
 plugin-web-tools/src/main/java/com/scivicslab/chatui/agent/ScholarSearchTool.java sleep 1
 plugin-web-tools/src/main/java/com/scivicslab/chatui/agent/ScholarSearchTool.java synchronized 1
 ssh-tools/src/main/java/com/scivicslab/sshtools/SshRunner.java concurrent-class 2
-ssh-tools/src/main/java/com/scivicslab/sshtools/SshRunner.java thread-start 3

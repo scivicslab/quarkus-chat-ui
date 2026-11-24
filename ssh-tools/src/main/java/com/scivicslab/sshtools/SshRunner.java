@@ -1,5 +1,7 @@
 package com.scivicslab.sshtools;
 
+import com.scivicslab.chatui.kernel.BlockingJob;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -8,16 +10,20 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Runs one {@code ssh} process at a time with its limits (tasks/todo.md, "Stage 11 spec"). A plain object; ssh-connector
  * runs one per host as a POJO-actor actor, so calls to one host go one after another. The process is started from an
- * argument array, never through a shell. Its two output streams and its input are carried by virtual threads of their
- * own, which end with the process.
+ * argument array, never through a shell. Its two output streams and its input are carried by one {@link BlockingJob} each, which end with the process.
  */
 public final class SshRunner {
+
+    private static final Logger LOG = Logger.getLogger(SshRunner.class.getName());
 
     /**
      * What the process reads on its standard input.
@@ -82,28 +88,37 @@ public final class SshRunner {
         ByteArrayOutputStream outBuffer = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuffer = new ByteArrayOutputStream();
         long[] outCount = new long[1];
-        Thread feeder = Thread.ofVirtual().start(() -> feed(process, input));
-        Thread outReader = Thread.ofVirtual().start(() -> {
+        // The process's three streams are each one BlockingJob (an actor that starts, cancels and reports one
+        // blocking read or write); a job's canceller destroys the process, which is what wakes a blocked read.
+        Runnable killProcess = () -> kill(process);
+        BlockingJob<Void> feeder = BlockingJob.start("ssh-stdin", () -> { feed(process, input); return null; }, killProcess);
+        BlockingJob<Void> outReader = BlockingJob.start("ssh-stdout", () -> {
             try (OutputStream sink = stdoutFile == null ? outBuffer : Files.newOutputStream(stdoutFile)) {
                 outCount[0] = copy(process.getInputStream(), sink, stdoutLimit, "standard output", process, limit);
             } catch (IOException e) {
                 limit.compareAndSet(null, "standard output could not be written: " + e.getMessage());
                 kill(process);
             }
-        });
-        Thread errReader = Thread.ofVirtual().start(() ->
-                copy(process.getErrorStream(), errBuffer, limits.outputBytes(), "standard error", process, limit));
+            return null;
+        }, killProcess);
+        BlockingJob<Void> errReader = BlockingJob.start("ssh-stderr", () -> {
+            copy(process.getErrorStream(), errBuffer, limits.outputBytes(), "standard error", process, limit);
+            return null;
+        }, killProcess);
         try {
             if (!process.waitFor(limits.time().toMillis(), TimeUnit.MILLISECONDS)) {
                 limit.compareAndSet(null, "the time limit of " + describe() + " was reached; ssh was killed");
                 kill(process);
                 process.waitFor();
             }
-            outReader.join();
-            errReader.join();
-            feeder.join();
+            awaitEnd(outReader);
+            awaitEnd(errReader);
+            awaitEnd(feeder);
         } catch (InterruptedException e) {
             kill(process);
+            feeder.cancel();
+            outReader.cancel();
+            errReader.cancel();
             Thread.currentThread().interrupt();
             return new Result(-1, "", "interrupted", outCount[0], "the run was interrupted; ssh was killed");
         }
@@ -112,6 +127,15 @@ public final class SshRunner {
         return limit.get() != null
                 ? new Result(-1, stdout, stderr, outCount[0], limit.get())
                 : new Result(process.exitValue(), stdout, stderr, outCount[0], null);
+    }
+
+    /** Waits for a job to end; what it threw beyond the stream errors its work already catches is logged, not raised. */
+    private static void awaitEnd(BlockingJob<Void> job) throws InterruptedException {
+        try {
+            job.result().get();
+        } catch (ExecutionException e) {
+            LOG.log(Level.WARNING, "a stream of ssh ended with an unexpected error", e.getCause());
+        }
     }
 
     private String describe() {
