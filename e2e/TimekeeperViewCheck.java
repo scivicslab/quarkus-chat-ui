@@ -1,14 +1,23 @@
 import com.microsoft.playwright.*;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 
 /**
  * Browser check of the timekeeper view (TimekeeperViewInTheActorTree_261115_oo01): clicking a conversation's
  * {@code .timekeeper} actor in the tree shows what that timekeeper is watching in the centre pane, and nothing in
- * the right pane. Run against a throwaway instance that already has the state to show: chat-01 with two requests
- * out to chat-02, chat-02 running a turn with an urgent item waiting, chat-03 with a promised report. No real
- * model is involved (the instance talks to a scripted server). Java Playwright, outside the Maven build.
+ * the right pane. Run against a fresh throwaway instance that has only chat-01 and talks to e2e/ScriptedModelServer.java
+ * (no real model), started with {@code -Dchat-ui.timekeeper.child-reply-warn-minutes=1}. The check makes the state it
+ * shows itself: it creates chat-02 and chat-03, sends chat-01 {@code SCENARIO-A} (two requests out to chat-02, one of
+ * them urgent, and a promised report on chat-03), and gives chat-03 one plain turn, which promises a report to the
+ * person. Chat-01's timekeeper then gives its "no reply yet" notice after the limit and, as every turn re-arms the
+ * watch, gives it again: the check waits for both, which takes about three minutes. Java Playwright, outside the
+ * Maven build.
  *
  * <pre>
  * java -cp ~/works/w206-e2e-test/target/w206-e2e-test-1.0.0-shaded.jar e2e/TimekeeperViewCheck.java http://localhost:28977
@@ -19,6 +28,50 @@ import java.util.List;
 public class TimekeeperViewCheck {
 
     static int failures = 0;
+    static final HttpClient HTTP = HttpClient.newHttpClient();
+    static String base;
+
+    /** @return the status and the body of a request to the instance, as "200 body" */
+    static String rest(String method, String path, String json) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(base.replaceAll("/$", "") + path))
+                .timeout(Duration.ofSeconds(30)).header("Content-Type", "application/json");
+        b = json == null ? b.method(method, HttpRequest.BodyPublishers.noBody())
+                : b.method(method, HttpRequest.BodyPublishers.ofString(json));
+        HttpResponse<String> r = HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString());
+        return r.statusCode() + " " + r.body();
+    }
+
+    static int count(String text, String part) {
+        int n = 0;
+        for (int i = text.indexOf(part); i >= 0; i = text.indexOf(part, i + part.length())) n++;
+        return n;
+    }
+
+    /** Waits until chat-01's conversation holds at least {@code n} "no reply yet" notices. */
+    static boolean waitForNotices(int n, long millis) throws Exception {
+        long end = System.currentTimeMillis() + millis;
+        while (System.currentTimeMillis() < end) {
+            if (count(rest("GET", "/api/projects/project1/chats/01/conversation", null), "[no reply yet to request") >= n) return true;
+            Thread.sleep(2_000);
+        }
+        return false;
+    }
+
+    /** Makes the state the check shows, on a fresh instance with only chat-01. */
+    static void setUp() throws Exception {
+        rest("POST", "/api/projects/project1/chats", null);
+        rest("POST", "/api/projects/project1/chats", null);
+        rest("POST", "/api/projects/project1/chats/03/chat", "{\"text\":\"a plain turn for the person\"}");
+        rest("POST", "/api/projects/project1/chats/01/chat", "{\"text\":\"SCENARIO-A two requests out and a promised report\"}");
+        // chat-01 has sent its two requests to chat-02 and finished its own turn. chat-02's status is not asked: its
+        // turn is held open, and a status asks the conversation's provider, which answers when the turn ends.
+        for (int i = 0; i < 120; i++) {
+            String view = rest("GET", "/api/projects/project1/chats/01/timekeeper", null);
+            if (count(view, "project1/chat-02") >= 2
+                    && rest("GET", "/api/projects/project1/chats/01/status", null).contains("\"busy\":false")) return;
+            Thread.sleep(500);
+        }
+    }
 
     static void check(boolean ok, String what) {
         System.out.println((ok ? "PASS  " : "FAIL  ") + what);
@@ -54,7 +107,8 @@ public class TimekeeperViewCheck {
     }
 
     public static void main(String[] args) throws Exception {
-        String base = args.length > 0 ? args[0] : "http://localhost:28977";
+        base = args.length > 0 ? args[0] : "http://localhost:28977";
+        setUp();
         try (Playwright pw = Playwright.create()) {
             Browser browser = pw.chromium().launch();
             Page page = browser.newPage(new Browser.NewPageOptions().setViewportSize(1500, 900));
@@ -76,16 +130,25 @@ public class TimekeeperViewCheck {
             check(text(page, "#tk-urgent-wait").equals("10 minutes") && text(page, "#tk-warn").equals("1 minute"),
                     "the limits: " + text(page, "#tk-urgent-wait") + ", " + text(page, "#tk-warn"));
             String sent = text(page, "#tk-sent");
-            check(sent.contains("project1/chat-01:s1:t") && sent.contains("project1/chat-02") && sent.contains("not sent"),
+            // The session number in the id depends on how many sessions the log held before: any is right.
+            check(java.util.regex.Pattern.compile("project1/chat-01:s\\d+:t\\d+:r\\d+").matcher(sent).find()
+                            && sent.contains("project1/chat-02") && sent.contains("not sent"),
                     "two requests out to chat-02, notice not sent yet: " + sent.replaceAll("\\s+", " "));
+            String view = rest("GET", "/api/projects/project1/chats/01/timekeeper", null);
+            check(view.startsWith("200 ") && view.contains("\"sent\"") && view.contains("project1/chat-02"),
+                    "the REST view answers with the requests out: " + view.substring(0, Math.min(200, view.length())));
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/timekeeper-chat01.png")));
 
-            // The notice goes out after the limit (1 minute plus the next check, every 30 s); the view follows it
-            // without a reload.
-            page.waitForFunction("() => document.getElementById('tk-sent').textContent.includes('sent') "
-                    + "&& !document.getElementById('tk-sent').textContent.includes('not sent')",
-                    null, new Page.WaitForFunctionOptions().setTimeout(150_000));
-            check(true, "once the notice went out, the view says so by itself: " + text(page, "#tk-sent").replaceAll("\\s+", " "));
+            // The notice goes out after the limit (1 minute plus the next check, every 30 s) and is put into the
+            // conversation's queue. Its turn re-arms the watch (ReplyWatchRearmedAtTheEndOfEveryTurn_261116_oo01), so
+            // the view says "sent" only while the notice waits, and the notice goes out again a minute later: what is
+            // true is that notices keep coming, and the view keeps answering meanwhile.
+            check(waitForNotices(1, 150_000), "the first \"no reply yet\" notice went out");
+            String during = rest("GET", "/api/projects/project1/chats/01/timekeeper", null);
+            check(during.startsWith("200 ") && during.contains("\"sent\""), "the REST view answers while notices go out");
+            check(waitForNotices(2, 150_000), "the notice went out again: the turn it started re-armed the watch");
+            check(text(page, "#tk-sent").contains("project1/chat-02"), "the view still shows the requests out: "
+                    + text(page, "#tk-sent").replaceAll("\\s+", " "));
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/timekeeper-chat01-noticed.png")));
 
             // chat-02: running a turn, an urgent item waiting.
