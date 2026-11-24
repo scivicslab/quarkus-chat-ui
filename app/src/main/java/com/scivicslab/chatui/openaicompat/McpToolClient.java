@@ -1,5 +1,7 @@
 package com.scivicslab.chatui.openaicompat;
 
+import com.scivicslab.pojoactor.core.ManagedThreadPool;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -44,10 +46,12 @@ public final class McpToolClient {
     private final String endpoint;
     private final String conversation;
     private final String key;
-    // The client's own work runs on virtual threads: without an executor the JDK HttpClient makes a pool of real
-    // threads of its own.
+    // The JDK HttpClient runs its own short callbacks (TLS tasks, completions) on an executor; without one it
+    // makes a pool of real threads of its own. They run on the real threads of one ManagedThreadPool that all
+    // clients share (a call itself blocks the caller, not these). Threads are made on first use.
+    private static final ManagedThreadPool HTTP_CALLBACKS = new ManagedThreadPool(4);
     private final HttpClient http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
-            .executor(java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor())
+            .executor(HTTP_CALLBACKS)
             .connectTimeout(Duration.ofSeconds(5)).build();
     private int nextId = 1;
 

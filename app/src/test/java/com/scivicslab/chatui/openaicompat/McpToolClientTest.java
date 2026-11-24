@@ -41,4 +41,30 @@ class McpToolClientTest {
         McpToolClient.Result r = new McpToolClient("http://127.0.0.1:9/mcp", "project1/chat-01").callTool("read", "{}");
         assertTrue(r.isError() && r.text().startsWith("error: "), r.text());
     }
+
+    @Test
+    void aCallToARealServerWorksOnTheSharedManagedPoolAndTwoClientsDoNotInterfere() throws Exception {
+        com.sun.net.httpserver.HttpServer server =
+                com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/mcp", exchange -> {
+            byte[] answer = ("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"echo\","
+                    + "\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"}}]}}")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, answer.length);
+            exchange.getResponseBody().write(answer);
+            exchange.close();
+        });
+        server.start();
+        try {
+            String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/mcp";
+            var first = new McpToolClient(url, "project1/chat-01").listTools();
+            var second = new McpToolClient(url, null).listTools();
+            assertEquals("echo", first.get(0).name());
+            assertEquals("echo", second.get(0).name());
+        } finally {
+            server.stop(0);
+        }
+    }
 }

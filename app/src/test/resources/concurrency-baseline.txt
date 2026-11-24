@@ -27,7 +27,6 @@ app/src/main/java/com/scivicslab/chatui/core/remote/WorkspaceNodeDiscovery.java 
 app/src/main/java/com/scivicslab/chatui/core/remote/WorkspaceNodeDiscovery.java volatile 2
 app/src/main/java/com/scivicslab/chatui/logging/LogTap.java synchronized 2
 app/src/main/java/com/scivicslab/chatui/logging/RecentEntriesAccumulator.java synchronized 5
-app/src/main/java/com/scivicslab/chatui/openaicompat/McpToolClient.java executor 1
 app/src/main/java/com/scivicslab/chatui/openaicompat/McpToolClient.java synchronized 1
 app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java concurrent-class 1
 app/src/main/java/com/scivicslab/chatui/openaicompat/OpenAiCompatProvider.java volatile 4
