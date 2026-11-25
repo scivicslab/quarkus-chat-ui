@@ -183,7 +183,7 @@ public class ConversationGraphCheck {
                     "the view menu shows Actor Tree");
             @SuppressWarnings("unchecked")
             List<String> options = (List<String>) page.evaluate("() => Array.from(document.querySelectorAll('#left-view-select option')).map(o => o.textContent.trim())");
-            check(options.equals(List.of("Actor Tree", "Graph")), "the menu offers Actor Tree and Graph: " + options);
+            check(options.equals(List.of("Actor Tree", "Graph", "Extensions")), "the menu offers Actor Tree, Graph and Extensions: " + options);
             chooseView(page, "graph");
             page.waitForSelector("#conv-graph svg .cg-node");
             check(page.isVisible("#conv-graph") && !page.isVisible("#actors-tree")
