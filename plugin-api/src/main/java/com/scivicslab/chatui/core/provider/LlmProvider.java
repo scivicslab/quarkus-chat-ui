@@ -394,6 +394,14 @@ public interface LlmProvider {
      */
     default String detectEnvApiKey() { return null; }
 
-    /** A model entry returned by {@link #getAvailableModels()}. */
-    record ModelEntry(String name, String type, String server) {}
+    /**
+     * A model entry returned by {@link #getAvailableModels()}.
+     *
+     * @param name   the value the conversation's model is set to
+     * @param label  what the model list shows, or {@code null} to show the name; Claude Code's entries say their window
+     */
+    record ModelEntry(String name, String type, String server, String label) {
+        /** An entry shown by its name. */
+        public ModelEntry(String name, String type, String server) { this(name, type, server, null); }
+    }
 }

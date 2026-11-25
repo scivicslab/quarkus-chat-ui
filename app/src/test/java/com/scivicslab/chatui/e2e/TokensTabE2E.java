@@ -60,6 +60,18 @@ public class TokensTabE2E {
         rest("POST", "/api/projects/project1/chats", null);
         String switched3 = rest("POST", "/api/projects/project1/chats/03/provider", "{\"provider\":\"claude\"}");
         check(switched3.contains("\"accepted\""), "chat-03 was switched to Claude Code: " + switched3);
+        // chat-04 is the one whose window is chosen: 200K first, then back to the CLI's default.
+        rest("POST", "/api/projects/project1/chats", null);
+        String switched4 = rest("POST", "/api/projects/project1/chats/04/provider", "{\"provider\":\"claude\"}");
+        check(switched4.contains("\"accepted\""), "chat-04 was switched to Claude Code: " + switched4);
+        String models4 = rest("GET", "/api/projects/project1/chats/04/models", null);
+        check(models4.contains("\"sonnet[200k]\"") && models4.contains("\"label\":\"sonnet (200K)\"")
+                        && models4.contains("\"label\":\"sonnet (1M)\"") && models4.contains("\"label\":\"haiku (200K)\""),
+                "the model list offers each Claude model with its window: " + models4);
+        String chosen = rest("POST", "/api/projects/project1/chats/04/model", "{\"model\":\"sonnet[200k]\"}");
+        check(!chosen.contains("\"error\""), "sonnet[200k] is accepted as chat-04's model: " + chosen);
+        rest("POST", "/api/projects/project1/chats/04/chat", "{\"text\":\"HELLO-ONLY window 200K\"}");
+        waitIdle("04");
         for (String chat : List.of("01", "02")) {
             for (String text : List.of("HELLO-ONLY first turn", "HELLO-ONLY second turn")) {
                 rest("POST", "/api/projects/project1/chats/" + chat + "/chat", "{\"text\":\"" + text + "\"}");
@@ -80,6 +92,13 @@ public class TokensTabE2E {
                 checkSettings(page, "02", null, "claude-sonnet-5-5", "claude");
                 checkSettings(page, "03", "not yet known", null, "claude, before its first turn");
                 checkWindowFromTable(page, "03");
+                checkChosenWindow(page, "04", "200,000", "200,000 tokens", "sonnet (200K)", "200K");
+                // Back to the CLI's default: the process is started again on the next prompt, without the 1M switch.
+                String back = rest("POST", "/api/projects/project1/chats/04/model", "{\"model\":\"sonnet\"}");
+                check(!back.contains("\"error\""), "sonnet is accepted again as chat-04's model: " + back);
+                rest("POST", "/api/projects/project1/chats/04/chat", "{\"text\":\"HELLO-ONLY window 1M\"}");
+                waitIdle("04");
+                checkChosenWindow(page, "04", "1,000,000", "1,000,000 tokens", "sonnet (1M)", "1M again");
             } finally {
                 browser.close();
             }
@@ -241,6 +260,26 @@ public class TokensTabE2E {
         checkNumbers(page, label);
         if (!label.equals("openai-compat")) checkReportedWindow(page, label);
         page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/tokens-" + label + ".png")));
+    }
+
+    /**
+     * The window a conversation chose is the one its process reports: the Tokens tab shows it as measured, Settings shows it
+     * under "Running on", and the model list selects the entry that names it.
+     */
+    private void checkChosenWindow(Page page, String chat, String tabText, String settingsText, String selectedLabel, String label) {
+        page.evaluate("() => window.chatUiSwitchChat('project1', '" + chat + "')");
+        page.selectOption("#right-tab-select", "tokens");
+        page.locator("#tokens-refresh").click();
+        page.locator("#tokens-breakdown table").first().waitFor();
+        java.util.Map<String, String> w = windowCell(page);
+        check(w != null && tabText.equals(w.get("text")) && w.get("cls").contains("tk-measured"),
+                "chat-" + chat + " [" + label + "]: Tokens shows the measured window " + tabText + ": " + w);
+        page.selectOption("#right-tab-select", "settings");
+        page.waitForTimeout(800);
+        check(settingsText.equals(page.locator("#resolved-window").textContent().strip()),
+                "chat-" + chat + " [" + label + "]: Running on shows " + settingsText + ": " + page.locator("#resolved-window").textContent());
+        String selected = (String) page.evaluate("() => { const o = document.querySelector('#model-select option:checked'); return o ? o.textContent : null; }");
+        check(selectedLabel.equals(selected), "chat-" + chat + " [" + label + "]: the model list shows " + selectedLabel + ": " + selected);
     }
 
     /** The class and the text of the Window (max) row's first figure. */

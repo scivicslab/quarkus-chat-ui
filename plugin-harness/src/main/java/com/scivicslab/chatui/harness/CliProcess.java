@@ -73,6 +73,8 @@ public class CliProcess {
         long cancels;
         /** The session id of the latest event that carried one: written by the output reader, read by the provider. */
         String lastSessionId;
+        /** The model value the running process was started with, so a changed model or window can be seen between turns. */
+        String launchedModel;
 
         void route(StreamEvent event) {
             boolean isResult = "result".equals(event.type());
@@ -199,6 +201,7 @@ public class CliProcess {
     }
 
     private boolean startProcess(long cancelsAtStart) throws IOException {
+        String launchedModel = getConfig().model();
         List<String> cmd = buildCommand();
         logger.fine(() -> "Starting CLI: " + String.join(" ", cmd));
 
@@ -209,6 +212,7 @@ public class CliProcess {
             if (s.cancels != cancelsAtStart) return false;
             s.process = started;
             s.stdin = started.getOutputStream();
+            s.launchedModel = launchedModel;
             return true;
         });
         if (!kept) {
@@ -288,6 +292,11 @@ public class CliProcess {
      * blocks alongside the text.
      */
     public int sendPrompt(String prompt, List<String> imageDataUrls, StreamCallback callback) throws IOException {
+        // A model or window chosen since the process started reaches it only by starting it again (--model and the 1M switch
+        // are read at start), so between turns the process is stopped here and started below, resuming the session.
+        boolean changed = state.ask(s -> s.process != null && s.process.isAlive() && !s.suspended && !s.turnActive
+                && ClaudeModelChoice.needsRestart(s.launchedModel, s.config.model()));
+        if (changed) restartBeforeNextPrompt();
         Process running = currentProcess();
         if (running == null || !running.isAlive()) {
             long cancelsAtStart = state.ask(s -> s.cancels);
@@ -691,7 +700,12 @@ public class CliProcess {
         // give up on it first (https://code.claude.com/docs/en/mcp, MCP_TOOL_TIMEOUT).
         if (mcpConfigJson != null) added.put("MCP_TOOL_TIMEOUT", String.valueOf(MCP_TOOL_TIMEOUT_MS));
         CliConfig config = getConfig();
-        return new HarnessLaunch(cmd, List.of("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"), added,
+        // The conversation's window choice, as the process's own environment: 200K sets the CLI's switch for this process
+        // only; any other choice removes it, so a variable this program inherited cannot decide a conversation's window.
+        List<String> removed = new java.util.ArrayList<>(List.of("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"));
+        if (ClaudeModelChoice.parse(config.model()).standardWindow()) added.put(ClaudeModelChoice.DISABLE_1M_ENV, "1");
+        else removed.add(ClaudeModelChoice.DISABLE_1M_ENV);
+        return new HarnessLaunch(cmd, removed, added,
                 config.workingDir() == null ? null : java.nio.file.Path.of(config.workingDir()));
     }
 
@@ -749,7 +763,9 @@ public class CliProcess {
         cmd.add("stream-json");
         cmd.add("--verbose");
 
-        if (config.model() != null) { cmd.add("--model"); cmd.add(config.model()); }
+        // The window choice ("sonnet[200k]") is chat-ui's own and is not a model name: --model gets the model only.
+        String cliModel = ClaudeModelChoice.parse(config.model()).cliModel();
+        if (cliModel != null) { cmd.add("--model"); cmd.add(cliModel); }
         // Left off entirely when unset, so the CLI applies its own default effort rather than
         // this program picking one and freezing it as the CLI's default changes.
         if (config.effort() != null && !config.effort().isBlank()) {

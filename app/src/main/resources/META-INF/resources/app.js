@@ -1420,7 +1420,7 @@
                     models.forEach(function (m) {
                         var opt = document.createElement("option");
                         opt.value = m.name;
-                        opt.textContent = m.name;
+                        opt.textContent = m.label || m.name;
                         modelSelect.appendChild(opt);
                     });
                 }
@@ -1441,6 +1441,8 @@
             .then(function (r) { return r.json(); })
             .then(function (m) {
                 if (forChat !== PROJECT_ID + "/" + CHAT_ID) return;
+                var hint = el("model-window-hint");
+                if (hint) hint.style.display = m && m.provider === "claude" ? "" : "none";
                 if (!m || !m.known) {
                     var unknown = m && m.provider && m.provider !== "claude" ? "not reported by this provider" : "not yet known";
                     ["resolved-model-id", "resolved-window", "resolved-maxout", "resolved-effort"].forEach(function (id) { show(id, unknown); });

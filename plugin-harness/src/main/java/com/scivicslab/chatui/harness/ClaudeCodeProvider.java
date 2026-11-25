@@ -40,13 +40,11 @@ public class ClaudeCodeProvider implements LlmProvider {
 
     public static final String ID = "claude";
 
-    /** Aliases rather than dated ids: the CLI resolves each to the current model of that line. */
-    private static final List<ModelEntry> MODELS = List.of(
-        new ModelEntry("fable", ID, null),
-        new ModelEntry("opus", ID, null),
-        new ModelEntry("sonnet", ID, null),
-        new ModelEntry("haiku", ID, null)
-    );
+    /**
+     * Aliases rather than dated ids (the CLI resolves each to the current model of that line), each with the window the
+     * conversation runs it at: 1M, the CLI's default, or 200K ({@link ClaudeModelChoice}).
+     */
+    private static final List<ModelEntry> MODELS = ClaudeModelChoice.entries(ID);
 
     private final CliProcess cliProcess;
     private final SlashCommandHandler commandHandler;

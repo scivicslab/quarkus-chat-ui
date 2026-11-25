@@ -81,11 +81,13 @@ public class SlashCommandHandler {
 
     private void handleModel(String args, Consumer<ChatEvent> sender) {
         if (args.isEmpty()) {
-            sender.accept(ChatEvent.info("Current model: " + cliProcess.getConfig().model()));
+            sender.accept(ChatEvent.info("Current model: " + cliProcess.getConfig().model() + " - "
+                    + ClaudeModelChoice.parse(cliProcess.getConfig().model()).describe()));
             return;
         }
         cliProcess.setConfig(cliProcess.getConfig().withModel(args));
-        sender.accept(ChatEvent.info("Model changed to: " + args));
+        sender.accept(ChatEvent.info("Model changed to: " + args + " - " + ClaudeModelChoice.parse(args).describe()
+                + ". A changed model or window takes effect on your next prompt."));
     }
 
     /**
@@ -133,7 +135,7 @@ public class SlashCommandHandler {
         sender.accept(ChatEvent.info("""
             Available commands:
               /help, /?          Show this help
-              /model [name]      Show or change the model
+              /model [name]      Show or change the model; add [200k] (sonnet[200k]) for the 200K window, none or [1m] for 1M
               /effort [level]    Show or change the effort level
                                  (low, medium, high, xhigh, max)
               /session [id]      Show or set session ID

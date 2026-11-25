@@ -18,6 +18,17 @@ public class FakeClaude {
         PrintStream out = new PrintStream(System.out, true, StandardCharsets.UTF_8);
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         String session = "fake-claude-session";
+        // What the real CLI does with the window (CLI 2.1.331): the aliases resolve to a 1M window, and
+        // CLAUDE_CODE_DISABLE_1M_CONTEXT=1 in its environment makes it 200K. A --model value that still carries chat-ui's own
+        // "[200k]" suffix is not a model the CLI knows: it ends at once, as the real one does.
+        String modelArg = "sonnet";
+        for (int i = 0; i + 1 < args.length; i++) if (args[i].equals("--model")) modelArg = args[i + 1];
+        if (modelArg.toLowerCase().contains("[200k]")) {
+            System.err.println("There's an issue with the selected model (" + modelArg + ").");
+            System.exit(1);
+        }
+        int window = "1".equals(System.getenv("CLAUDE_CODE_DISABLE_1M_CONTEXT")) ? 200000 : 1000000;
+        String resolved = modelArg.startsWith("claude-") ? modelArg.replaceAll("\\[.*\\]$", "") : "claude-" + modelArg.replaceAll("\\[.*\\]$", "") + "-5-5";
         int turn = 0;
         String line;
         while ((line = in.readLine()) != null) {
@@ -33,8 +44,8 @@ public class FakeClaude {
                     + "\"content\":[{\"type\":\"text\",\"text\":\"" + answer + "\"}],\"usage\":" + usage + "}}");
             out.println("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"" + session
                     + "\",\"result\":\"" + answer + "\",\"total_cost_usd\":0,\"duration_ms\":1,\"usage\":" + usage
-                    + ",\"modelUsage\":{\"claude-sonnet-5-5\":{\"inputTokens\":3,\"outputTokens\":12,\"cacheReadInputTokens\":0,"
-                    + "\"cacheCreationInputTokens\":0,\"contextWindow\":1000000,\"maxOutputTokens\":128000}}}");
+                    + ",\"modelUsage\":{\"" + resolved + "\":{\"inputTokens\":3,\"outputTokens\":12,\"cacheReadInputTokens\":0,"
+                    + "\"cacheCreationInputTokens\":0,\"contextWindow\":" + window + ",\"maxOutputTokens\":128000}}}");
         }
     }
 }
