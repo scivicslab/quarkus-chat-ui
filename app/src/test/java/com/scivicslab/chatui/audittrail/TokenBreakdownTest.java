@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.scivicslab.chatui.audittrail.TokenBreakdown.Line;
 import com.scivicslab.chatui.audittrail.TokenBreakdown.Req;
 import com.scivicslab.chatui.audittrail.TokenBreakdown.Table;
 import com.scivicslab.chatui.core.iolog.IoLogView.LlmRow;
@@ -102,7 +103,7 @@ class TokenBreakdownTest {
         assertEquals(-20, t.rows().get(t.rows().size() - 1).lastRequest(), "an overestimate is a negative residual, shown as it is");
         assertEquals(500L + 800L - 20L, t.rows().get(t.rows().size() - 1).cumulative());
         assertEquals(sum - 20, t.measured().lastRequest());
-        assertEquals(sum, t.rowsSum().lastRequest());
+        assertEquals(sum, t.attributed().lastRequest());
         assertTrue(t.sumsToMeasured());
         assertEquals(100_000 - (sum - 20), t.free().lastRequest());
         assertEquals(IDS.size() + 1, t.rows().size(), "the fixed rows and the residual");
@@ -131,7 +132,7 @@ class TokenBreakdownTest {
         assertNull(t.measured().lastRequest());
         assertNull(t.rows().get(t.rows().size() - 1).lastRequest());
         assertNull(t.rows().get(t.rows().size() - 1).cumulative());
-        assertNotNull(t.rowsSum().lastRequest());
+        assertNotNull(t.attributed().lastRequest());
         assertEquals("not available", t.measured().basis());
         assertTrue(t.sumsToMeasured());
     }
@@ -180,6 +181,77 @@ class TokenBreakdownTest {
         assertNull(TokenBreakdown.rowOfHeadPart("CLI built-in prompt and tools (not measurable here)"));
     }
 
+    /** The lines of the top block and of the breakdown say their formula in their labels; the numbers keep to them. */
+    @Test
+    void theTotalLinesAddUpAsTheirLabelsSay() {
+        Map<String, Integer> rows = TokenBreakdown.splitOpenAiBody(body());
+        int attributed = rows.values().stream().mapToInt(Integer::intValue).sum();
+        List<Req> reqs = List.of(req(1, 1, rows, attributed + 300), req(2, 1, rows, attributed + 500));
+
+        Table t = TokenBreakdown.table("claude", "sonnet", 200_000, "chat-ui.window-limits", reqs, "estimated", List.of());
+        Line residual = t.rows().get(t.rows().size() - 1);
+
+        assertEquals("Window (max)", t.window().label());
+        assertEquals("Used = input the provider reported", t.measured().label());
+        assertEquals("Free = Window - Used", t.free().label());
+        assertEquals("Attributed (A1..F1) = A1 + A2 + ... + F1", t.attributed().label());
+        assertEquals("Not attributed (F2) = Used - Attributed", residual.label());
+        assertEquals("Used = Attributed + Not attributed", t.usedTotal().label());
+        // Window = Used + Free, in the last request.
+        assertEquals(200_000, t.window().lastRequest());
+        assertEquals(attributed + 500, t.measured().lastRequest());
+        assertEquals(200_000 - (attributed + 500), t.free().lastRequest());
+        assertEquals(t.window().lastRequest(), t.measured().lastRequest() + t.free().lastRequest());
+        // Attributed (A1..F1) is the sum of those rows alone, without the residual.
+        int sumOfRows = t.rows().subList(0, t.rows().size() - 1).stream().mapToInt(l -> l.lastRequest()).sum();
+        assertEquals(sumOfRows, t.attributed().lastRequest());
+        assertEquals(500, residual.lastRequest(), "Used - Attributed");
+        // Used = Attributed + Not attributed, and it is what the provider reported, in both columns.
+        assertEquals(t.measured().lastRequest(), t.usedTotal().lastRequest());
+        assertEquals(t.attributed().lastRequest() + residual.lastRequest(), t.usedTotal().lastRequest());
+        assertEquals(t.measured().cumulative(), t.usedTotal().cumulative());
+        assertEquals(t.attributed().cumulative() + residual.cumulative(), t.usedTotal().cumulative());
+        assertTrue(t.sumsToMeasured());
+        // The cumulative column is no fill level: Window and Free are blank there, and the table says why.
+        assertNull(t.window().cumulative());
+        assertNull(t.free().cumulative());
+        assertTrue(t.cumulativeNote().contains("counted again in every request"));
+        assertTrue(t.unit().contains("tokens") && t.unit().contains("3.5"));
+        assertTrue(t.rule().contains("Used = Attributed + Not attributed"));
+    }
+
+    @Test
+    void withoutAMeasuredInputThereIsNoUsedTotalAndNoFree() {
+        Map<String, Integer> rows = TokenBreakdown.splitOpenAiBody(body());
+        Table t = TokenBreakdown.table("codex", "m", 400_000, "chat-ui.window-limits", List.of(req(1, 1, rows, null)), "estimated", List.of());
+
+        assertEquals(400_000, t.window().lastRequest());
+        assertNull(t.measured().lastRequest());
+        assertNull(t.free().lastRequest());
+        assertNull(t.usedTotal().lastRequest(), "Used is unknown, so Attributed + Not attributed is not shown as if it were");
+    }
+
+    /**
+     * Every request of a turn carries the turn's own input (the CLI keeps it in its history), so D1 is not 0 in the turn's
+     * later steps. It was: only the first request of a turn had its input in D1, and a later step showed 0 there.
+     */
+    @Test
+    void aLaterStepOfATurnStillCarriesTheTurnsInput() {
+        List<LlmRow> log = List.of(
+                cliRow(1, 1, "q".repeat(70), "a".repeat(70), 30_000),
+                cliRow(2, 1, "w".repeat(350), "calling", 30_300),              // turn 2, step 1: its input is 350 characters
+                cliRow(2, 2, "tool said: " + "r".repeat(100), "b".repeat(35), 30_900));   // turn 2, step 2
+
+        List<Req> reqs = TokenBreakdown.cliRequests(log, Map.of());
+
+        assertEquals(100, reqs.get(1).rows().get("D1"), "step 1: the input");
+        assertEquals(100, reqs.get(2).rows().get("D1"), "step 2 carries the same input, not 0");
+        assertEquals(0, reqs.get(1).rows().get("D4"));
+        assertTrue(reqs.get(2).rows().get("D4") > 0, "and what the tool handed back");
+        assertTrue(reqs.get(2).rows().get("D2") > 0, "and what step 1 answered");
+        assertEquals(20, reqs.get(2).rows().get("C1"), "turn 1's input is history");
+    }
+
     @Test
     void theSpecialTopicsAreComputedFromTheSameFigures() {
         Map<String, Integer> rows = new LinkedHashMap<>();
@@ -199,7 +271,7 @@ class TokenBreakdownTest {
         t.topics().forEach(x -> topics.put(x.label(), x.value()));
         assertEquals("1000 tokens (7.1%)", topics.get("History in the last request"));
         assertEquals("2000 tokens", topics.get("Growth per turn (the last 5 turns)"));
-        assertEquals("93", topics.get("Turns left before the window is full"), "(200000-14000)/2000");
+        assertEquals("93 turns", topics.get("Turns left before the window is full"), "(200000-14000)/2000");
         assertEquals("1000 tokens (7.1%)", topics.get("Tool results in this turn"));
         assertEquals("38.9%", topics.get("Share of the input served from the cache (all requests)"), "14000/36000");
         assertEquals("1", topics.get("Measured from turn"));

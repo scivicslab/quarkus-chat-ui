@@ -962,3 +962,6 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
 /* The project's name in the Graph opens the project, like a conversation's name opens the conversation. */
 .cg-project .cg-project-name { cursor: pointer; }
 .cg-project .cg-project-name:hover { text-decoration: underline; }
+
+/* Tokens tab: a group's name inside the breakdown table */
+.tokens-subgroup td { color: var(--text-secondary, #9aa0a6); font-style: italic; }

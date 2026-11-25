@@ -102,30 +102,67 @@ public final class TokenBreakdown {
     /** One entry of the table of special topics. */
     public record Topic(String label, String value, String note) {}
 
+    /** The unit and the estimate, said once at the head of the table. */
+    public static final String UNIT = "Unit: tokens. Rows marked estimated are characters / 3.5 (/ 1.5 for mostly Japanese text);"
+            + " the input and output reported are the provider's own counts.";
+
+    /** The rule that makes the rows a partition of the input, said under the table's title. */
+    public static final String RULE = "Every part of a request's input is counted in exactly one row, so"
+            + " Used = Attributed + Not attributed, and Not attributed = Used - Attributed.";
+
+    /** Why the cumulative column has no Window and no Free. */
+    public static final String CUMULATIVE_NOTE = "Window and Free are blank in the cumulative column: it adds up what each"
+            + " request carried, so the history is counted again in every request. It is not a fill level.";
+
+    /** The labels of the lines that add up; each says its formula, and the tests keep the numbers true to them. */
+    public static final String WINDOW_LABEL = "Window (max)";
+    public static final String USED_LABEL = "Used = input the provider reported";
+    public static final String FREE_LABEL = "Free = Window - Used";
+    public static final String ATTRIBUTED_LABEL = "Attributed (A1..F1) = A1 + A2 + ... + F1";
+    public static final String NOT_ATTRIBUTED_LABEL = "Not attributed (F2) = Used - Attributed";
+    public static final String USED_TOTAL_LABEL = "Used = Attributed + Not attributed";
+
     /**
-     * The whole answer.
+     * The whole answer. Top block: {@code window}, {@code measured} (Used) and {@code free}, with Window = Used + Free.
+     * Then Used broken down: {@code rows} (A1 to F1, and the residual last), {@code attributed} (A1..F1 added up) and
+     * {@code usedTotal} (Attributed + Not attributed), which equals {@code measured}.
      *
-     * @param rows       {@link #ROWS} and the residual row last
-     * @param rowsSum    the sum of the input rows, without the residual
-     * @param measured   the input the provider reported
-     * @param free       the window left in the last request
-     * @param output     {@link #OUTPUT_ROWS}
-     * @param cache      the cache figures of the measured input, each its own line
-     * @param topics     the special topics
-     * @param notes      what a reader needs to know about how these numbers were got
+     * @param unit              what the numbers are in, and how an estimated row is got
+     * @param rule              why the rows add up
+     * @param cumulativeNote    why the cumulative column has no Window and no Free
+     * @param window            the model's window ({@code lastRequest}); the cumulative column is blank
+     * @param measured          Used: the input the provider reported
+     * @param free              Window - Used of the last request; the cumulative column is blank
+     * @param rows              {@link #ROWS} and the residual row ({@link #RESIDUAL}) last
+     * @param attributed        the sum of A1 to F1
+     * @param usedTotal         Attributed + Not attributed, which equals Used
+     * @param output            {@link #OUTPUT_ROWS}
+     * @param cache             the cache figures of the measured input, each its own line
+     * @param topics            the special topics
+     * @param notes             what a reader needs to know about how these numbers were got
+     * @param requests          how many requests the session holds
+     * @param cumulativeRequests how many of them have both a split and a measured input, and so are added up
      */
     public record Table(String provider, String model, Integer windowLimit, String windowLimitSource, int requests,
-                        int cumulativeRequests, Integer lastTurn, List<Line> rows, Line rowsSum, Line measured, Line free,
+                        int cumulativeRequests, Integer lastTurn, String unit, String rule, String cumulativeNote,
+                        Line window, Line measured, Line free, List<Line> rows, Line attributed, Line usedTotal,
                         List<Line> output, List<Line> cache, List<Topic> topics, List<String> notes) {
 
-        /** @return whether rows plus residual equal the measured input in both columns (true when nothing was measured) */
+        /**
+         * @return whether the lines add up as their labels say, in both columns: Attributed + Not attributed = Used
+         *         (and the total line equals the reported input), and Window = Used + Free in the last request
+         */
         public boolean sumsToMeasured() {
             Line residual = rows.get(rows.size() - 1);
-            boolean last = measured.lastRequest() == null || rowsSum.lastRequest() == null || residual.lastRequest() == null
-                    || rowsSum.lastRequest() + residual.lastRequest() == measured.lastRequest().intValue();
-            boolean cumulative = measured.cumulative() == null || rowsSum.cumulative() == null || residual.cumulative() == null
-                    || rowsSum.cumulative() + residual.cumulative() == measured.cumulative().longValue();
-            return last && cumulative;
+            boolean last = measured.lastRequest() == null || attributed.lastRequest() == null || residual.lastRequest() == null
+                    || (attributed.lastRequest() + residual.lastRequest() == measured.lastRequest().intValue()
+                        && usedTotal.lastRequest() != null && usedTotal.lastRequest().equals(measured.lastRequest()));
+            boolean cumulative = measured.cumulative() == null || attributed.cumulative() == null || residual.cumulative() == null
+                    || (attributed.cumulative() + residual.cumulative() == measured.cumulative().longValue()
+                        && usedTotal.cumulative() != null && usedTotal.cumulative().equals(measured.cumulative()));
+            boolean windowSums = window.lastRequest() == null || measured.lastRequest() == null || free.lastRequest() == null
+                    || window.lastRequest() == measured.lastRequest() + free.lastRequest();
+            return last && cumulative && windowSums;
         }
     }
 
@@ -263,24 +300,30 @@ public final class TokenBreakdown {
     /**
      * What chat-ui sends a CLI harness is one prompt per request, and what the CLI holds besides (its own prompt and
      * tools, its history) is not visible: the rows that can be got are the head-block parts, the turns' text in the
-     * log, and the prompt of this request. The rest of the measured input is the residual.
+     * log, and the prompts of this turn. The rest of the measured input is the residual. Every request of a turn carries the
+     * turn's own input (the CLI keeps it in its history), so D1 is the turn's input whichever step the request is.
      *
-     * @param head           the head-block parts' tokens by row id ({@link #A2}, {@link #A4}, {@link #B1}, {@link #B2})
-     * @param earlierAsked   the prompts of the turns before this one
-     * @param earlierAnswered their answers
-     * @param stepsAnswered  the answers of this turn's earlier steps
-     * @param stepsCalls     the tool calls of this turn's earlier steps
-     * @param prompt         this request's prompt
-     * @param firstStep      whether this is the turn's first request (the prompt is the turn's input then)
+     * @param head            the head-block parts' tokens by row id ({@link #A2}, {@link #A4}, {@link #B1}, {@link #B2})
+     * @param earlierAsked    the inputs of the turns before this one
+     * @param earlierAnswered what those turns answered, called and were handed back
+     * @param turnInput       this turn's input: the prompt of its first request
+     * @param stepsAnswered   the answers of this turn's earlier steps
+     * @param stepsCalls      the tool calls of this turn's earlier steps
+     * @param stepsPrompts    the prompts this turn's earlier steps were sent after the first (what the tools returned)
+     * @param prompt          this request's prompt
+     * @param firstStep       whether this is the turn's first request ({@code prompt} is {@code turnInput} then)
      */
     public static Map<String, Integer> splitCliRequest(Map<String, Integer> head, String earlierAsked, String earlierAnswered,
-                                                       String stepsAnswered, String stepsCalls, String prompt, boolean firstStep) {
+                                                       String turnInput, String stepsAnswered, String stepsCalls,
+                                                       String stepsPrompts, String prompt, boolean firstStep) {
         Parts parts = new Parts();
         parts.add(C1, earlierAsked);
         parts.add(C2, earlierAnswered);
+        parts.add(D1, turnInput);
         parts.add(D2, stepsAnswered);
         parts.add(D3, stepsCalls);
-        parts.add(firstStep ? D1 : D4, prompt);
+        parts.add(D4, stepsPrompts);
+        if (!firstStep) parts.add(D4, prompt);
         Map<String, Integer> rows = parts.tokens(parts.attributedChars);
         for (String id : List.of(A2, A4, B1, B2)) rows.put(id, head.getOrDefault(id, 0));
         return rows;
@@ -299,25 +342,27 @@ public final class TokenBreakdown {
     public static List<Req> cliRequests(List<LlmRow> rows, Map<String, Integer> head) {
         List<Req> out = new ArrayList<>();
         StringBuilder askedBefore = new StringBuilder(), answeredBefore = new StringBuilder();
-        StringBuilder stepsAnswered = new StringBuilder(), stepsCalls = new StringBuilder();
+        // This turn so far: its input, and what its earlier steps answered, called and were handed back.
+        String turnInput = "";
+        StringBuilder stepsAnswered = new StringBuilder(), stepsCalls = new StringBuilder(), stepsPrompts = new StringBuilder();
         int turn = Integer.MIN_VALUE;
-        StringBuilder turnAsked = new StringBuilder(), turnAnswered = new StringBuilder();
         for (LlmRow r : rows) {
             boolean first = r.turn() != turn;
             if (first) {
-                askedBefore.append(turnAsked);
-                answeredBefore.append(turnAnswered);
-                turnAsked.setLength(0);
-                turnAnswered.setLength(0);
+                // The turn before is history now: its input is what was asked, the rest what was answered.
+                askedBefore.append(turnInput);
+                answeredBefore.append(stepsAnswered).append(stepsCalls).append(stepsPrompts);
+                turnInput = "";
                 stepsAnswered.setLength(0);
                 stepsCalls.setLength(0);
+                stepsPrompts.setLength(0);
                 turn = r.turn();
             }
             String prompt = promptOf(r.request());
-            out.add(req(r, splitCliRequest(head, askedBefore.toString(), answeredBefore.toString(),
-                    stepsAnswered.toString(), stepsCalls.toString(), prompt, first)));
-            turnAsked.append(prompt);
-            turnAnswered.append(r.response());
+            if (first) turnInput = prompt;
+            out.add(req(r, splitCliRequest(head, askedBefore.toString(), answeredBefore.toString(), turnInput,
+                    stepsAnswered.toString(), stepsCalls.toString(), stepsPrompts.toString(), prompt, first)));
+            if (!first) stepsPrompts.append(prompt);
             stepsAnswered.append(r.response());
             stepsCalls.append(r.toolCalls());
         }
@@ -386,16 +431,22 @@ public final class TokenBreakdown {
             residualCum = m - sumCum;
         }
         Integer residualLast = hasRows && measuredLast != null ? measuredLast - sumLast : null;
-        lines.add(new Line(RESIDUAL, "Other", "Not attributed (residual)", RESIDUAL_DEFINITION, residualLast, residualCum,
+        lines.add(new Line(RESIDUAL, "Other", NOT_ATTRIBUTED_LABEL, RESIDUAL_DEFINITION, residualLast, residualCum,
                 anyMeasured ? "calculated" : "not available"));
 
-        Line rowsSum = new Line("SUM", "Total", "Sum of the rows above", "", hasRows ? sumLast : null,
-                counted.isEmpty() ? null : sumCum, hasRows ? "calculated" : "not available");
-        Line measured = new Line("MEASURED", "Total", "Input the provider reported", "The whole input of the request.",
+        Line attributed = new Line("ATTRIBUTED", "Used, broken down", ATTRIBUTED_LABEL, "The rows A1 to F1 added up.",
+                hasRows ? sumLast : null, counted.isEmpty() ? null : sumCum, hasRows ? "calculated" : "not available");
+        Line measured = new Line("MEASURED", "Window", USED_LABEL, "The whole input of the request.",
                 measuredLast, measuredCum, anyMeasured ? "measured" : "not available");
         Integer freeLast = windowLimit == null || measuredLast == null ? null : windowLimit - measuredLast;
-        Line free = new Line("FREE", "Total", "Window left", "The window's limit minus the input of the last request.",
+        Line window = new Line("WINDOW", "Window", WINDOW_LABEL, "The most one request can take: the model's context window.",
+                windowLimit, null, windowLimit == null ? "not available" : windowLimitSource);
+        Line free = new Line("FREE", "Window", FREE_LABEL, "The window's limit minus the input of the last request.",
                 freeLast, null, freeLast == null ? "not available" : "calculated");
+        Line usedTotal = new Line("USED_TOTAL", "Used, broken down", USED_TOTAL_LABEL,
+                "The attributed rows and the part nothing takes, added up: what the provider reported.",
+                hasRows && residualLast != null ? sumLast + residualLast : null,
+                residualCum == null ? null : sumCum + residualCum, anyMeasured && hasRows ? "calculated" : "not available");
 
         List<Line> output = new ArrayList<>();
         Integer outLast = last == null ? null : last.output();
@@ -430,10 +481,11 @@ public final class TokenBreakdown {
                 anyMeasured ? cacheCreationCum : null, anyMeasured ? "measured" : "not available"));
 
         Table partial = new Table(provider, model, windowLimit, windowLimitSource, reqs.size(), counted.size(),
-                last == null ? null : last.turn(), lines, rowsSum, measured, free, output, cache, List.of(), List.copyOf(notes));
+                last == null ? null : last.turn(), UNIT, RULE, CUMULATIVE_NOTE, window, measured, free, lines, attributed,
+                usedTotal, output, cache, List.of(), List.copyOf(notes));
         return new Table(provider, model, windowLimit, windowLimitSource, reqs.size(), counted.size(),
-                last == null ? null : last.turn(), lines, rowsSum, measured, free, output, cache, topics(partial, reqs, cacheReadCum),
-                List.copyOf(notes));
+                last == null ? null : last.turn(), UNIT, RULE, CUMULATIVE_NOTE, window, measured, free, lines, attributed,
+                usedTotal, output, cache, topics(partial, reqs, cacheReadCum), List.copyOf(notes));
     }
 
     // ── Special topics ───────────────────────────────────────────────────────────────────────────────────────────
@@ -451,7 +503,7 @@ public final class TokenBreakdown {
     /** The table of special topics, from the same figures ({@code tasks/tokens-tab-design.md}, section 4). */
     static List<Topic> topics(Table t, List<Req> reqs, long cacheReadCum) {
         List<Topic> out = new ArrayList<>();
-        Integer used = t.measured().lastRequest() != null ? t.measured().lastRequest() : t.rowsSum().lastRequest();
+        Integer used = t.measured().lastRequest() != null ? t.measured().lastRequest() : t.attributed().lastRequest();
         Integer history = sum(value(t, C1), value(t, C2));
         out.add(new Topic("History in the last request", history == null ? "n/a" : history + " tokens (" + percent(history, used) + ")",
                 "Earlier turns' questions and answers; is the history bloating?"));
@@ -473,7 +525,7 @@ public final class TokenBreakdown {
                 "How much the first request grows from one turn to the next."));
         Integer left = t.free().lastRequest();
         out.add(new Topic("Turns left before the window is full",
-                left == null || growth == null || growth <= 0 ? "n/a" : String.valueOf(left / growth),
+                left == null || growth == null || growth <= 0 ? "n/a" : (left / growth) + " turns",
                 "The window left divided by the growth per turn."));
         Integer results = value(t, D4);
         out.add(new Topic("Tool results in this turn", results == null ? "n/a" : results + " tokens (" + percent(results, used) + ")",
@@ -487,7 +539,7 @@ public final class TokenBreakdown {
                 measuredCum == null || measuredCum <= 0 ? "n/a"
                         : String.format(java.util.Locale.ROOT, "%.1f%%", 100.0 * cacheReadCum / measuredCum),
                 "Cache read divided by the input reported; a low share means the head keeps changing."));
-        Integer rowsLast = t.rowsSum().lastRequest(), measuredLast = t.measured().lastRequest();
+        Integer rowsLast = t.attributed().lastRequest(), measuredLast = t.measured().lastRequest();
         out.add(new Topic("Rows compared with the measured input (last request)",
                 rowsLast == null || measuredLast == null || measuredLast <= 0 ? "n/a" : percent(rowsLast, measuredLast),
                 "100% means the estimates are exact; the estimate divides characters by a fixed factor, the provider counts its own tokens."));

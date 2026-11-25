@@ -78,6 +78,22 @@ public class TokensTabE2E {
         }
     }
 
+    /** The text of column {@code col} (1 = last request, 2 = all requests) in the breakdown row whose label starts with {@code label}. */
+    private static String cellText(Page page, String label, int col) {
+        return (String) page.evaluate("([label, col]) => { const row = Array.from(document.querySelectorAll('#tokens-breakdown tr'))"
+                + ".find(r => r.children[0] && r.children[0].textContent.trim().startsWith(label)); return row ? row.children[col].textContent.trim() : null; }",
+                java.util.List.of(label, col));
+    }
+
+    private static long cell(Page page, String label, int col) {
+        String text = cellText(page, label, col);
+        try {
+            return text == null ? -1 : Long.parseLong(text);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
     private void checkTab(Page page, String chat, String expectedPart, String label, int minFirstRequest) {
         page.evaluate("() => window.chatUiSwitchChat('project1', '" + chat + "')");
         page.selectOption("#right-tab-select", "tokens");
@@ -88,10 +104,40 @@ public class TokensTabE2E {
         page.locator("#tokens-turns table").first().waitFor();
         String parts = page.locator("#tokens-parts").textContent();
         check(parts.contains(expectedPart), label + ": the parts table lists '" + expectedPart + "'");
+        page.locator("#tokens-breakdown table").first().waitFor();
         String breakdown = page.locator("#tokens-breakdown").textContent();
-        check(breakdown.contains("A1  System prompt") && breakdown.contains("F1  Framing")
-                        && breakdown.contains("Not attributed (residual)") && breakdown.contains("Input the provider reported"),
-                label + ": the fixed rows and the residual are shown: " + breakdown.substring(0, Math.min(120, breakdown.length())));
+        check(page.locator("#tab-tokens h3").first().textContent().contains("unit: tokens")
+                        && breakdown.contains("characters / 3.5"),
+                label + ": the unit is said at the table's head");
+        check(breakdown.contains("Every part of a request's input is counted in exactly one row"),
+                label + ": the rule that makes the rows a partition is said under the title");
+        int window = breakdown.indexOf("Window (max)"), used = breakdown.indexOf("Used = input the provider reported"),
+                free = breakdown.indexOf("Free = Window - Used"), firstRow = breakdown.indexOf("A1  System prompt");
+        check(window >= 0 && window < used && used < free && free < firstRow,
+                label + ": Window, Used, Free come first, in that order, before the rows");
+        int attributed = breakdown.indexOf("Attributed (A1..F1) = A1 + A2 + ... + F1"),
+                notAttributed = breakdown.indexOf("Not attributed (F2) = Used - Attributed"),
+                total = breakdown.indexOf("Used = Attributed + Not attributed", notAttributed);
+        check(firstRow < attributed && attributed < notAttributed && notAttributed < total,
+                label + ": the subtotal, the residual and the total follow the rows, with their formulas");
+        check(breakdown.contains("F1  Framing") && !breakdown.contains("Sum of the rows above"),
+                label + ": the rows are fixed and the ambiguous sum line is gone");
+        check(page.locator("#tokens-breakdown th").nth(2).textContent().matches(".*\\d+ measured of \\d+ sent.*"),
+                label + ": the cumulative header says how many requests were measured of how many sent: "
+                        + page.locator("#tokens-breakdown th").nth(2).textContent());
+        // The figures keep to the labels: Attributed + Not attributed = Used, in the last request and in all requests.
+        for (int col = 1; col <= 2; col++) {
+            long usedValue = cell(page, "Used = input the provider reported", col);
+            long attributedValue = cell(page, "Attributed (A1..F1)", col);
+            long notAttributedValue = cell(page, "Not attributed (F2)", col);
+            long totalValue = cell(page, "Used = Attributed + Not attributed", col);
+            check(usedValue >= 0 && attributedValue + notAttributedValue == usedValue && totalValue == usedValue,
+                    label + ": column " + col + ": " + attributedValue + " + " + notAttributedValue + " = " + usedValue + " (total " + totalValue + ")");
+        }
+        check(cellText(page, "Window (max)", 2).isBlank() && cellText(page, "Free = Window - Used", 2).isBlank(),
+                label + ": Window and Free are blank in the cumulative column");
+        check(breakdown.contains("not a fill level") || breakdown.contains("It is not a fill level"),
+                label + ": the table says why the cumulative column has no Window and no Free");
         check(page.locator("#tokens-topics").textContent().contains("History in the last request"),
                 label + ": the special topics table is shown");
         check(parts.contains("Estimated total of the parts above"), label + ": the estimate is shown");

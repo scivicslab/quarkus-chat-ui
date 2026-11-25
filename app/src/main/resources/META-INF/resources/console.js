@@ -3168,13 +3168,13 @@
         box.appendChild(tokensTable(["Part", "Chars", "Estimated tokens", "Who can cut it"], rows, 1));
         // The estimate beside what the provider reported for the first request, so the estimate's error is visible.
         var measured = hb.measuredFirstRequestTotal;
-        var summary = [{ values: ["Estimated total of the parts above", String(hb.estimatedTotal)] },
-                       { values: ["Measured first request", measured === null || measured === undefined ? "not recorded" : String(measured)] }];
+        var summary = [{ values: ["Estimated total of the parts above (tokens)", String(hb.estimatedTotal)] },
+                       { values: ["Measured first request (tokens)", measured === null || measured === undefined ? "not recorded" : String(measured)] }];
         // Compared only when the first measured request is the conversation's first turn; otherwise it holds the earlier
         // history, and the server says so in comparisonNote instead.
         if (measured !== null && measured !== undefined && !hb.comparisonNote) {
             var diff = measured - hb.estimatedTotal;
-            summary.push({ total: true, values: ["Measured minus estimated (parts not counted here, and estimation error)",
+            summary.push({ total: true, values: ["Measured minus estimated (tokens; parts not counted here, and estimation error)",
                                                  (diff > 0 ? "+" : "") + diff] });
         }
         var gap = document.createElement("div");
@@ -3195,8 +3195,11 @@
     }
 
     /**
-     * The table of what fills the window: fixed rows (a row with nothing in it shows 0), the residual row, and the
-     * special topics in a table of their own. Everything is computed by GET /api/chats/{id}/tokens-breakdown.
+     * The table of what fills the window, in the order a reader asks: the most one request can take (Window), how much
+     * is used (Used), how much is left (Free); then what Used is made of, each part of a request in exactly one fixed
+     * row (zero rows are shown), the subtotal of those rows (Attributed), what no row takes (Not attributed), and the
+     * total, which is the input the provider reported. The special topics are a table of their own. Everything is
+     * computed by GET /api/chats/{id}/tokens-breakdown; the unit is tokens.
      */
     function tokensShowBreakdown(b) {
         var box = document.getElementById("tokens-breakdown");
@@ -3204,32 +3207,65 @@
         if (!box || !topicsBox) return;
         box.textContent = "";
         topicsBox.textContent = "";
+        function line(l, labelPrefix) {
+            return { values: [(labelPrefix || "") + l.label, tokensNum(l.lastRequest), tokensNum(l.cumulative), l.basis], title: l.definition };
+        }
+        function heading(text) { return { total: true, values: [text, "", "", ""] }; }
         var rows = [];
-        rows.push({ values: ["Window of the model (" + b.windowLimitSource + ")", tokensNum(b.windowLimit), "", ""] });
-        rows.push({ values: [b.measured.label, tokensNum(b.measured.lastRequest), tokensNum(b.measured.cumulative), b.measured.basis] });
-        rows.push({ values: [b.free.label, tokensNum(b.free.lastRequest), "", b.free.basis] });
+        rows.push(heading("Window = Used + Free"));
+        var window_ = line(b.window);
+        window_.values[3] = b.windowLimit ? b.windowLimitSource : "not set (add the model to chat-ui.window-limits)";
+        rows.push(window_);
+        rows.push(line(b.measured));
+        rows.push(line(b.free));
+        rows.push(heading("Used, broken down"));
         var group = null;
         b.rows.forEach(function (r) {
+            if (r.id === "F2") return;
             if (r.group !== group) {
                 group = r.group;
-                rows.push({ total: true, values: [group, "", "", ""] });
+                rows.push({ values: [group, "", "", ""], sub: true });
             }
-            var last = r.id === "F2" ? r.lastRequest : (r.lastRequest === null || r.lastRequest === undefined ? 0 : r.lastRequest);
-            var cum = r.id === "F2" ? r.cumulative : (r.cumulative === null || r.cumulative === undefined ? 0 : r.cumulative);
-            if (r.basis === "not available" && r.id !== "F2") { last = null; cum = null; }
+            var last = r.lastRequest === null || r.lastRequest === undefined ? 0 : r.lastRequest;
+            var cum = r.cumulative === null || r.cumulative === undefined ? 0 : r.cumulative;
+            if (r.basis === "not available") { last = null; cum = null; }
             rows.push({ values: [r.id + "  " + r.label, tokensNum(last), tokensNum(cum), r.basis], title: r.definition });
         });
-        rows.push({ total: true, values: [b.rowsSum.label, tokensNum(b.rowsSum.lastRequest), tokensNum(b.rowsSum.cumulative), ""] });
-        rows.push({ total: true, values: ["Output", "", "", ""] });
-        b.output.forEach(function (r) { rows.push({ values: [r.id + "  " + r.label, tokensNum(r.lastRequest), tokensNum(r.cumulative), r.basis] }); });
-        rows.push({ total: true, values: ["Cache", "", "", ""] });
-        b.cache.forEach(function (r) { rows.push({ values: [r.label, tokensNum(r.lastRequest), tokensNum(r.cumulative), r.basis] }); });
-        var head = ["Row", "Last request (turn " + (b.lastTurn === null || b.lastTurn === undefined ? "-" : b.lastTurn) + ")",
-                    "All requests (" + b.cumulativeRequests + " of " + b.requests + ")", "Basis"];
+        rows.push(Object.assign(line(b.attributed), { total: true }));
+        var residual = b.rows[b.rows.length - 1];
+        rows.push(line(residual));
+        rows.push(Object.assign(line(b.usedTotal), { total: true }));
+        rows.push(heading("Output (tokens)"));
+        b.output.forEach(function (r) { rows.push(line(r, r.id + "  ")); });
+        rows.push(heading("Cache (parts of the input reported)"));
+        b.cache.forEach(function (r) { rows.push(line(r)); });
+        var turnText = b.lastTurn === null || b.lastTurn === undefined ? "-" : b.lastTurn;
+        var head = ["Row (tokens)", "Last request (turn " + turnText + ")",
+                    "All requests (" + b.cumulativeRequests + " measured of " + b.requests + " sent)", "Basis"];
+        var unit = document.createElement("div");
+        unit.className = "io-empty";
+        unit.textContent = b.unit;
+        var rule = document.createElement("div");
+        rule.className = "io-empty";
+        rule.textContent = b.rule;
+        box.appendChild(unit);
+        box.appendChild(rule);
         var table = tokensTable(head, rows, 1);
         var trs = table.querySelectorAll("tr");
-        rows.forEach(function (r, i) { if (r.title && trs[i + 1]) trs[i + 1].title = r.title; });
+        rows.forEach(function (r, i) {
+            var tr = trs[i + 1];
+            if (!tr) return;
+            if (r.title) tr.title = r.title;
+            if (r.sub) tr.className = "tokens-subgroup";
+        });
+        var cumulativeHeader = table.querySelectorAll("th")[2];
+        if (cumulativeHeader) cumulativeHeader.title = b.cumulativeNote;
         box.appendChild(table);
+        var cumulativeNote = document.createElement("div");
+        cumulativeNote.className = "io-empty";
+        cumulativeNote.textContent = b.cumulativeNote + " \"Measured\" counts the requests with a reported input and a split; the others"
+            + " have none, so they are left out of every figure of that column.";
+        box.appendChild(cumulativeNote);
         (b.notes || []).forEach(function (n) {
             var d = document.createElement("div");
             d.className = "io-empty";
@@ -3237,7 +3273,7 @@
             box.appendChild(d);
         });
         var topicRows = (b.topics || []).map(function (t) { return { values: [t.label, t.value, t.note] }; });
-        topicsBox.appendChild(tokensTable(["Topic", "Value", "Why it is shown"], topicRows, 9));
+        topicsBox.appendChild(tokensTable(["Topic", "Value (with its unit)", "Why it is shown"], topicRows, 9));
     }
 
     function tokensShowTurns(t) {
@@ -3251,7 +3287,7 @@
             return { values: [String(u.turn), String(u.firstRequestTotal),
                               g === null || g === undefined ? "-" : (g > 0 ? "+" : "") + g] };
         });
-        box.appendChild(tokensTable(["Turn", "First request (tokens)", "Growth from the previous turn"], rows, 1));
+        box.appendChild(tokensTable(["Turn", "First request (tokens)", "Growth from the previous turn (tokens)"], rows, 1));
     }
 
     function tokensLoad() {
