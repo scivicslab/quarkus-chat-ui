@@ -102,11 +102,14 @@ public class TokensTabE2E {
             page.selectOption("#theme-select", theme);
             page.waitForTimeout(150);
             Object result = page.evaluate("() => {"
-                    + " const css = (el) => { const c = getComputedStyle(el); return { color: c.color, style: c.fontStyle }; };"
+                    + " const px = (c) => { const g = document.createElement('canvas').getContext('2d', { willReadFrequently: true });"
+                    + "   g.fillStyle = '#000'; g.fillRect(0, 0, 1, 1); g.fillStyle = c; g.fillRect(0, 0, 1, 1); const d = g.getImageData(0, 0, 1, 1).data;"
+                    + "   return 'rgb(' + d[0] + ', ' + d[1] + ', ' + d[2] + ')'; };"
+                    + " const css = (el) => { const c = getComputedStyle(el); return { color: px(c.color), style: c.fontStyle }; };"
                     + " const cell = (label, cls) => { const row = Array.from(document.querySelectorAll('#tokens-breakdown tr'))"
                     + "   .find(r => r.children[0] && r.children[0].textContent.trim().startsWith(label)); return row ? row.children[1] : null; };"
                     + " const bgOf = (el) => { for (; el; el = el.parentElement) { const b = getComputedStyle(el).backgroundColor;"
-                    + "   if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b; } return 'rgb(255, 255, 255)'; };"
+                    + "   if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return px(b); } return 'rgb(255, 255, 255)'; };"
                     + " const sw = (cls) => document.querySelector('#tokens-breakdown .tk-howto .' + cls);"
                     + " const m = cell('Used = input the provider reported'), e = cell('A1  System prompt'), k = cell('Attributed (A1..F1)');"
                     + " return { measured: [css(sw('tk-measured')), css(m)], estimated: [css(sw('tk-estimated')), css(e)],"
@@ -127,7 +130,8 @@ public class TokensTabE2E {
                     label + " [" + theme + "]: measured, estimated and calculated differ: " + m.get(1).get("color") + " / "
                             + e.get(1).get("color") + " / " + k.get(1).get("color") + " (calculated is italic)");
             double worst = Math.min(contrast(m.get(1).get("color"), bg), Math.min(contrast(e.get(1).get("color"), bg), contrast(k.get(1).get("color"), bg)));
-            check(worst >= 3.0, label + " [" + theme + "]: every style reads against the background (contrast " + String.format("%.1f", worst) + ")");
+            check(worst >= 3.0, label + " [" + theme + "]: every style reads against the background (contrast " + String.format("%.1f", worst)
+                    + "; measured " + m.get(1).get("color") + ", estimated " + e.get(1).get("color") + ", calculated " + k.get(1).get("color") + " on " + bg + ")");
         }
         page.selectOption("#theme-select", original);
     }
