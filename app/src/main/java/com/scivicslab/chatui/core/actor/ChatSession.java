@@ -10,6 +10,7 @@ import com.scivicslab.chatui.agent.RepeatedCallDetector;
 import com.scivicslab.chatui.agent.TextToolCallParser;
 import com.scivicslab.chatui.agent.ToolCall;
 import com.scivicslab.chatui.agent.ToolSet;
+import com.scivicslab.chatui.kernel.ParallelCalls;
 import com.scivicslab.chatui.core.iolog.IoLogStore;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.plugin.ConversationTool;
@@ -2662,13 +2663,20 @@ public class ChatSession extends Interpreter {
         }
         StringBuilder observations = new StringBuilder();
         List<LlmProvider.ToolCallResult> results = new java.util.ArrayList<>();
+        // The calls of a response that are all read-only run at the same time; what they returned is here, by call index.
+        List<String> together = runReadOnlyCallsTogether(summarizePages);
+        int callIndex = -1;
         for (ToolCall tc : pendingCalls) {
+            callIndex++;
             String fullObservation;
             // Recorded here unless chat-ui's MCP server ran it, which records it itself: once either way.
             boolean recordHere = true;
             try {
                 String refusal = byDefinition() ? whyNotRunnable(tc) : null;
-                if (refusal != null) {
+                if (together != null) {
+                    // Already run, in the same process and not through the MCP server, so it is recorded here, in call order.
+                    fullObservation = together.get(callIndex);
+                } else if (refusal != null) {
                     fullObservation = refusal;
                 } else if (byDefinition() && !provider.parksToolCalls() && !drivesConversation(tc.name())
                         && !(summarizePages && returnsPages(tc.name()))) {
@@ -2715,6 +2723,61 @@ public class ChatSession extends Interpreter {
         // (TimekeeperPausesATurnForAnUrgentRequest_261107_oo01).
         turnTranscript.append(observations);
         return new ActionResult(true, "observed");
+    }
+
+    /**
+     * Runs the calls of this response at the same time when every one of them is to a read-only tool
+     * ({@link ToolCatalog#READ_ONLY_TOOLS}); one call to any other tool, or a single call, leaves the response to run in
+     * order as it always did. Each call is a job of an actor of its own ({@link ParallelCalls}): at most eight of the
+     * response, and eight in the whole process, run at once. The calls run in this process through the conversation's
+     * tool runner, not through chat-ui's MCP server, so that this conversation records them itself, one after the other in
+     * call order, and nothing here is shared between the jobs: the counters and the repeated-call guard are updated by
+     * the loop that follows, in call order.
+     *
+     * @param summarizePages whether this response is run with page summarising, which a read-only web search is not
+     * @return what each call returned (or why it could not run), by call index; {@code null} when the response runs in order
+     */
+    private List<String> runReadOnlyCallsTogether(boolean summarizePages) {
+        if (!byDefinition() || provider.parksToolCalls() || pendingCalls.size() < 2) return null;
+        for (ToolCall tc : pendingCalls) {
+            if (!isReadOnlyTool(tc.name()) || (summarizePages && returnsPages(tc.name()))) return null;
+        }
+        ConversationToolRunner runner = toolRunner();
+        int n = pendingCalls.size();
+        String[] text = new String[n];
+        List<Integer> slot = new java.util.ArrayList<>();
+        List<ParallelCalls.Call<String>> calls = new java.util.ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            ToolCall tc = pendingCalls.get(i);
+            String refusal = whyNotRunnable(tc);
+            if (refusal != null) {
+                text[i] = refusal;
+            } else if (!toolSet.contains(tc.name())) {
+                text[i] = "error: tool '" + tc.name() + "' is not available in this conversation";
+            } else {
+                turnToolCalls++;
+                slot.add(i);
+                calls.add(() -> runner.run(tc.name(), tc.argumentsJson(), false));
+            }
+        }
+        logToConversationSquad("INFO", "turn" + ioTurnNo + "/step" + stepCount + ": " + calls.size()
+                + " read-only call(s) of this response run at the same time");
+        List<ParallelCalls.Outcome<String>> outcomes = ParallelCalls.run(calls, cancelScope);
+        for (int k = 0; k < slot.size(); k++) {
+            ParallelCalls.Outcome<String> o = outcomes.get(k);
+            text[slot.get(k)] = o.cancelled() ? "error: the turn was cancelled before this call ended"
+                    : o.failure() != null ? "error: " + o.failure().getMessage()
+                    : o.value() == null ? "error: the tool returned nothing" : o.value();
+        }
+        return java.util.Arrays.asList(text);
+    }
+
+    /** @return whether {@code tool} is a built-in or plugin tool of this conversation that has no side effect */
+    private boolean isReadOnlyTool(String tool) {
+        ToolCatalog.Spec builtIn = ConversationToolCatalog.builtIn(tool);
+        if (builtIn != null) return builtIn.readOnly();
+        ConversationTool plugin = pluginTools.get(tool);
+        return plugin != null && ToolCatalog.ofPlugin(plugin).readOnly();
     }
 
     /**

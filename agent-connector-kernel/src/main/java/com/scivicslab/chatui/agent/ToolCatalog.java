@@ -34,8 +34,16 @@ public final class ToolCatalog {
      * @param description         what it does, in words that do not depend on how the call is written
      * @param parameters          its arguments, in signature order
      * @param drivesConversation  whether it changes the running turn's state
+     * @param readOnly            whether it has no side effect, so a response's calls to it and to other such tools
+     *                            may run at the same time ({@link #READ_ONLY_TOOLS}); false unless a definition says so
      */
-    public record Spec(String name, String description, List<ToolParameter> parameters, boolean drivesConversation) {
+    public record Spec(String name, String description, List<ToolParameter> parameters, boolean drivesConversation,
+                       boolean readOnly) {
+
+        /** A definition that is not read-only. */
+        public Spec(String name, String description, List<ToolParameter> parameters, boolean drivesConversation) {
+            this(name, description, parameters, drivesConversation, false);
+        }
 
         /** @return the argument names in signature order */
         public List<String> signature() {
@@ -72,6 +80,17 @@ public final class ToolCatalog {
         }
     }
 
+    /**
+     * The tools with no side effect: they only read (files, documents, the state of conversations, the web). When every
+     * call of one response is to one of these, the calls may run at the same time; one call to any other tool makes the
+     * whole response run in order. This is the one place the list is kept; {@link #define} and {@link #ofPlugin} set
+     * {@link Spec#readOnly()} from it, and a tool is matched by its name.
+     */
+    public static final java.util.Set<String> READ_ONLY_TOOLS = java.util.Set.of(
+            "read", "calc", "search_docs", "list_references", "load_skill", "list_running_tools", "list_chats",
+            "list_providers", "list_chat_models", "get_chat_status", "get_chat_log", "get_request_messages",
+            "fetch", "web_search", "scholar_search");
+
     private static final Map<String, Spec> CORE = core();
 
     private ToolCatalog() {
@@ -95,7 +114,8 @@ public final class ToolCatalog {
      */
     public static Spec define(String name, String description, List<ToolParameter> parameters,
                               boolean drivesConversation) {
-        return new Spec(name, description.strip().replaceAll("\\s*\\n\\s*", " "), parameters, drivesConversation);
+        return new Spec(name, description.strip().replaceAll("\\s*\\n\\s*", " "), parameters, drivesConversation,
+                READ_ONLY_TOOLS.contains(name));
     }
 
     /**
@@ -107,7 +127,7 @@ public final class ToolCatalog {
         int colon = text.indexOf("):");
         String description = colon >= 0 ? text.substring(colon + 2).strip() : text;
         description = description.replaceAll("\\s*\\n\\s*", " ");
-        return new Spec(tool.name(), description, tool.parameters(), false);
+        return new Spec(tool.name(), description, tool.parameters(), false, READ_ONLY_TOOLS.contains(tool.name()));
     }
 
     /**
