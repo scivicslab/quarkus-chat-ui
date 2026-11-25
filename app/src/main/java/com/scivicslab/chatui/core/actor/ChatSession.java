@@ -3888,16 +3888,18 @@ public class ChatSession extends Interpreter {
                 String requestId = nextRequestId();
                 String node = extractInput(args, "node").strip();
                 boolean urgentAsk = "ask_chat_urgent".equals(tc.name());
+                // Absent or false leaves the thinking to the receiving conversation's own setting.
+                boolean askNoThink = extractBoolean(args, "noThink");
                 // A conversation of another chat-ui instance (ConversationSquadsAcrossInstances_261115_oo01); the
                 // timekeeper names it with its node, so its watch reads that instance, not one of this name here.
                 String sent = !node.isEmpty()
                         ? AskChatTool.sendRemote(system, projectId, chatId, node,
-                                extractInput(args, "chatId"), extractInput(args, "prompt"), requestId, urgentAsk)
+                                extractInput(args, "chatId"), extractInput(args, "prompt"), requestId, urgentAsk, askNoThink)
                         : urgentAsk
                         ? AskChatTool.sendUrgent(system, projectId, chatId,
-                                extractInput(args, "chatId"), extractInput(args, "prompt"), requestId)
+                                extractInput(args, "chatId"), extractInput(args, "prompt"), requestId, askNoThink)
                         : AskChatTool.send(system, projectId, chatId,
-                                extractInput(args, "chatId"), extractInput(args, "prompt"), requestId);
+                                extractInput(args, "chatId"), extractInput(args, "prompt"), requestId, askNoThink);
                 String watched = ChatUiActorSystem.resolveChatName(projectId, extractInput(args, "chatId"))
                         + (node.isEmpty() ? "" : REMOTE_TARGET_MARK + node);
                 // A request back to the conversation whose reply this turn decides on is a decision.
@@ -3925,6 +3927,15 @@ public class ChatSession extends Interpreter {
             // Every tool that does not drive the conversation, the plugin tools among them.
             default -> toolRunner().run(tc.name(), args, summarizingPages);
         };
+    }
+
+    /** Reads one boolean field of a tool call's JSON arguments; absent or unreadable is {@code false}. */
+    private static boolean extractBoolean(String argumentsJson, String field) {
+        try {
+            return new org.json.JSONObject(argumentsJson == null ? "{}" : argumentsJson).optBoolean(field, false);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /** Extracts one named field from a tool call's JSON arguments, or {@code ""} if absent. */

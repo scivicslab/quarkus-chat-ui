@@ -72,7 +72,18 @@ public final class AskChatTool {
      */
     public static String send(IIActorSystem system, String myProjectId, String myChatId,
                               String target, String prompt, String requestId) {
-        return send(system, myProjectId, myChatId, target, prompt, requestId, false);
+        return send(system, myProjectId, myChatId, target, prompt, requestId, false, false);
+    }
+
+    /**
+     * As {@link #send(IIActorSystem, String, String, String, String, String)}, with the choice of thinking.
+     *
+     * @param noThink {@code true} if the receiving conversation is to answer this request without thinking;
+     *                {@code false} leaves it to that conversation's own setting
+     */
+    public static String send(IIActorSystem system, String myProjectId, String myChatId,
+                              String target, String prompt, String requestId, boolean noThink) {
+        return send(system, myProjectId, myChatId, target, prompt, requestId, false, noThink);
     }
 
     /**
@@ -84,11 +95,17 @@ public final class AskChatTool {
      */
     public static String sendUrgent(IIActorSystem system, String myProjectId, String myChatId,
                                     String target, String prompt, String requestId) {
-        return send(system, myProjectId, myChatId, target, prompt, requestId, true);
+        return send(system, myProjectId, myChatId, target, prompt, requestId, true, false);
+    }
+
+    /** As {@link #sendUrgent(IIActorSystem, String, String, String, String, String)}, with the choice of thinking. */
+    public static String sendUrgent(IIActorSystem system, String myProjectId, String myChatId,
+                                    String target, String prompt, String requestId, boolean noThink) {
+        return send(system, myProjectId, myChatId, target, prompt, requestId, true, noThink);
     }
 
     private static String send(IIActorSystem system, String myProjectId, String myChatId,
-                               String target, String prompt, String requestId, boolean urgent) {
+                               String target, String prompt, String requestId, boolean urgent, boolean noThink) {
         if (target == null || target.isBlank()) return "error: chatId is required";
         if (prompt == null || prompt.isBlank()) return "error: prompt is required";
 
@@ -137,7 +154,7 @@ public final class AskChatTool {
             // The queue is its own actor, so this does not wait for the target's turn.
             passed = targetQueue.ask(q -> q.enqueue(headed, null, "queue", targetWatchers,
                     targetChat.asChatSessionRef(), ChatSession.ASK_CHAT_SOURCE_PREFIX + myName, resultKey, done,
-                    false, true, java.util.List.of(), requestId, urgent)).get(5, TimeUnit.SECONDS);
+                    noThink, true, java.util.List.of(), requestId, urgent)).get(5, TimeUnit.SECONDS);
         } catch (Exception e) {
             SENT.remove(requestId);
             LOG.log(Level.WARNING, "ask_chat: could not queue request " + requestId + " for " + targetName, e);
@@ -607,6 +624,12 @@ public final class AskChatTool {
      */
     public static String sendRemote(IIActorSystem system, String myProjectId, String myChatId, String node,
                                     String target, String prompt, String requestId, boolean urgent) {
+        return sendRemote(system, myProjectId, myChatId, node, target, prompt, requestId, urgent, false);
+    }
+
+    /** As above; {@code noThink} asks the receiving conversation to answer this request without thinking. */
+    public static String sendRemote(IIActorSystem system, String myProjectId, String myChatId, String node,
+                                    String target, String prompt, String requestId, boolean urgent, boolean noThink) {
         if (target == null || target.isBlank()) return "error: chatId is required";
         if (prompt == null || prompt.isBlank()) return "error: prompt is required";
         String unqualified = remoteTargetRefusal(target, node, "chatId");
@@ -630,6 +653,7 @@ public final class AskChatTool {
         SENT.put(requestId, new Sent(myName, targetName, null, done, nodeName));
         JSONObject m = new JSONObject().put("requestId", requestId).put("sender", myName)
                 .put("senderNode", nodes.myName()).put("target", targetName).put("prompt", prompt).put("urgent", urgent);
+        if (noThink) m.put("noThink", true);
         Receipt receipt = nodes.send(nodeName, "enqueueRequest", m.toString());
         if (!receipt.accepted()) {
             SENT.remove(requestId);
@@ -728,6 +752,7 @@ public final class AskChatTool {
         String senderNode = m.getString("senderNode");
         String target = m.getString("target");
         boolean urgent = m.optBoolean("urgent", false);
+        boolean noThink = m.optBoolean("noThink", false);
         LOG.info("remote request " + requestId + " from " + sender + " on node " + senderNode + " for " + target);
         IIActorRef<?> targetActor = local.getIIActor(target + ".chat");
         ActorRef<PromptQueue> targetQueue = local.getActor(target + ".queue");
@@ -752,7 +777,7 @@ public final class AskChatTool {
         Consumer<ChatEvent> watchers = watchersOf(local, target);
         try {
             targetQueue.ask(q -> q.enqueue(headed, null, "queue", watchers, targetChat.asChatSessionRef(),
-                    ChatSession.ASK_CHAT_SOURCE_PREFIX + sender, localId, done, false, true, java.util.List.of(),
+                    ChatSession.ASK_CHAT_SOURCE_PREFIX + sender, localId, done, noThink, true, java.util.List.of(),
                     localId, urgent, link)).get(5, TimeUnit.SECONDS);
         } catch (Exception e) {
             LOG.log(Level.WARNING, "remote request " + requestId + " could not be queued for " + target, e);
