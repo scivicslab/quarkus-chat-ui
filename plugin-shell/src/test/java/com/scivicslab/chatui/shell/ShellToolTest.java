@@ -112,4 +112,37 @@ class ShellToolTest {
             else System.setProperty("chat-ui.write-root", before);
         }
     }
+
+    /**
+     * A command that prints nothing and runs long: the limit still ends it. The output was once read to its end before
+     * the wait with a deadline began, so a quiet command was never killed (a {@code sleep 125} came back after 125 s).
+     */
+    @Test
+    void aQuietCommandThatRunsLongIsKilledAtTheLimit(@TempDir Path dir) {
+        long start = System.nanoTime();
+        String out = ShellTool.run(dir, "sleep 6; echo never", 1);
+        double seconds = (System.nanoTime() - start) / 1e9;
+
+        assertTrue(seconds < 4, "it was ended at the limit, not when the command ended: " + seconds + " s");
+        assertTrue(out.startsWith("error: killed after 1 seconds"), out);
+        assertFalse(out.contains("never"), out);
+    }
+
+    /** What the command printed before the limit comes back with the notice. */
+    @Test
+    void theOutputSoFarComesBackWithTheTimeoutNotice(@TempDir Path dir) {
+        String out = ShellTool.run(dir, "echo first; sleep 6; echo never", 1);
+
+        assertTrue(out.startsWith("error: killed after 1 seconds"), out);
+        assertTrue(out.contains("first"), out);
+        assertFalse(out.contains("never"), out);
+    }
+
+    /** A command that ends in time is answered as before. */
+    @Test
+    void aCommandThatEndsInTimeIsNotAffectedByTheLimit(@TempDir Path dir) {
+        String out = ShellTool.run(dir, "sleep 1; echo done", 5);
+        assertTrue(out.startsWith("exit 0\n"), out);
+        assertTrue(out.contains("done"), out);
+    }
 }
