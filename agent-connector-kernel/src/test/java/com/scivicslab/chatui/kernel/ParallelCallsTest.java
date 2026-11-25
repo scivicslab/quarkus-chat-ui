@@ -105,6 +105,31 @@ class ParallelCallsTest {
         for (int i = 0; i < 20; i++) assertEquals(i, outcomes.get(i).value(), "call order");
     }
 
+    private static int mostAtOnce(int calls, int perResponse, int permits) {
+        AtomicInteger now = new AtomicInteger();
+        AtomicInteger most = new AtomicInteger();
+        List<Call<Integer>> list = new ArrayList<>();
+        for (int i = 0; i < calls; i++) {
+            list.add(() -> {
+                most.accumulateAndGet(now.incrementAndGet(), Math::max);
+                try { Thread.sleep(100); } finally { now.decrementAndGet(); }
+                return 1;
+            });
+        }
+        ParallelCalls.run(list, perResponse, permits(permits), CancelScope.NEVER);
+        return most.get();
+    }
+
+    @Test
+    void theCapOfOneResponseHoldsOnItsOwn() {
+        assertEquals(3, mostAtOnce(10, 3, 100));
+    }
+
+    @Test
+    void theCountAcrossTheProcessHoldsOnItsOwn() {
+        assertEquals(4, mostAtOnce(10, 100, 4));
+    }
+
     @Test
     void aCallsActorIsMadeOnlyWhenItsTurnComes() throws Exception {
         AtomicInteger started = new AtomicInteger();
