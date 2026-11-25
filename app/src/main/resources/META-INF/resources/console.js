@@ -3215,9 +3215,13 @@
         rows.push(heading("Window = Used + Free"));
         var window_ = line(b.window);
         window_.values[3] = b.windowLimit ? b.windowLimitSource : "not set (add the model to chat-ui.window-limits)";
+        // Left blank, not "-": no number is missing, there is none to give (the note under the table says why).
+        window_.values[2] = "";
         rows.push(window_);
         rows.push(line(b.measured));
-        rows.push(line(b.free));
+        var free_ = line(b.free);
+        free_.values[2] = "";
+        rows.push(free_);
         rows.push(heading("Used, broken down"));
         var group = null;
         b.rows.forEach(function (r) {
