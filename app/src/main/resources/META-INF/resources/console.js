@@ -3132,14 +3132,27 @@
 
     function tokensSetStatus(t) { setText("tokens-status", t); }
 
-    function tokensTable(headers, rows, numericFrom) {
+    /**
+     * The one place that formats the numbers of the Tokens tab: every run of digits in the text gets thousands separators
+     * (113187 becomes 113,187; 12.5 stays 12.5; "-" and words stay as they are). A number given as a number is formatted
+     * the same way. All the tables below go through tokensTable, so none has a formatter of its own.
+     */
+    function tokensGroup(v) {
+        return String(v).replace(/(\d+)(\.\d+)?/g, function (m, whole, fraction) {
+            return whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (fraction || "");
+        });
+    }
+
+    /** Columns numericFrom .. numericFrom + numericCount - 1 hold numbers: monospace and right-aligned (class "num"). */
+    function tokensTable(headers, rows, numericFrom, numericCount) {
+        var count = numericCount === undefined ? 2 : numericCount;
         var table = document.createElement("table");
         table.className = "io-sessions";
         var head = document.createElement("tr");
         headers.forEach(function (h, i) {
             var th = document.createElement("th");
-            th.textContent = h;
-            if (i >= numericFrom && i < numericFrom + 2) th.className = "num";
+            th.textContent = tokensGroup(h);
+            if (i >= numericFrom && i < numericFrom + count) th.className = "num";
             head.appendChild(th);
         });
         table.appendChild(head);
@@ -3148,9 +3161,9 @@
             if (cells.total) tr.className = "tokens-total";
             cells.values.forEach(function (v, i) {
                 var td = document.createElement("td");
-                td.textContent = v;
+                td.textContent = tokensGroup(v);
                 var cls = [];
-                if (i >= numericFrom && i < numericFrom + 2) cls.push("num");
+                if (i >= numericFrom && i < numericFrom + count) cls.push("num");
                 if (cells.classes && cells.classes[i]) cls.push(cells.classes[i]);
                 if (cls.length) td.className = cls.join(" ");
                 tr.appendChild(td);
@@ -3316,7 +3329,7 @@
             box.appendChild(d);
         });
         var topicRows = (b.topics || []).map(function (t) { return { values: [t.label, t.value, t.note] }; });
-        topicsBox.appendChild(tokensTable(["Topic", "Value (with its unit)", "Why it is shown"], topicRows, 9));
+        topicsBox.appendChild(tokensTable(["Topic", "Value (with its unit)", "Why it is shown"], topicRows, 1, 1));
     }
 
     function tokensShowTurns(t) {
@@ -3330,7 +3343,7 @@
             return { values: [String(u.turn), String(u.firstRequestTotal),
                               g === null || g === undefined ? "-" : (g > 0 ? "+" : "") + g] };
         });
-        box.appendChild(tokensTable(["Turn", "First request (tokens)", "Growth from the previous turn (tokens)"], rows, 1));
+        box.appendChild(tokensTable(["Turn", "First request (tokens)", "Growth from the previous turn (tokens)"], rows, 0, 3));
     }
 
     function tokensLoad() {

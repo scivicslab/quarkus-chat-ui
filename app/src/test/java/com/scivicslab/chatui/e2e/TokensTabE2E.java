@@ -88,7 +88,7 @@ public class TokensTabE2E {
     private static long cell(Page page, String label, int col) {
         String text = cellText(page, label, col);
         try {
-            return text == null ? -1 : Long.parseLong(text);
+            return text == null ? -1 : Long.parseLong(text.replace(",", ""));
         } catch (NumberFormatException e) {
             return -1;
         }
@@ -225,12 +225,39 @@ public class TokensTabE2E {
         int rows = page.locator("#tokens-turns tr").count() - 1;
         check(rows >= 2, label + ": the per-turn table has a row for each of two turns (" + rows + ")");
         if (rows >= 2) {
-            int first = Integer.parseInt(page.locator("#tokens-turns tr").nth(1).locator("td").nth(1).textContent().strip());
+            int first = Integer.parseInt(page.locator("#tokens-turns tr").nth(1).locator("td").nth(1).textContent().strip().replace(",", ""));
             check(first >= minFirstRequest, label + ": turn 1's first request is at least " + minFirstRequest + ": " + first);
             String growth = page.locator("#tokens-turns tr").nth(2).locator("td").nth(2).textContent().strip();
             check(growth.startsWith("+"), label + ": turn 2 shows its growth: " + growth);
         }
+        checkNumbers(page, label);
         page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/tokens-" + label + ".png")));
+    }
+
+    /**
+     * Every number of the tab's four tables is monospace, tabular, right-aligned and grouped by thousands: the cells of the
+     * numeric columns have the computed style, and no cell of the tab holds a run of four digits or more without separators.
+     */
+    private void checkNumbers(Page page, String label) {
+        for (String box : List.of("tokens-breakdown", "tokens-turns", "tokens-parts", "tokens-topics")) {
+            @SuppressWarnings("unchecked")
+            java.util.Map<String, Object> r = (java.util.Map<String, Object>) page.evaluate("(id) => {"
+                    + " const cells = Array.from(document.querySelectorAll('#' + id + ' td.num'));"
+                    + " const bad = cells.filter(td => { const c = getComputedStyle(td);"
+                    + "   return !/monospace|Mono|Consolas|Menlo/.test(c.fontFamily) || c.textAlign !== 'right'"
+                    + "     || !c.fontVariantNumeric.includes('tabular-nums'); }).map(td => td.textContent + ' | ' + getComputedStyle(td).fontFamily"
+                    + "     + ' | ' + getComputedStyle(td).textAlign);"
+                    + " const ungrouped = Array.from(document.querySelectorAll('#' + id + ' td, #' + id + ' th'))"
+                    + "   .map(e => e.textContent).filter(t => /(^|[^\\d,.])\\d{4,}/.test(t));"
+                    + " return { cells: cells.length, bad: bad, ungrouped: ungrouped }; }", box);
+            check(((Number) r.get("cells")).intValue() > 0, label + ": " + box + " has numeric cells");
+            check(((List<?>) r.get("bad")).isEmpty(), label + ": " + box + ": every numeric cell is monospace, tabular and right-aligned: " + r.get("bad"));
+            check(((List<?>) r.get("ungrouped")).isEmpty(), label + ": " + box + ": no number of 1,000 or more lacks separators: " + r.get("ungrouped"));
+        }
+        if (page.locator("#tokens-turns tr").count() > 1) {
+            String first = page.locator("#tokens-turns tr").nth(1).locator("td").nth(1).textContent().strip();
+            check(first.matches("\\d{1,3}(,\\d{3})*"), label + ": the first request's total is grouped: " + first);
+        }
     }
 
     private static String rest(String method, String path, String json) throws Exception {

@@ -677,6 +677,7 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
 
 #tokens-body { flex: 1; min-height: 0; overflow: auto; padding: 8px; }
 #tokens-body td.num, #tokens-body th.num { text-align: right; }
+#tokens-body td.num { font-family: var(--font-mono, "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace); font-variant-numeric: tabular-nums; }
 #tokens-body tr.tokens-total td { font-weight: 600; }
 .tk-section { margin-bottom: 18px; }
 .tk-section h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--text-secondary, #9aa0a6); }
