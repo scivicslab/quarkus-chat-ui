@@ -3141,7 +3141,10 @@
             cells.values.forEach(function (v, i) {
                 var td = document.createElement("td");
                 td.textContent = v;
-                if (i >= numericFrom && i < numericFrom + 2) td.className = "num";
+                var cls = [];
+                if (i >= numericFrom && i < numericFrom + 2) cls.push("num");
+                if (cells.classes && cells.classes[i]) cls.push(cells.classes[i]);
+                if (cls.length) td.className = cls.join(" ");
                 tr.appendChild(td);
             });
             table.appendChild(tr);
@@ -3207,15 +3210,24 @@
         if (!box || !topicsBox) return;
         box.textContent = "";
         topicsBox.textContent = "";
-        function line(l, labelPrefix) {
-            return { values: [(labelPrefix || "") + l.label, tokensNum(l.lastRequest), tokensNum(l.cumulative), l.basis], title: l.definition };
+        // How a figure was got decides its style: measured = the normal text colour, estimated = blue, calculated from other
+        // figures = grey italic. The legend above the table uses the same classes as the cells.
+        function styleOf(basis) {
+            if (basis === "estimated") return "tk-estimated";
+            if (basis === "calculated") return "tk-calculated";
+            if (basis === "not available") return "";
+            return "tk-measured";
         }
-        function heading(text) { return { total: true, values: [text, "", "", ""] }; }
+        function line(l, labelPrefix) {
+            var cls = styleOf(l.basis);
+            return { values: [(labelPrefix || "") + l.label, tokensNum(l.lastRequest), tokensNum(l.cumulative)],
+                     classes: [null, cls, cls], title: l.definition };
+        }
+        function heading(text) { return { total: true, values: [text, "", ""] }; }
         var rows = [];
         rows.push(heading("Window = Used + Free"));
+        // Left blank, not "-": no number is missing, there is none to give (the how-to-read note says why).
         var window_ = line(b.window);
-        window_.values[3] = b.windowLimit ? b.windowLimitSource : "not set (add the model to chat-ui.window-limits)";
-        // Left blank, not "-": no number is missing, there is none to give (the note under the table says why).
         window_.values[2] = "";
         rows.push(window_);
         rows.push(line(b.measured));
@@ -3228,16 +3240,18 @@
             if (r.id === "F2") return;
             if (r.group !== group) {
                 group = r.group;
-                rows.push({ values: [group, "", "", ""], sub: true });
+                rows.push({ values: [group, "", ""], sub: true });
             }
-            var last = r.lastRequest === null || r.lastRequest === undefined ? 0 : r.lastRequest;
-            var cum = r.cumulative === null || r.cumulative === undefined ? 0 : r.cumulative;
-            if (r.basis === "not available") { last = null; cum = null; }
-            rows.push({ values: [r.id + "  " + r.label, tokensNum(last), tokensNum(cum), r.basis], title: r.definition });
+            var l = line(r, r.id + "  ");
+            if (r.basis === "not available") { l.values[1] = "-"; l.values[2] = "-"; }
+            else {
+                if (r.lastRequest === null || r.lastRequest === undefined) l.values[1] = "0";
+                if (r.cumulative === null || r.cumulative === undefined) l.values[2] = "0";
+            }
+            rows.push(l);
         });
         rows.push(Object.assign(line(b.attributed), { total: true }));
-        var residual = b.rows[b.rows.length - 1];
-        rows.push(line(residual));
+        rows.push(line(b.rows[b.rows.length - 1]));
         rows.push(Object.assign(line(b.usedTotal), { total: true }));
         rows.push(heading("Output (tokens)"));
         b.output.forEach(function (r) { rows.push(line(r, r.id + "  ")); });
@@ -3245,15 +3259,37 @@
         b.cache.forEach(function (r) { rows.push(line(r)); });
         var turnText = b.lastTurn === null || b.lastTurn === undefined ? "-" : b.lastTurn;
         var head = ["Row (tokens)", "Last request (turn " + turnText + ")",
-                    "All requests (" + b.cumulativeRequests + " measured of " + b.requests + " sent)", "Basis"];
-        var unit = document.createElement("div");
-        unit.className = "io-empty";
-        unit.textContent = b.unit;
-        var rule = document.createElement("div");
-        rule.className = "io-empty";
-        rule.textContent = b.rule;
-        box.appendChild(unit);
-        box.appendChild(rule);
+                    "All requests (" + b.cumulativeRequests + " measured of " + b.requests + " sent)"];
+
+        // How to read this table, at its top.
+        var howto = document.createElement("div");
+        howto.className = "tk-howto";
+        function howtoLine(parts) {
+            var d = document.createElement("div");
+            parts.forEach(function (p) {
+                if (typeof p === "string") { d.appendChild(document.createTextNode(p)); return; }
+                var sw = document.createElement("span");
+                sw.className = p.cls + " tk-swatch";
+                sw.textContent = p.text;
+                d.appendChild(sw);
+            });
+            howto.appendChild(d);
+        }
+        var title = document.createElement("div");
+        title.className = "tk-howto-title";
+        title.textContent = "How to read this table";
+        howto.appendChild(title);
+        howtoLine([b.unit]);
+        howtoLine(["Colours: ", { cls: "tk-measured", text: "black: measured" }, " (the provider's own count), ",
+                   { cls: "tk-estimated", text: "blue: estimated" }, " (from the characters sent), ",
+                   { cls: "tk-calculated", text: "grey italic: calculated" }, " from other figures in this table."]);
+        howtoLine([b.rule]);
+        howtoLine(["Last request: the last request of the last turn, the window as full as it got. All requests: the sum of what "
+                   + "each of the " + b.cumulativeRequests + " measured requests carried (of " + b.requests + " sent; the others have no "
+                   + "reported input and are left out). " + b.cumulativeNote]);
+        howtoLine(["Window (max): " + (b.windowLimit ? b.windowLimitSource : "not set (add the model to chat-ui.window-limits)") + "."]);
+        box.appendChild(howto);
+
         var table = tokensTable(head, rows, 1);
         var trs = table.querySelectorAll("tr");
         rows.forEach(function (r, i) {
@@ -3265,11 +3301,6 @@
         var cumulativeHeader = table.querySelectorAll("th")[2];
         if (cumulativeHeader) cumulativeHeader.title = b.cumulativeNote;
         box.appendChild(table);
-        var cumulativeNote = document.createElement("div");
-        cumulativeNote.className = "io-empty";
-        cumulativeNote.textContent = b.cumulativeNote + " \"Measured\" counts the requests with a reported input and a split; the others"
-            + " have none, so they are left out of every figure of that column.";
-        box.appendChild(cumulativeNote);
         (b.notes || []).forEach(function (n) {
             var d = document.createElement("div");
             d.className = "io-empty";

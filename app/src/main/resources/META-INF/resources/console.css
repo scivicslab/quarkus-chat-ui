@@ -965,3 +965,16 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
 
 /* Tokens tab: a group's name inside the breakdown table */
 .tokens-subgroup td { color: var(--text-secondary, #9aa0a6); font-style: italic; }
+
+/* Tokens tab: how a figure was got decides its style. The colours are the theme's own, so each theme keeps them readable. */
+.tk-measured { color: var(--text-primary, #e6e6e6); }
+.tk-estimated { color: var(--accent-blue, #6366f1); }
+.tk-calculated { color: var(--text-secondary, #9aa0a6); font-style: italic; }
+td.tk-measured { color: var(--text-primary, #e6e6e6); }
+td.tk-estimated { color: var(--accent-blue, #6366f1); }
+td.tk-calculated { color: var(--text-secondary, #9aa0a6); font-style: italic; }
+.tk-howto { margin: 6px 0 10px; padding: 8px 10px; border: 1px solid var(--border-color, #2c2c2c); border-radius: 6px;
+    font-size: 12px; line-height: 1.5; color: var(--text-secondary, #9aa0a6); }
+.tk-howto > div { margin-bottom: 4px; }
+.tk-howto-title { font-weight: 600; color: var(--text-primary, #e6e6e6); }
+.tk-swatch { font-weight: 600; }

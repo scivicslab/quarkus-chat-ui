@@ -94,6 +94,67 @@ public class TokensTabE2E {
         }
     }
 
+    /** The cells and the legend swatches of a style share its class, so they have its colour, in every theme. */
+    private void checkColours(Page page, String label) {
+        String original = page.inputValue("#theme-select");
+        List<String> themes = (List<String>) page.evaluate("() => Array.from(document.querySelectorAll('#theme-select option')).map(o => o.value)");
+        for (String theme : themes) {
+            page.selectOption("#theme-select", theme);
+            page.waitForTimeout(150);
+            Object result = page.evaluate("() => {"
+                    + " const css = (el) => { const c = getComputedStyle(el); return { color: c.color, style: c.fontStyle }; };"
+                    + " const cell = (label, cls) => { const row = Array.from(document.querySelectorAll('#tokens-breakdown tr'))"
+                    + "   .find(r => r.children[0] && r.children[0].textContent.trim().startsWith(label)); return row ? row.children[1] : null; };"
+                    + " const bgOf = (el) => { for (; el; el = el.parentElement) { const b = getComputedStyle(el).backgroundColor;"
+                    + "   if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b; } return 'rgb(255, 255, 255)'; };"
+                    + " const sw = (cls) => document.querySelector('#tokens-breakdown .tk-howto .' + cls);"
+                    + " const m = cell('Used = input the provider reported'), e = cell('A1  System prompt'), k = cell('Attributed (A1..F1)');"
+                    + " return { measured: [css(sw('tk-measured')), css(m)], estimated: [css(sw('tk-estimated')), css(e)],"
+                    + "   calculated: [css(sw('tk-calculated')), css(k)], bg: bgOf(m),"
+                    + "   classes: [m.className, e.className, k.className] }; }");
+            @SuppressWarnings("unchecked")
+            java.util.Map<String, Object> r = (java.util.Map<String, Object>) result;
+            @SuppressWarnings("unchecked") List<java.util.Map<String, String>> m = (List<java.util.Map<String, String>>) r.get("measured");
+            @SuppressWarnings("unchecked") List<java.util.Map<String, String>> e = (List<java.util.Map<String, String>>) r.get("estimated");
+            @SuppressWarnings("unchecked") List<java.util.Map<String, String>> k = (List<java.util.Map<String, String>>) r.get("calculated");
+            String bg = (String) r.get("bg");
+            check(m.get(0).get("color").equals(m.get(1).get("color")) && e.get(0).get("color").equals(e.get(1).get("color"))
+                            && k.get(0).get("color").equals(k.get(1).get("color")) && k.get(0).get("style").equals(k.get(1).get("style")),
+                    label + " [" + theme + "]: the legend swatches have the colours of the cells they stand for");
+            check(!m.get(1).get("color").equals(e.get(1).get("color")) && !m.get(1).get("color").equals(k.get(1).get("color"))
+                            && !e.get(1).get("color").equals(k.get(1).get("color")) && "italic".equals(k.get(1).get("style"))
+                            && !"italic".equals(m.get(1).get("style")) && !"italic".equals(e.get(1).get("style")),
+                    label + " [" + theme + "]: measured, estimated and calculated differ: " + m.get(1).get("color") + " / "
+                            + e.get(1).get("color") + " / " + k.get(1).get("color") + " (calculated is italic)");
+            double worst = Math.min(contrast(m.get(1).get("color"), bg), Math.min(contrast(e.get(1).get("color"), bg), contrast(k.get(1).get("color"), bg)));
+            check(worst >= 3.0, label + " [" + theme + "]: every style reads against the background (contrast " + String.format("%.1f", worst) + ")");
+        }
+        page.selectOption("#theme-select", original);
+    }
+
+    private static double[] rgb(String css) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)").matcher(css);
+        double[] out = new double[3];
+        for (int i = 0; i < 3 && m.find(); i++) out[i] = Double.parseDouble(m.group(1));
+        return out;
+    }
+
+    private static double luminance(String css) {
+        double[] c = rgb(css);
+        double[] l = new double[3];
+        for (int i = 0; i < 3; i++) {
+            double v = c[i] / 255.0;
+            l[i] = v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
+    }
+
+    /** The WCAG contrast ratio of two colours. */
+    private static double contrast(String a, String b) {
+        double x = luminance(a), y = luminance(b);
+        return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+    }
+
     private void checkTab(Page page, String chat, String expectedPart, String label, int minFirstRequest) {
         page.evaluate("() => window.chatUiSwitchChat('project1', '" + chat + "')");
         page.selectOption("#right-tab-select", "tokens");
@@ -109,8 +170,21 @@ public class TokensTabE2E {
         check(page.locator("#tab-tokens h3").first().textContent().contains("unit: tokens")
                         && breakdown.contains("characters / 3.5"),
                 label + ": the unit is said at the table's head");
-        check(breakdown.contains("Every part of a request's input is counted in exactly one row"),
-                label + ": the rule that makes the rows a partition is said under the title");
+        check(page.locator("#tokens-breakdown th").count() == 3 && !breakdown.contains("Basis"),
+                label + ": the Basis column is gone: " + page.locator("#tokens-breakdown th").allTextContents());
+        // The how-to-read note comes first, then the table: unit, colour legend, the rule, what the two columns mean.
+        check((Boolean) page.evaluate("() => { const box = document.getElementById('tokens-breakdown');"
+                        + " const note = box.querySelector('.tk-howto'); const table = box.querySelector('table');"
+                        + " return !!note && !!table && !!(note.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING); }"),
+                label + ": a how-to-read note sits above the table");
+        String howto = page.locator("#tokens-breakdown .tk-howto").textContent();
+        check(howto.contains("How to read this table") && howto.contains("Unit: tokens") && howto.contains("black: measured")
+                        && howto.contains("blue: estimated") && howto.contains("grey italic: calculated"),
+                label + ": the note gives the unit and the colour legend");
+        check(howto.contains("Every part of a request's input is counted in exactly one row")
+                        && howto.contains("Last request:") && howto.contains("All requests:") && howto.contains("not a fill level"),
+                label + ": the note gives the rule and what the two columns mean");
+        checkColours(page, label);
         int window = breakdown.indexOf("Window (max)"), used = breakdown.indexOf("Used = input the provider reported"),
                 free = breakdown.indexOf("Free = Window - Used"), firstRow = breakdown.indexOf("A1  System prompt");
         check(window >= 0 && window < used && used < free && free < firstRow,
@@ -136,8 +210,6 @@ public class TokensTabE2E {
         }
         check(cellText(page, "Window (max)", 2).isBlank() && cellText(page, "Free = Window - Used", 2).isBlank(),
                 label + ": Window and Free are blank in the cumulative column");
-        check(breakdown.contains("not a fill level") || breakdown.contains("It is not a fill level"),
-                label + ": the table says why the cumulative column has no Window and no Free");
         check(page.locator("#tokens-topics").textContent().contains("History in the last request"),
                 label + ": the special topics table is shown");
         check(parts.contains("Estimated total of the parts above"), label + ": the estimate is shown");
