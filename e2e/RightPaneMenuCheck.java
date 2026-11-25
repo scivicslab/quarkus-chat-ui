@@ -25,9 +25,10 @@ import java.util.List;
  */
 public class RightPaneMenuCheck {
 
-    static final List<String> CHAT_ENTRIES = List.of("Sessions", "System Log", "Agent Loop", "Log Search", "Tokens", "Actions");
+    /** The entries of each view, alphabetical by label without regard to case. The chat view has no Actions. */
+    static final List<String> CHAT_ENTRIES = List.of("Agent Loop", "Log Search", "Sessions", "Settings", "System Log", "Tokens");
     static final List<String> PROJECT_ENTRIES =
-            List.of("Project Property", "Run", "Job Log", "Batch Jobs", "Method Search", "Actions");
+            List.of("Actions", "Batch Jobs", "Job Log", "Method Search", "Project Property", "Run");
 
     static final String WORKFLOW = """
             name: e2e-menu
@@ -64,6 +65,19 @@ public class RightPaneMenuCheck {
     static List<String> offered(Page page) {
         return (List<String>) page.evaluate("() => Array.from(document.querySelectorAll('#right-tab-select option'))"
                 + ".filter(o => !o.hidden).map(o => o.textContent.trim())");
+    }
+
+    /** Whether the labels are in alphabetical order, case-insensitively: they equal their own sorted copy. */
+    static boolean alphabetical(List<String> labels) {
+        List<String> sorted = new java.util.ArrayList<>(labels);
+        sorted.sort(String.CASE_INSENSITIVE_ORDER);
+        return sorted.equals(labels);
+    }
+
+    /** The labels of every entry of the menu, hidden or not, in the order the browser lists them. */
+    @SuppressWarnings("unchecked")
+    static List<String> allEntries(Page page) {
+        return (List<String>) page.evaluate("() => Array.from(document.querySelectorAll('#right-tab-select option')).map(o => o.textContent.trim())");
     }
 
     static String selected(Page page) {
@@ -163,6 +177,10 @@ public class RightPaneMenuCheck {
             check(selected(page).equals("Sessions") && shown(page).equals(List.of("tab-logdb")),
                     "the chat view opens on Sessions: " + selected(page) + " " + shown(page));
             describes(page, "Sessions", "on load");
+            List<String> every = allEntries(page);
+            check(alphabetical(every), "the menu's entries are in alphabetical order, as the browser lists them: " + every);
+            check(alphabetical(offered(page)) && !offered(page).contains("Actions"),
+                    "the chat view's entries are alphabetical, and Actions is not among them: " + offered(page));
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/menu-chat-sessions.png")));
             everyEntryOpensItsSection(page, CHAT_ENTRIES);
 
@@ -228,13 +246,13 @@ public class RightPaneMenuCheck {
             page.focus("#right-tab-select");
             page.keyboard().press("ArrowDown");
             page.waitForTimeout(300);
-            check(selected(page).equals("System Log") && shown(page).equals(List.of("tab-syslog")),
-                    "ArrowDown on the focused menu moves to System Log: " + selected(page) + " " + shown(page));
-            describes(page, "System Log", "after ArrowDown");
+            check(selected(page).equals("Settings") && shown(page).equals(List.of("tab-settings")),
+                    "ArrowDown on the focused menu moves to the next entry in order, Settings: " + selected(page) + " " + shown(page));
+            describes(page, "Settings", "after ArrowDown");
             page.keyboard().press("End");
             page.waitForTimeout(300);
-            check(selected(page).equals("Actions") && shown(page).equals(List.of("tab-actions")),
-                    "End on the focused menu moves to the last chat entry, Actions, not to a project entry: "
+            check(selected(page).equals("Tokens") && shown(page).equals(List.of("tab-tokens")),
+                    "End on the focused menu moves to the last chat entry, Tokens, not to a project entry: "
                             + selected(page) + " " + shown(page));
 
             // Narrower still, the menu stays one line.

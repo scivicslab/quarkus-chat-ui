@@ -24,7 +24,7 @@
 
     // Why the person opens each entry of the right-pane menu and what the panel does about it, keyed by the entry's value
     // (the section tab-<value>). Shown in the line under the menu (#right-tab-desc) and as each
-    // entry's tooltip. Actions is the same panel in both perspectives, so it has one description.
+    // entry's tooltip.
     var RIGHT_TAB_DESCRIPTIONS = {
         logdb: "To see exactly what this conversation sent to its model and what came back, open a recorded session and follow its turns step by step.",
         syslog: "When a turn of this conversation went wrong, read its log here; set Level to WARN or ERROR to find the failure.",
@@ -83,6 +83,13 @@
     function initTabs() {
         var sel = rightTabSelect();
         if (!sel) return;
+        // The entries are listed by their label, alphabetically and without regard to case, whatever order the markup
+        // has them in: a new entry added anywhere lands in its place. A perspective opens on its data-default entry,
+        // not on its first one.
+        var sorted = Array.prototype.slice.call(sel.options).sort(function (a, b) {
+            return a.textContent.trim().toLowerCase().localeCompare(b.textContent.trim().toLowerCase(), "en");
+        });
+        sorted.forEach(function (o) { sel.appendChild(o); });
         Array.prototype.forEach.call(sel.options, function (o) {
             o.title = RIGHT_TAB_DESCRIPTIONS[o.value] || "";
         });
@@ -1965,7 +1972,7 @@
     }
 
     // The menu offers only the entries of the current perspective. After a switch, the entry that
-    // was selected may belong to the other perspective; then the new perspective's first entry is
+    // was selected may belong to the other perspective; then the new perspective's default entry is
     // shown, through showRightTab, so its own onShow runs as if the person had chosen it.
     function activateFirstTabOf(kind) {
         var sel = rightTabSelect();
@@ -1978,8 +1985,9 @@
         });
         var mine = opts.filter(function (o) { return o.getAttribute("data-perspective") === kind; });
         if (!mine.length) return;
+        var opening = mine.filter(function (o) { return o.hasAttribute("data-default"); })[0] || mine[0];
         var selected = sel.options[sel.selectedIndex];
-        if (!selected || selected.getAttribute("data-perspective") !== kind) showRightTab(mine[0].value);
+        if (!selected || selected.getAttribute("data-perspective") !== kind) showRightTab(opening.value);
     }
 
     function restorePerspective() {

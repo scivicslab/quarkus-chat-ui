@@ -257,23 +257,22 @@
                      (ProjectPerspective_260911_oo01). The value names the section to show (tab-<value>). -->
                 <select id="right-tab-select" aria-label="Right pane">
                     <option value="settings" data-perspective="chat">Settings</option>
-                    <option value="logdb" data-perspective="chat" selected>Sessions</option>
+                    <option value="logdb" data-perspective="chat" data-default selected>Sessions</option>
                     <option value="syslog" data-perspective="chat">System Log</option>
                     <option value="agentloop" data-perspective="chat">Agent Loop</option>
                     <option value="logsearch" data-perspective="chat">Log Search</option>
                     <option value="tokens" data-perspective="chat">Tokens</option>
-                    <option value="projectprop" data-perspective="project">Project Property</option>
+                    <option value="projectprop" data-perspective="project" data-default>Project Property</option>
                     <option value="jobrun" data-perspective="project">Run</option>
                     <option value="joblog" data-perspective="project">Job Log</option>
                     <option value="jobs" data-perspective="project">Batch Jobs</option>
                     <option value="methodsearch" data-perspective="project">Method Search</option>
-                    <option value="timekeeper" data-perspective="timekeeper">Timekeeper</option>
-                    <!-- Actions belongs to both perspectives: one entry per perspective, one section
-                         without a perspective, so it stays shown whichever is active. -->
-                    <option value="actions" data-perspective="chat">Actions</option>
+                    <option value="timekeeper" data-perspective="timekeeper" data-default>Timekeeper</option>
                     <option value="actions" data-perspective="project">Actions</option>
                     <!-- Add new feature entries here, with the perspective they belong to, and their
-                         description in console.js (RIGHT_TAB_DESCRIPTIONS). -->
+                         description in console.js (RIGHT_TAB_DESCRIPTIONS). Their order here does not matter: console.js
+                         sorts the entries by their label, so a new one lands in its place. The entry a perspective opens on
+                         carries data-default. -->
                 </select>
                 <!-- What the selected entry shows and when to use it (console.js fills it in). -->
                 <div id="right-tab-desc" aria-live="polite"></div>
@@ -408,11 +407,11 @@
                     <div id="wf-list"></div>
                 </section>
 
-                <!-- Actions: what a workflow YAML may write in an actor/method pair, from the action
+                <!-- Actions (the project view's right pane): what a workflow YAML may write in an actor/method pair, from the action
                      catalog, without a run (ActionCatalogWithJavadoc_260930_oo01). Naming an actor
                      lists its actions with their first sentence; naming an action shows its
                      description, its arguments and the step as the YAML writes it. -->
-                <section id="tab-actions" class="rtab-content">
+                <section id="tab-actions" class="rtab-content" data-perspective="project">
                     <!-- Actions: the actors a workflow may name (upper pane) and the chosen one's actions
                          (lower pane), from the action catalog, without a run
                          (ActionCatalogWithJavadoc_260930_oo01). -->
