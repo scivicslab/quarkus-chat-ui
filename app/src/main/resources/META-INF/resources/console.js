@@ -37,6 +37,7 @@
         joblog: "When a batch job did not do what you expected, read the lines it wrote; open it from the job's Log button under Batch Jobs.",
         jobs: "To follow the batch jobs you started, see their state here, and open a job's log or stop it.",
         methodsearch: "When you know a method's name but not which actor offers it, search for it here.",
+        settings: "To change the provider, model, temperature or effort of the conversation shown in the centre pane, set them here.",
         timekeeper: "A timekeeper has nothing to show in this pane; what it is watching is in the centre pane."
     };
 

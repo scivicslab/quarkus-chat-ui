@@ -62,18 +62,6 @@
             <span id="session-label"></span>
             <span id="user-label" style="display:none"></span>
             <button id="logout-btn" style="display:none" title="Logout">Logout</button>
-            <div id="extensions-menu" class="ext-menu">
-                <button id="extensions-btn" title="Show the skill catalog and this project's working directory">Extensions &#x25be;</button>
-                <div id="extensions-panel" class="ext-panel" style="display:none;">
-                    <div class="ext-tabs">
-                        <button class="ext-tab active" data-tab="skills">Skills</button>
-                        <button class="ext-tab" data-tab="project">Project</button>
-                    </div>
-                    <div id="ext-content" class="ext-content">
-                        <div class="ext-loading">Loading…</div>
-                    </div>
-                </div>
-            </div>
             <span id="connection-status" class="disconnected">disconnected</span>
         </div>
     </div>
@@ -93,6 +81,19 @@
                 <button id="new-project-btn" type="button" title="Create a new project">+</button>
                 <button id="actors-refresh" type="button" title="Refresh">&#x21bb;</button>
                 <label class="tab-auto"><input type="checkbox" id="actors-auto" checked> Auto</label>
+            </div>
+            <!-- The skill catalog and this project's working directory: a menu that opens inside this pane. -->
+            <div id="extensions-menu" class="ext-menu">
+                <button id="extensions-btn" title="Show the skill catalog and this project's working directory">Extensions &#x25be;</button>
+                <div id="extensions-panel" class="ext-panel" style="display:none;">
+                    <div class="ext-tabs">
+                        <button class="ext-tab active" data-tab="skills">Skills</button>
+                        <button class="ext-tab" data-tab="project">Project</button>
+                    </div>
+                    <div id="ext-content" class="ext-content">
+                        <div class="ext-loading">Loading…</div>
+                    </div>
+                </div>
             </div>
             <!-- Row 2: how much the view shows, small and muted. -->
             <div id="actors-status" class="dock-status"></div>
@@ -119,28 +120,11 @@
                 <!-- This chat's own settings: the server keeps them per chat actor and the page
                      reloads them when another chat is opened (ChatSettingsInTheChatHeader_261012_oo01). -->
                 <header>
-                    <div id="chat-settings" class="chat-settings">
-                        <label id="provider-label" title="Which provider this conversation talks to (CliHarnessProvider_260912_oo01)">Provider:
-                            <select id="provider-select">
-                                <!-- Populated from GET /api/plugins: only the kinds this instance was started with -->
-                            </select>
-                        </label>
-                        <label id="model-label">Model:
-                            <select id="model-select">
-                                <!-- Populated dynamically from /api/models -->
-                            </select>
-                            <button id="refresh-models-btn" title="Refresh model list">&#x21bb;</button>
-                        </label>
-                        <label id="temperature-label" title="What this conversation asks the server to sample at. Empty asks for nothing and leaves the server on its own default (ConversationTemperature_260914_oo01).">Temp:
-                            <input id="temperature-input" type="number" min="0" max="2" step="0.1" placeholder="server">
-                        </label>
-                        <label id="think-label" title="Whether this conversation lets its model think before answering. Unticked asks the model to skip the thinking phase (ThinkingAndEffortAreConversationSettings_260917_oo01).">
-                            <input type="checkbox" id="think-check" checked> Think
-                        </label>
-                        <label id="effort-label" title="How hard a harness should work on one answer, passed as --effort. Empty leaves the harness on its own default; a plain LLM ignores it.">Effort:
-                            <input id="effort-input" type="text" size="6" placeholder="harness">
-                        </label>
-                        <span id="activity-label"></span>
+                    <!-- Which conversation this is, read-only; its settings are in the right pane's Settings entry. -->
+                    <div id="chat-identity" class="chat-identity" title="The provider and model this conversation runs on, and its id. Change them in the right pane: Settings.">
+                        <span id="chat-identity-provider"></span>
+                        <span id="chat-identity-model"></span>
+                        <span id="chat-identity-id"></span>
                     </div>
                     <div class="left-pane-actions" style="display:flex;align-items:center;gap:8px">
                         <button id="save-chat-btn" title="Save conversation as Markdown">Save Chat</button>
@@ -168,10 +152,12 @@
                             <div id="input-toolbar-left">
                                 <button id="attach-btn" class="icon-btn" title="Attach image">📎</button>
                                 <button id="queue-btn" class="icon-btn" title="Add to queue">⏱</button>
+                                <span id="activity-label"></span>
                             </div>
                             <div id="send-cancel-slot">
                                 <button id="cancel-btn" title="Cancel" disabled>Cancel</button>
-                                <button id="send-btn" title="Send (Shift+Enter)">Send</button>
+                                <button id="send-btn" title="Send (Shift+Enter). The model is asked not to think.">Send</button>
+                                <button id="send-think-btn" title="Send this one message with thinking on. Only a local LLM takes a thinking switch; Claude Code and Codex think as their effort says.">Send (Think mode)</button>
                             </div>
                         </div>
                     </div>
@@ -270,6 +256,7 @@
                      belongs to one perspective; only the active perspective's entries are offered
                      (ProjectPerspective_260911_oo01). The value names the section to show (tab-<value>). -->
                 <select id="right-tab-select" aria-label="Right pane">
+                    <option value="settings" data-perspective="chat">Settings</option>
                     <option value="logdb" data-perspective="chat" selected>Sessions</option>
                     <option value="syslog" data-perspective="chat">System Log</option>
                     <option value="agentloop" data-perspective="chat">Agent Loop</option>
@@ -293,6 +280,30 @@
             </div>
 
             <div class="rtab-body">
+                <!-- Settings of the conversation shown in the centre pane: the server keeps them per conversation
+                     (ChatSettingsInTheChatHeader_261012_oo01). They were in the centre pane's header. -->
+                <section id="tab-settings" class="rtab-content" data-perspective="chat">
+                    <div id="chat-settings" class="chat-settings">
+                        <label id="provider-label" title="Which provider this conversation talks to (CliHarnessProvider_260912_oo01)">Provider:
+                            <select id="provider-select">
+                                <!-- Populated from GET /api/plugins: only the kinds this instance was started with -->
+                            </select>
+                        </label>
+                        <label id="model-label">Model:
+                            <select id="model-select">
+                                <!-- Populated dynamically from /api/models -->
+                            </select>
+                            <button id="refresh-models-btn" title="Refresh model list">&#x21bb;</button>
+                        </label>
+                        <label id="temperature-label" title="What this conversation asks the server to sample at. Empty asks for nothing and leaves the server on its own default (ConversationTemperature_260914_oo01).">Temp:
+                            <input id="temperature-input" type="number" min="0" max="2" step="0.1" placeholder="server">
+                        </label>
+                        <label id="effort-label" title="How hard a harness should work on one answer, passed as --effort. Empty leaves the harness on its own default; a plain LLM ignores it.">Effort:
+                            <input id="effort-input" type="text" size="6" placeholder="harness">
+                        </label>
+                    </div>
+                </section>
+
                 <section id="tab-logdb" class="rtab-content active" data-perspective="chat">
                     <!-- Sessions: list conversations; expand one to read its turn-by-turn trace inline;
                          clean up. (Backed by the H2 I/O log — added in a later phase.) -->

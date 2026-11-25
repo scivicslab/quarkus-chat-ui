@@ -997,7 +997,7 @@
     // Puts the text in the queue without sending it. The item sits there with its Auto off until
     // a human turns it on or advances the queue.
     function queuePrompt(text) {
-        var payload = { text: text, hold: true, images: takePendingImages(), source: "screen" };
+        var payload = { text: text, hold: true, images: takePendingImages(), source: "screen", noThink: true };
         fetch(apiUrl(chatUrl("/chat")), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1225,7 +1225,10 @@
 
     // ── Sending ──────────────────────────────────────────────────────────────
 
-    function sendPrompt() {
+    // thinkMode: whether this one message asks the model to think. Plain Send never does; a message typed on this
+    // screen carries its own answer and the conversation's no-think setting does not apply to it.
+    function sendPrompt(thinkMode) {
+        var think = thinkMode === true;
         var text = promptInput.value.trim();
         if (!text) {
             // Empty send = "send the next one" (quarkus-chat-ui3's own semantics): force-dispatch
@@ -1240,7 +1243,7 @@
         forceScrollToBottom();
         setBusy(true);
 
-        var payload = { text: text, images: takePendingImages(), source: "screen" };
+        var payload = { text: text, images: takePendingImages(), source: "screen", noThink: !think };
 
         fetch(apiUrl(chatUrl("/chat")), {
             method: "POST",
@@ -1271,6 +1274,7 @@
     function initModelPersistence() {
         if (!modelSelect) return;
         modelSelect.addEventListener("change", function () {
+            showIdentity();
             var chosen = modelSelect.value;
             if (!chosen) return;
             var forChat = PROJECT_ID + "/" + CHAT_ID;
@@ -1321,22 +1325,10 @@
         });
     }
 
-    // Thinking and effort belong to the conversation as the model does
-    // (ThinkingAndEffortAreConversationSettings_260917_oo01). A workflow's ask_chat carries a prompt
-    // and nothing else, so a run that wants an answer without reasoning says it here, once.
+    // Effort belongs to the conversation as the model does (ThinkingAndEffortAreConversationSettings_260917_oo01).
+    // Thinking is decided per message by which Send button is pressed, not by a setting here: a conversation's own
+    // no-think setting is for workflows (the chats actor), and a message typed on this screen ignores it.
     function initThinkAndEffort() {
-        var think = el("think-check");
-        if (think) {
-            think.addEventListener("change", function () {
-                fetch(apiUrl(chatUrl("/no-think")), {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ noThink: !think.checked })
-                }).catch(function (err) {
-                    notify("could not change thinking: " + err.message, true);
-                });
-            });
-        }
         var effort = el("effort-input");
         if (effort) {
             effort.addEventListener("change", function () {
@@ -1374,6 +1366,7 @@
             })
             .catch(function () { /* leave the dropdown empty on failure */ });
         providerSelect.addEventListener("change", function () {
+            showIdentity();
             var chosen = providerSelect.value;
             if (!chosen) return;
             var parts = chosen.split(":");
@@ -1445,12 +1438,11 @@
             .then(function (s) {
                 if (forChat !== PROJECT_ID + "/" + CHAT_ID) return;
                 showProvider(s);
+                showIdentity();
                 var box = el("temperature-input");
                 // Empty when this conversation asks for nothing, so the box says what is true
                 // rather than a number the server was never told.
                 if (box) box.value = (s && typeof s.temperature === "number") ? s.temperature : "";
-                var think = el("think-check");
-                if (think) think.checked = !(s && s.noThink);
                 var effort = el("effort-input");
                 // Empty for a provider with no such setting, so the box says what is true.
                 if (effort) effort.value = (s && s.effort) ? s.effort : "";
@@ -1469,8 +1461,20 @@
                     modelSelect.appendChild(opt);
                 }
                 modelSelect.value = model;
+                showIdentity();
             })
             .catch(function () { /* leave whatever the list opened on */ });
+    }
+
+    // The centre pane's header says which conversation this is, as text: the provider and model it is on, and its id.
+    // The selectors that change them are in the right pane's Settings entry.
+    function showIdentity() {
+        var p = el("chat-identity-provider"), m = el("chat-identity-model"), i = el("chat-identity-id");
+        if (!p || !m || !i) return;
+        var chosen = providerSelect && providerSelect.selectedOptions && providerSelect.selectedOptions[0];
+        p.textContent = chosen ? chosen.textContent : "";
+        m.textContent = modelSelect && modelSelect.value ? modelSelect.value : "";
+        i.textContent = PROJECT_ID + "/chat-" + CHAT_ID;
     }
 
     // Abandons the LLM call this conversation is running. The request is delivered with tellNow
@@ -1809,10 +1813,12 @@
         if (viewModeBtn) viewModeBtn.addEventListener("click", toggleViewMode);
         applyViewMode();
 
-        if (sendBtn) sendBtn.addEventListener("click", sendPrompt);
+        if (sendBtn) sendBtn.addEventListener("click", function () { sendPrompt(false); });
+        var sendThinkBtn = el("send-think-btn");
+        if (sendThinkBtn) sendThinkBtn.addEventListener("click", function () { sendPrompt(true); });
         if (promptInput) {
             promptInput.addEventListener("keydown", function (e) {
-                if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); sendPrompt(); return; }
+                if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); sendPrompt(false); return; }
                 if (activeKeybind === "emacs" && emacsKey(e)) e.preventDefault();
             });
             promptInput.addEventListener("paste", function (e) {

@@ -374,6 +374,8 @@ public class ChatSession extends Interpreter {
     private ActorRef<ChatSession> turnSelf;
     private CompletableFuture<TurnReply> turnDone;
     private boolean turnNoThink;
+    /** The source the screen's own messages carry (what the page sends as {@code "source"}). */
+    static final String SCREEN_SOURCE = "screen";
     /**
      * Whether this conversation asks its model to skip the thinking phase, whatever one prompt
      * says. A setting of the conversation, as the model and the temperature are
@@ -1331,8 +1333,10 @@ public class ChatSession extends Interpreter {
         this.turnEmitter = emitter;
         this.turnSelf = self;
         this.turnDone = done;
-        // Either side may ask for it: the conversation's own setting, or this one prompt.
-        this.turnNoThink = noThink || isNoThink();
+        // Either side may ask for it: the conversation's own setting, or this one prompt. A message typed on the screen
+        // is the exception: its Send and Send (Think mode) buttons answer the question for that one message, so the
+        // conversation's setting, which a workflow may have set, does not apply to it.
+        this.turnNoThink = SCREEN_SOURCE.equals(source) ? noThink : (noThink || isNoThink());
         this.turnStartedAt = clock.getAsLong();
         publishStatus();
         if (byDefinition()) handSystemMessage();

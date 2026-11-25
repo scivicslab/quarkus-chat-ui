@@ -40,6 +40,8 @@ public class ProviderSelectE2E {
                 Page page = browser.newPage();
                 page.onPageError(e -> check(false, "page error: " + e));
                 page.navigate(BASE_URL, new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
+                // The conversation's settings are in the right pane's Settings entry.
+                page.selectOption("#right-tab-select", "settings");
                 page.waitForSelector("#provider-select");
                 page.waitForFunction("() => document.querySelectorAll('#model-select option').length > 0");
 

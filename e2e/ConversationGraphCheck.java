@@ -326,15 +326,17 @@ public class ConversationGraphCheck {
             check(!page.querySelectorAll("#conv-graph .cg-node[data-chat='" + project2 + "/01']").isEmpty(),
                     "unfolding shows them again");
 
-            // Thinking and effort, set with the pane's own controls: chat-03's Think box, and chat-05's Effort field
+            // Thinking and effort: chat-03's no-think setting (the Think toggle is gone from the page; a workflow or the API
+            // sets it), and chat-05's Effort field in the right pane's Settings entry
             // (chat-05 is moved to the Claude Code provider, the one that keeps an effort; no prompt is sent).
             rest("POST", "/api/projects/project1/chats/05/provider", "{\"provider\":\"claude\"}");
             page.evaluate("window.chatUiSwitchChat('project1','03')");
             page.waitForTimeout(1500);
-            page.uncheck("#think-check");
+            rest("POST", "/api/projects/project1/chats/03/no-think", "{\"noThink\":true}");
             page.waitForTimeout(800);
             check(rest("GET", "/api/projects/project1/chats/03/status", null).contains("\"noThink\":true"),
-                    "unticking Think on chat-03 set it to answer without thinking");
+                    "the API set chat-03 to answer without thinking");
+            page.selectOption("#right-tab-select", "settings");
             page.evaluate("window.chatUiSwitchChat('project1','05')");
             page.waitForTimeout(1500);
             page.fill("#effort-input", "high");
@@ -434,9 +436,9 @@ public class ConversationGraphCheck {
                     "chat-05 is still on Claude Code at effort high: " + st5);
             page.evaluate("window.chatUiSwitchChat('project1','03')");
             page.waitForTimeout(1500);
-            check(!page.isChecked("#think-check"), "chat-03's Think box comes back unticked");
             page.evaluate("window.chatUiSwitchChat('project1','05')");
             page.waitForTimeout(1500);
+            page.selectOption("#right-tab-select", "settings");
             check("high".equals(page.inputValue("#effort-input")), "chat-05's Effort field comes back with high: '"
                     + page.inputValue("#effort-input") + "'");
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/think-effort-after-restart.png")));

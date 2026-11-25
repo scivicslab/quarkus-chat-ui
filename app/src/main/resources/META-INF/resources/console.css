@@ -440,7 +440,9 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
     border-right: 1px solid var(--border-color, #2c2c2c);
     transition: width .15s ease;
 }
-#left-dock.collapsed { width: 0; border-right: none; }
+/* !important: the width a person dragged the pane to is kept by the page as an inline style, which beats this rule, so the
+   hamburger left the pane open for anyone who had ever resized it. */
+#left-dock.collapsed { width: 0 !important; border-right: none; }
 #left-dock.resizing { transition: none; }
 #left-dock-resize-handle {
     flex: 0 0 5px;
@@ -938,3 +940,20 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
     color: var(--text-secondary, #9aa0a6);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+/* ── Extensions menu in the left pane: the panel opens in the pane's own column, below its button ── */
+#left-dock .ext-menu { padding: 0 10px 4px; }
+#left-dock .ext-panel { position: static; width: auto; max-height: 45vh; margin-top: 4px; box-shadow: none; }
+
+/* ── Centre header: which conversation this is, read-only ── */
+.chat-identity { display: flex; align-items: baseline; gap: 10px; font-size: 12px; color: var(--text-secondary, #b8b8b8);
+    min-width: 0; flex-wrap: wrap; }
+.chat-identity #chat-identity-id { color: var(--text-primary, #e6e6e6); font-weight: 600; }
+.chat-identity #chat-identity-provider::after { content: "·"; margin-left: 10px; }
+
+/* ── The conversation's settings in the right pane: one under the other ── */
+#tab-settings .chat-settings { flex-direction: column; align-items: flex-start; gap: 10px; padding: 8px 2px; }
+
+/* ── The activity text sits beside the input buttons ── */
+#input-toolbar-left #activity-label { color: var(--accent-blue, #a5b4fc); font-size: 12px; }
+#send-cancel-slot > #send-think-btn { width: auto; white-space: nowrap; }

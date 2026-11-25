@@ -961,7 +961,7 @@ footer {
     width: 100px;
 }
 
-#send-btn, #cancel-btn {
+#send-btn, #send-think-btn, #cancel-btn {
     padding: 8px 16px;
     border: none;
     border-radius: 6px;
@@ -971,12 +971,12 @@ footer {
     transition: background var(--dur-base) var(--ease-out);
 }
 
-#send-btn {
+#send-btn, #send-think-btn {
     background: var(--accent-blue);
     color: var(--bg-primary);
 }
 
-#send-btn:hover {
+#send-btn:hover, #send-think-btn:hover {
     background: #7ba9f0;
 }
 
@@ -1579,12 +1579,12 @@ body { font-family: var(--font-body); }
 }
 
 /* CTA pair: filled cobalt primary, outlined secondary (Send / Cancel) */
-#send-btn, #cancel-btn, #auth-submit-btn, .prompt-option-btn {
+#send-btn, #send-think-btn, #cancel-btn, #auth-submit-btn, .prompt-option-btn {
     border-radius: var(--radius-pill);
     font-family: var(--font-body);
     font-weight: 500;
 }
-#send-btn { color: #fff; }
+#send-btn, #send-think-btn { color: #fff; }
 #cancel-btn { color: #fff; }
 
 /* Surfaces: 8px cards, hairline rules */
