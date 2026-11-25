@@ -264,13 +264,16 @@ public class ChatSession extends Interpreter {
     /**
      * The harness's notes for a model given its tools as definitions ({@code OpenAiCompatStandardToolCalling_261120_oo01}):
      * what {@link #SYSTEM_PROMPT_HEAD} and {@link #SYSTEM_PROMPT_TAIL} say, less how to write a call and the list of
-     * tools, which the request's tool definitions carry.
+     * tools, which the request's tool definitions carry. It also asks for one short line before each tool call: a local
+     * model with thinking off otherwise answers a long loop with bare calls, and the screen shows nothing between them.
+     * It is part of the system message, which is sent once, and only a provider that calls tools by definition gets it.
      */
     private static final String HARNESS_NOTES = """
             You are a helpful assistant with tools. Call a tool whenever you need what it gives; after its \
             result comes back, call another tool or give your final answer. When you have enough \
             information, answer in plain text without calling a tool: that text is taken as your final \
-            answer to the user.
+            answer to the user. Before each tool call, write one short line (at most 20 words) saying \
+            what you are about to do and why; when the last tool result is in, write the answer.
 
             """ + ASK_PERSON_NOTE + "\n\n" + IMAGE_NOTE;
 
@@ -1829,7 +1832,10 @@ public class ChatSession extends Interpreter {
                     + (outcome.calls().isEmpty() ? "" : "; a call in it was not run"));
             return new ActionResult(false, "answer after the " + finalRequest.name().toLowerCase().replace('_', ' '));
         }
-        if (!writtenText.isEmpty()) repeatedCalls.reset();
+        // Any text the model writes ends a run of identical calls, except for a provider that calls tools by definition: its
+        // system message asks for a short line before each call, so text beside a call says nothing about whether the model
+        // is going round in a circle, and a model repeating one call with a fresh line each time is still repeating it.
+        if (!writtenText.isEmpty() && (outcome.calls().isEmpty() || !byDefinition())) repeatedCalls.reset();
 
         // A reply that asks the person ends the turn, whatever else it calls: the other calls are work the
         // person has not decided on yet, so none of them runs (AskThePersonEndsTheTurn_261119_oo01).
