@@ -309,7 +309,7 @@ public class ConversationGraphCheck {
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/graph-6-other-instance.png")));
 
             // Folding a project hides its conversations, and stays folded after a reload.
-            page.click("#conv-graph .cg-project[data-project='" + project2 + "']");
+            page.click("#conv-graph .cg-project[data-project='" + project2 + "'] .cg-fold");
             page.waitForTimeout(400);
             check(page.querySelectorAll("#conv-graph .cg-node[data-chat='" + project2 + "/01']").isEmpty()
                             && "false".equals(page.getAttribute("#conv-graph .cg-project[data-project='" + project2 + "']", "aria-expanded")),
@@ -321,10 +321,29 @@ public class ConversationGraphCheck {
                             && page.querySelectorAll("#conv-graph .cg-node[data-chat='" + project2 + "/01']").isEmpty(),
                     "after a reload project2 is still folded");
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/graph-6-folded.png")));
-            page.click("#conv-graph .cg-project[data-project='" + project2 + "']");
+            page.click("#conv-graph .cg-project[data-project='" + project2 + "'] .cg-fold");
             page.waitForTimeout(400);
             check(!page.querySelectorAll("#conv-graph .cg-node[data-chat='" + project2 + "/01']").isEmpty(),
                     "unfolding shows them again");
+
+            // Clicking a project's name opens that project's view, as clicking the project in the Actor Tree does:
+            // the centre pane shows the project, the right pane its entries. The fold mark still folds.
+            page.click("#conv-graph .cg-project[data-project='" + project2 + "'] .cg-project-name");
+            page.waitForTimeout(800);
+            check("project".equals(page.getAttribute("#console-root", "data-perspective")),
+                    "clicking a project's name in the Graph opens the project view: perspective="
+                            + page.getAttribute("#console-root", "data-perspective"));
+            check(page.isVisible("#project-panel") && !page.isVisible("#main-panel"),
+                    "the centre pane shows the project");
+            check(page.textContent("#project-panel-title").contains(project2),
+                    "the centre pane names " + project2 + ": " + page.textContent("#project-panel-title"));
+            check(page.evaluate("() => document.getElementById('right-tab-select').selectedOptions[0].dataset.perspective").equals("project"),
+                    "the right pane shows a project entry");
+            check(!page.querySelectorAll("#conv-graph .cg-node[data-chat='" + project2 + "/01']").isEmpty(),
+                    "the click did not fold the project");
+            page.click("#conv-graph .cg-node[data-chat='project1/03']");
+            page.waitForTimeout(800);
+            check("chat".equals(page.getAttribute("#console-root", "data-perspective")), "clicking a conversation goes back to the chat view");
 
             // Thinking and effort: chat-03's no-think setting (the Think toggle is gone from the page; a workflow or the API
             // sets it), and chat-05's Effort field in the right pane's Settings entry

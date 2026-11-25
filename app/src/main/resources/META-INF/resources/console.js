@@ -2024,6 +2024,13 @@
         return n;
     }
 
+    // Puts the screen on one project: the centre pane shows its workflows and the right pane its entries
+    // (ProjectPerspective_260911_oo01). A Project in the Actor Tree and a project's name in the Graph both call this.
+    function showProject(projectId) {
+        switchPerspective("project", projectId);
+        refreshActors(); // re-render so the tab-active highlight moves immediately
+    }
+
     // Puts the screen on one conversation: the chat pane, the right pane and the tree's highlight. The
     // conversation's name in the tree and its name in the Project Property list both call this, so the
     // two cannot drift apart (ProjectPropertyChatLinks_261114_oo01).
@@ -2140,8 +2147,7 @@
             name.title = "Show project " + node.name;
             name.addEventListener("click", function (e) {
                 e.stopPropagation(); // don't also trigger the fold/unfold toggle on the label
-                switchPerspective("project", node.name);
-                refreshActors(); // re-render so the tab-active highlight moves immediately
+                showProject(node.name);
             });
         }
         // A Timekeeper node (the ".timekeeper" child of a ConversationSquad actor) switches the console to that
@@ -2530,10 +2536,16 @@
                 svgEl("text", { x: p.x - 4, y: p.y + 4, "class": "cg-fold" }, pg).textContent = folded ? "▸" : "▾";
                 var pl = svgEl("text", { x: p.x + 10, y: p.y + 4 }, pg);
                 var name = r.g.name;
-                svgEl("tspan", { "class": "cg-project-name" }, pl).textContent = name || r.project;
+                var nameSpan = svgEl("tspan", { "class": "cg-project-name" }, pl);
+                nameSpan.textContent = name || r.project;
+                // The name opens the project's view, as the Actor Tree's project does; the rest of the row folds it.
+                nameSpan.addEventListener("click", function (e) {
+                    e.stopPropagation();
+                    showProject(r.project);
+                });
                 if (name) svgEl("tspan", { "class": "cg-project-id" }, pl).textContent = "  " + r.project;
                 svgEl("title", {}, pg).textContent = (name ? name + " (" + r.project + ")" : r.project)
-                    + " — " + (r.g.nodes || []).length + " conversation(s); click to " + (folded ? "unfold" : "fold");
+                    + " — " + (r.g.nodes || []).length + " conversation(s); click the name to open the project, the mark to " + (folded ? "unfold" : "fold");
                 pg.addEventListener("click", function () { toggleGraphProject(r.project); });
                 return;
             }
