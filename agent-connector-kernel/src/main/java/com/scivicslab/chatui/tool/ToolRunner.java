@@ -2,6 +2,7 @@ package com.scivicslab.chatui.tool;
 
 import com.scivicslab.chatui.agent.CalcExpression;
 import com.scivicslab.chatui.agent.DocSearchTool;
+import com.scivicslab.chatui.agent.FileEditTool;
 import com.scivicslab.chatui.agent.FileReadTool;
 import com.scivicslab.chatui.agent.FileRemoveTool;
 import com.scivicslab.chatui.agent.FileWriteTool;
@@ -96,6 +97,9 @@ public final class ToolRunner {
                 return FileReadTool.read(scope.fileScope(), input(args, "path"));
             case "write":
                 return FileWriteTool.write(scope.fileScope(), input(args, "path"), input(args, "content"));
+            case "edit":
+                return FileEditTool.edit(scope.fileScope(), input(args, "path"), input(args, "old_string"),
+                        input(args, "new_string"), input(args, "replace_all"));
             case "calc": {
                 // JShell evaluates Java, not arithmetic, and does it in this process
                 // (CalcExpression). Read the argument before it gets there.

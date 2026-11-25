@@ -76,6 +76,7 @@ public final class ConversationToolCatalog {
                 false);
         m.put("list_references", ToolCatalog.core("list_references"));
         m.put("write", ToolCatalog.core("write"));
+        m.put("edit", ToolCatalog.core("edit"));
         m.put("remove", ToolCatalog.core("remove"));
         add(m, "ask_chat", """
                 send an instruction to another conversation. Write chatId by where that conversation is: in your

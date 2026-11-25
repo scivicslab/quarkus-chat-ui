@@ -59,7 +59,9 @@ class ToolCatalogTest {
             Map.entry("set_request_messages", List.of(List.of("chatId", "messages"), List.of("chatId", "messages"))),
             Map.entry("complete_messages", List.of(List.of("chatId", "messages", "model", "noThink"), List.of("chatId", "messages"))),
             // Added after the table was read (ExternalMcpServersOfAConversation_261120_oo01).
-            Map.entry("set_mcp_servers", List.of(List.of("chatId", "servers"), List.of("chatId", "servers"))));
+            Map.entry("set_mcp_servers", List.of(List.of("chatId", "servers"), List.of("chatId", "servers"))),
+            // Added after a local model's calls to a tool the catalog lacked came back as text (2026-11-25).
+            Map.entry("edit", List.of(List.of("path", "old_string", "new_string", "replace_all"), List.of("path", "old_string", "new_string"))));
 
     static final Set<String> DRIVING = Set.of(
             "ask_person", "ask_chat", "ask_chat_urgent", "accept_reply", "cancel_request", "expect_report");

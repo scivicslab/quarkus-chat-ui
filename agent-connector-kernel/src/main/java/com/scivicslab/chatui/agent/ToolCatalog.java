@@ -230,6 +230,19 @@ public final class ToolCatalog {
                     new ToolParameter("path", "string", true, ""),
                     new ToolParameter("content", "string", false, "")),
                 false);
+        add(m, "edit", """
+                change a few lines of an existing file under the working directory without rewriting it: the exact
+                text old_string is replaced by new_string. old_string must be in the file exactly as written,
+                spaces and line breaks included, and must occur once — add the lines around it until it is unique,
+                or pass replace_all as "true" to replace every occurrence. Nothing is changed when it is absent or
+                not unique, and the reply says which. Use write for a new file or a complete rewrite.
+                """,
+                List.of(
+                    new ToolParameter("path", "string", true, ""),
+                    new ToolParameter("old_string", "string", true, ""),
+                    new ToolParameter("new_string", "string", true, ""),
+                    new ToolParameter("replace_all", "boolean", false, "")),
+                false);
         add(m, "remove", """
                 take one file away from the working directory. It is MOVED to .trash/<timestamp>/ keeping the
                 path it had, not deleted, so a wrong one can be put back and nothing is lost. The reply gives

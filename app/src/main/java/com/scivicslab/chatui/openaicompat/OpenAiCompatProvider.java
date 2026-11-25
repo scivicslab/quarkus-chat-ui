@@ -157,6 +157,9 @@ public class OpenAiCompatProvider implements LlmProvider {
     /** {@inheritDoc} */
     @Override public boolean callsToolsByDefinition() { return true; }
 
+    /** {@inheritDoc} */
+    @Override public List<String> toolNames() { return tools.stream().map(ToolDefinition::name).toList(); }
+
     /**
      * {@inheritDoc}
      *

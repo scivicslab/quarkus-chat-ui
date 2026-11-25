@@ -8,6 +8,7 @@ import com.scivicslab.chatui.agent.FileAccessScope;
 import com.scivicslab.chatui.agent.ChatInspection;
 import com.scivicslab.chatui.agent.RepeatedCallDetector;
 import com.scivicslab.chatui.agent.TextToolCallParser;
+import com.scivicslab.chatui.agent.ToolCallMarkup;
 import com.scivicslab.chatui.agent.ToolCall;
 import com.scivicslab.chatui.agent.ToolSet;
 import com.scivicslab.chatui.kernel.ParallelCalls;
@@ -367,6 +368,15 @@ public class ChatSession extends Interpreter {
     private String repairText;
     private List<String> repairProblems = List.of();
     private String repairTool;
+    // A reply with no tool call whose text is a model's own tool-call markup (a server that did not read the call and left it
+    // in the text: GLM-5.3 calling a tool name the request did not offer). It is not an answer. markupPending: the step that
+    // just ran was such a reply and repairBrokenCall has not dealt with it yet; markupRetries: how many this turn has had;
+    // markupText: the latest one, for the log.
+    private boolean markupPending;
+    private int markupRetries;
+    private String markupText;
+    /** How many times in a turn a reply of tool-call markup is answered with a note and another request. */
+    static final int MAX_MARKUP_RETRIES = 2;
     // Data URLs attached to this turn's prompt, sent to the provider on step 1 only
     // (stepExpectingAction) — a later step's provider call carries a tool observation, not the
     // original attachment, so re-sending them would just repeat the same image every step.
@@ -1367,6 +1377,9 @@ public class ChatSession extends Interpreter {
         this.repairText = null;
         this.repairProblems = List.of();
         this.repairTool = null;
+        this.markupPending = false;
+        this.markupRetries = 0;
+        this.markupText = null;
         this.requestMessagesToRestore = null;
         this.lastWorkerReply = null;
         this.lastJudgment = null;
@@ -1806,6 +1819,8 @@ public class ChatSession extends Interpreter {
         // Any text the model writes ends a run of identical calls. The one request made after a repeated call is
         // the end of the turn: what it wrote is the answer, and a call it makes anyway is not run.
         String writtenText = TextToolCallParser.stripToolCallBlocks(outcome.text()).strip();
+        // A reply of a model's tool-call markup is no answer even here: the call is not run, and it is not shown as text.
+        if (finalRequest != FinalRequest.NONE && byDefinition() && ToolCallMarkup.in(writtenText)) writtenText = "";
         if (finalRequest != FinalRequest.NONE) {
             finalAnswer = writtenText.isEmpty() ? noAnswerText() : writtenText;
             logToConversationSquad(writtenText.isEmpty() ? "WARNING" : "INFO", "turn" + ioTurnNo + "/step" + stepCount
@@ -1849,6 +1864,18 @@ public class ChatSession extends Interpreter {
             return new ActionResult(false, "tool call could not be read");
         }
         repairRun = 0;
+
+        // A reply with no call whose text is a model's tool-call markup is a call the server did not read, not an answer
+        // (GLM-5.3 writing <tool_call>edit... for a name the request did not offer). Nothing in it is run. The
+        // think-repair transition answers it with a note and another request, up to MAX_MARKUP_RETRIES a turn.
+        if (byDefinition() && outcome.calls().isEmpty() && ToolCallMarkup.in(outcome.text())) {
+            markupPending = true;
+            markupRetries++;
+            markupText = outcome.text();
+            finalAnswer = null;
+            recordMarkupCall(false);
+            return new ActionResult(false, "tool call written as text");
+        }
 
         if (!outcome.calls().isEmpty()) {
             pendingCalls = outcome.calls();
@@ -3570,6 +3597,7 @@ public class ChatSession extends Interpreter {
      * @return {@code success=true} when the note was queued as the next step's prompt
      */
     public ActionResult repairBrokenCall(String maxInARow) {
+        if (markupPending) return retryAfterMarkup();
         if (!repairPending) return new ActionResult(false, "no broken tool call");
         repairPending = false;
         if (cancelScope.isCancelled() || cancelScope.isPauseRequested()) return new ActionResult(false, "paused or cancelled");
@@ -3589,6 +3617,56 @@ public class ChatSession extends Interpreter {
         turnTranscript.append(note).append("\n\n");
         turnEmitter.accept(ChatEvent.thinking("\n→ " + note + "\n"));
         return new ActionResult(true, "repairing a broken tool call");
+    }
+
+    /**
+     * The step that just ran was a reply of tool-call markup in its text, with no call the server read. The reply is in the
+     * provider's history and nothing in it ran. Queues a note — that the call was not understood, and the names the model
+     * may call — as the next step's prompt, so the turn goes on under the same step limit. The third such reply in a turn
+     * ends it with an error, in the log and on the screen, and never with the markup as the answer.
+     */
+    private ActionResult retryAfterMarkup() {
+        markupPending = false;
+        if (cancelScope.isCancelled() || cancelScope.isPauseRequested()) return new ActionResult(false, "paused or cancelled");
+        if (markupRetries > MAX_MARKUP_RETRIES) {
+            turnError = "the model's tool call could not be parsed: it wrote its call as text " + markupRetries
+                    + " times in this turn (the server did not read it as a tool call)";
+            finalAnswer = null;
+            recordMarkupCall(true);
+            turnEmitter.accept(ChatEvent.error("Error: " + turnError));
+            return new ActionResult(false, "tool call could not be parsed");
+        }
+        String note = markupNote(provider.toolNames());
+        finalAnswer = null;
+        pendingPrompt = note;
+        turnTranscript.append(note).append("\n\n");
+        turnEmitter.accept(ChatEvent.thinking("\n→ " + note + "\n"));
+        return new ActionResult(true, "retrying after a tool call written as text");
+    }
+
+    /** The note after a reply of tool-call markup: nothing ran, how to call, and the names to use. */
+    static String markupNote(List<String> names) {
+        String list = names == null || names.isEmpty() ? "the tools you were given" : String.join(", ", names);
+        return "Your tool call was not understood: it was written as text, and no tool ran. Call tools only through the "
+                + "tool_calls mechanism, with one of these names: " + list + ".";
+    }
+
+    /**
+     * Records a reply of tool-call markup to the I/O log ({@code turn{N}/step{M}/markup-call}) and the conversation's own
+     * log: how many this turn has had, and whether the turn gave up on it.
+     */
+    private void recordMarkupCall(boolean gaveUp) {
+        String text = markupText == null ? "" : markupText;
+        logToConversationSquad("WARNING", "turn" + ioTurnNo + "/step" + stepCount + "/llm: the reply was tool-call markup in its text, not a call ("
+                + markupRetries + " in this turn)" + (gaveUp ? "; the turn ends with an error" : ""));
+        if (ioLog == null || ioSession < 0) return;
+        try {
+            ioLog.record(ioSession, "agent", "turn" + ioTurnNo + "/step" + stepCount + "/markup-call",
+                    "TOOL CALL WRITTEN AS TEXT (" + markupRetries + " in this turn)" + (gaveUp ? "\nTHE TURN ENDS WITH AN ERROR" : "")
+                            + "\nTEXT:\n" + text);
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "I/O log markup-call record failed", e);
+        }
     }
 
     /**
@@ -3769,7 +3847,9 @@ public class ChatSession extends Interpreter {
     private String whyNotRunnable(ToolCall tc) {
         String prefix = "error: the call could not be run: ";
         if (!toolOfThisConversation(tc.name()) && !isExternalTool(tc.name())) {
-            return prefix + "there is no tool named \"" + tc.name() + "\". Call one of the tools you were given.";
+            List<String> names = provider.toolNames();
+            return prefix + "there is no tool named \"" + tc.name() + "\"; available: "
+                    + (names.isEmpty() ? "the tools you were given" : String.join(", ", names)) + ".";
         }
         JSONObject args;
         try {

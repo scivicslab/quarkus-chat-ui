@@ -187,6 +187,9 @@ public interface LlmProvider {
      */
     default boolean callsToolsByDefinition() { return false; }
 
+    /** @return the names of the tools the model is given now, for a provider that calls tools by definition; empty otherwise */
+    default List<String> toolNames() { return List.of(); }
+
     /**
      * Makes {@code text} the conversation's system message, the first message of every request: the
      * harness's notes, the skill catalog and the project's instructions.

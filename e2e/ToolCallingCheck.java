@@ -42,6 +42,16 @@ public class ToolCallingCheck {
         if (!ok) failures++;
     }
 
+    static String waitIdle(String chat) throws Exception {
+        String status = "";
+        for (int i = 0; i < 60; i++) {
+            Thread.sleep(1000);
+            status = get(chat + "/status");
+            if (status.contains("\"busy\":false") && i > 2) break;
+        }
+        return status;
+    }
+
     static int count(String text, String part) {
         int n = 0;
         for (int i = text.indexOf(part); i >= 0; i = text.indexOf(part, i + part.length())) n++;
@@ -84,6 +94,37 @@ public class ToolCallingCheck {
         check(count(trace, "\"toolName\":\"write\"") == 1, "write is in the I/O log once", trace);
         check(count(trace, "\"toolName\":\"read\"") == 1, "read is in the I/O log once", trace);
         check(!trace.contains("/repair"), "no call was repaired", trace);
+
+        // A reply that is the model's call markup in its text is not an answer (the GLM-5.3 reply of project5/chat-01, 2026-11-25).
+        System.out.println("create chat-03: " + post(base + "/api/projects/project1/chats/03", "{}"));
+        String chat3 = base + "/api/projects/project1/chats/03";
+        System.out.println("POST chat 03: " + post(chat3 + "/chat", "{\"text\":\"SCENARIO-X1\"}"));
+        String status3 = waitIdle(chat3);
+        check(status3.contains("\"busy\":false"), "SCENARIO-X1: the turn ended", status3);
+        String messages3 = get(chat3 + "/request-messages");
+        check(messages3.contains("X1-DONE"), "X1: the turn went on after the markup to a real call and an answer", messages3);
+        String log3 = get(chat3 + "/log");
+        check(log3.contains("the reply was tool-call markup in its text, not a call (1 in this turn)")
+                && !log3.contains("the turn ends with an error"), "X1: the markup was noted once and the turn did not end on it", log3);
+        String sessions3 = get(base + "/api/sessions?conversationSquadId=project1/chat-03");
+        Matcher m3 = Pattern.compile("\"sessionId\"\\s*:\\s*(\\d+)").matcher(sessions3);
+        String trace3 = m3.find() ? get(base + "/api/sessions/" + m3.group(1) + "/trace/1") : "";
+        check(count(trace3, "\"toolName\":\"write\"") == 1 && !trace3.contains("\"toolName\":\"edit\""),
+                "X1: the real write ran once, and nothing ran from the markup", trace3);
+
+        System.out.println("create chat-04: " + post(base + "/api/projects/project1/chats/04", "{}"));
+        String chat4 = base + "/api/projects/project1/chats/04";
+        System.out.println("POST chat 04: " + post(chat4 + "/chat", "{\"text\":\"SCENARIO-X2\"}"));
+        String status4 = waitIdle(chat4);
+        check(status4.contains("\"busy\":false"), "SCENARIO-X2: the turn ended", status4);
+        String messages4 = get(chat4 + "/request-messages");
+        String log4 = get(chat4 + "/log");
+        check(count(log4, "the reply was tool-call markup in its text, not a call") == 4 && log4.contains("(3 in this turn); the turn ends with an error"),
+                "X2: the model was given two retries, and the third markup reply ended the turn with an error", log4);
+        check(log4.contains("reminder decision: SKIPPED | the turn has no final answer"),
+                "X2: the end-of-turn bookkeeping check did not run on the markup", log4);
+        check(!messages4.contains("X1-DONE") && !get(chat4 + "/request-messages").contains("<tool_call>edit"),
+                "X2: the markup is not left in the conversation as an answer", messages4);
 
         System.out.println(failures == 0 ? "ALL PASSED" : failures + " FAILED");
         System.exit(failures == 0 ? 0 : 1);

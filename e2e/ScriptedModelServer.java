@@ -35,6 +35,9 @@ import java.util.regex.Pattern;
  * {@code SCENARIO-G4}: make chat-01 on node b chat-03's "reviewer", a role on another chat-ui instance (ConversationGraphCheck).</li>
  * <li>{@code SCENARIO-T}: call {@code list_running_tools} and {@code search_docs}, which reach the AI-workspace and
  * html-saurus as nodes; the turn ends with {@code TOOLS-DONE} followed by their results (ToolNodesCheck).</li>
+ * <li>{@code SCENARIO-X1}: the first reply is GLM-5.3's call markup left in the text, the one after the note "Your tool
+ * call was not understood" is a real {@code write}, and the turn ends with {@code X1-DONE}; {@code SCENARIO-X2}: every reply
+ * is the markup (ToolCallingCheck).</li>
  * <li>The end-of-turn reminder check registers a reminder only for an answer that says "I will report back".</li>
  * <li>{@code SCENARIO-M}: {@code write} a file, {@code read} it back, and end with {@code NATIVE-DONE} followed by
  * what was read (McpServerCheck, OpenAiCompatStandardToolCalling_261120_oo01).</li>
@@ -199,6 +202,18 @@ public class ScriptedModelServer {
             </invoke>
             </function_calls>""";
 
+    /** GLM-5.3's own call markup, as the server leaves it in the text of a reply when it did not read it as a call. */
+    static final String MARKUP_X = "<tool_call>edit<arg_key>new_string</arg_key><arg_value>X-NEW</arg_value>"
+            + "<arg_key>old_string</arg_key><arg_value>X-OLD</arg_value><arg_key>path</arg_key><arg_value>x-e2e.txt</arg_value></tool_call>";
+
+    static final String WRITE_X = """
+            <function_calls>
+            <invoke name="write">
+            <parameter name="path">x-e2e.txt</parameter>
+            <parameter name="content">X-OLD</parameter>
+            </invoke>
+            </function_calls>""";
+
     static final String READ_M = """
             <function_calls>
             <invoke name="read">
@@ -245,6 +260,12 @@ public class ScriptedModelServer {
             return "{\"proposals\":[{\"quote\":" + JSON.writeValueAsString(quote)
                     + ",\"problem\":\"REVIEWED-BY-CONVERSATION\",\"fix\":\"shorten it\"}]}";
         }
+        // SCENARIO-X1: the reply is call markup in the text, then (after the note) a real call, then an answer.
+        // SCENARIO-X2: every reply is call markup, so the turn must end with an error and never with the markup as its answer.
+        if (last.contains("SCENARIO-X2") || (whole.contains("SCENARIO-X2") && last.contains("Your tool call was not understood"))) return MARKUP_X;
+        if (last.contains("SCENARIO-X1")) return MARKUP_X;
+        if (last.contains("Your tool call was not understood") && whole.contains("SCENARIO-X1")) return WRITE_X;
+        if (last.contains("Tool result (write)") && whole.contains("SCENARIO-X1")) return "X1-DONE";
         if (last.contains("SCENARIO-M")) return WRITE_M;
         if (last.contains("Tool result (write)") && whole.contains("SCENARIO-M")) return READ_M;
         if (last.contains("Tool result (read)") && whole.contains("SCENARIO-M")) return "NATIVE-DONE\n" + last;
