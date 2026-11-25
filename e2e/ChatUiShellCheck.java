@@ -86,19 +86,44 @@ public class ChatUiShellCheck {
             double reopened = dockWidth(page);
             check(reopened > 100, "the hamburger opens it again: " + reopened + "px");
 
-            // (1) Extensions is in the left pane, not in the navbar.
-            check(!(Boolean) page.evaluate("() => !!document.querySelector('#app-header #extensions-btn')"),
-                    "the navbar has no Extensions button");
-            check((Boolean) page.evaluate("() => !!document.querySelector('#left-dock #extensions-btn')"),
-                    "the left pane has the Extensions button");
+            // (1) Extensions is a view of the left pane, chosen in the same menu as Actor Tree and Graph: not in the navbar,
+            // not a separate button, and not a floating panel.
+            check(!(Boolean) page.evaluate("() => !!document.getElementById('extensions-btn')"),
+                    "there is no separate Extensions button anywhere");
+            check(!(Boolean) page.evaluate("() => !!document.querySelector('#app-header #extensions-view, #app-header .ext-panel')"),
+                    "the navbar has no Extensions");
             check((Boolean) page.evaluate("() => !!document.querySelector('#app-header #theme-select') && !!document.querySelector('#app-header #connection-status')"),
                     "the navbar keeps Theme and the connection status");
-            page.click("#left-dock #extensions-btn");
+            List<String> views = (List<String>) page.evaluate("() => Array.from(document.querySelectorAll('#left-view-select option')).map(o => o.textContent.trim())");
+            check(views.equals(List.of("Actor Tree", "Graph", "Extensions")), "the left pane's menu offers: " + views);
+            check(page.isVisible("#actors-tree") && !page.isVisible("#extensions-view"), "the Actor Tree is shown at the start, not Extensions");
+            page.selectOption("#left-view-select", "extensions");
             page.waitForSelector("#extensions-panel .ext-tab");
-            check(page.isVisible("#extensions-panel"), "the Extensions panel opens from the left pane");
-            check(page.locator("#extensions-panel").boundingBox().x >= -1, "the panel is on the screen, not cut off");
+            page.waitForSelector("#ext-content .ext-item, #ext-content .ext-roots");
+            check(page.isVisible("#extensions-view") && !page.isVisible("#actors-tree") && !page.isVisible("#conv-graph"),
+                    "choosing Extensions shows it in the left pane's content area, in place of the other views");
+            check("static".equals(page.evaluate("() => getComputedStyle(document.getElementById('extensions-panel')).position")),
+                    "the panel is part of the pane, not floating");
+            double paneWidth = dockWidth(page);
+            double panelWidth = page.locator("#extensions-panel").boundingBox().width;
+            check(panelWidth <= paneWidth + 1 && page.locator("#extensions-panel").boundingBox().x >= -1,
+                    "the panel stays inside the pane: " + panelWidth + " of " + paneWidth + " px");
+            check(page.locator("#actors-status").textContent().isEmpty(), "the actor count is not shown under Extensions");
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/shell-2-extensions.png")));
-            page.click("#left-dock #extensions-btn");
+            page.click("#extensions-panel .ext-tab[data-tab=project]");
+            page.waitForSelector("#ext-content .ext-input");
+            check(page.isVisible("#ext-content .ext-action"), "the Project tab shows the working directory field and Apply");
+            page.click("#extensions-panel .ext-tab[data-tab=skills]");
+            page.waitForSelector("#ext-content .ext-item, #ext-content .ext-roots");
+            // The choice is remembered like the other views.
+            page.reload();
+            page.waitForLoadState(LoadState.DOMCONTENTLOADED);
+            page.waitForSelector("#extensions-panel .ext-tab");
+            check("extensions".equals(page.inputValue("#left-view-select")) && page.isVisible("#extensions-view"),
+                    "after a reload the left pane is still on Extensions");
+            page.selectOption("#left-view-select", "tree");
+            page.waitForSelector("#actors-tree .actor-name");
+            check(page.isVisible("#actors-tree") && !page.isVisible("#extensions-view"), "choosing Actor Tree again hides Extensions");
 
             // (3) The centre header: which conversation, and three buttons.
             String head = page.locator("#app > header").innerText();

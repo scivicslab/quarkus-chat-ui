@@ -70,22 +70,26 @@
         <!-- (2) Collapsible left dock: the actor tree (html-saurus-style). -->
         <aside id="left-dock">
             <!-- Row 1: what the dock shows (the menu names the view, so there is no title), then the controls.
-                 The actor tree, or every project's conversations with their superior and role edges
-                 (ConversationGraphInTheLeftPane_261117_oo01). Refresh and Auto apply to the view shown. -->
+                 The actor tree, every project's conversations with their superior and role edges
+                 (ConversationGraphInTheLeftPane_261117_oo01), or the Extensions. Refresh and Auto apply to the view shown. -->
             <div class="dock-head">
                 <!-- One menu, as the right pane has (#right-tab-select). -->
                 <select id="left-view-select" aria-label="Left pane">
                     <option value="tree" title="Every actor of this instance, as a tree">Actor Tree</option>
                     <option value="graph" title="Every project's conversations: superior to subordinate, and the roles set with set_collaborator">Graph</option>
+                    <option value="extensions" title="The skill catalog, and the working directory of the project of the conversation shown">Extensions</option>
                 </select>
                 <button id="new-project-btn" type="button" title="Create a new project">+</button>
                 <button id="actors-refresh" type="button" title="Refresh">&#x21bb;</button>
                 <label class="tab-auto"><input type="checkbox" id="actors-auto" checked> Auto</label>
             </div>
-            <!-- The skill catalog and this project's working directory: a menu that opens inside this pane. -->
-            <div id="extensions-menu" class="ext-menu">
-                <button id="extensions-btn" title="Show the skill catalog and this project's working directory">Extensions &#x25be;</button>
-                <div id="extensions-panel" class="ext-panel" style="display:none;">
+            <!-- Row 2: how much the view shows, small and muted. -->
+            <div id="actors-status" class="dock-status"></div>
+            <div id="actors-tree"></div>
+            <div id="conv-graph" hidden></div>
+            <!-- The skill catalog and the project's working directory, as the third view of this pane. -->
+            <div id="extensions-view" hidden>
+                <div id="extensions-panel" class="ext-panel">
                     <div class="ext-tabs">
                         <button class="ext-tab active" data-tab="skills">Skills</button>
                         <button class="ext-tab" data-tab="project">Project</button>
@@ -95,10 +99,6 @@
                     </div>
                 </div>
             </div>
-            <!-- Row 2: how much the view shows, small and muted. -->
-            <div id="actors-status" class="dock-status"></div>
-            <div id="actors-tree"></div>
-            <div id="conv-graph" hidden></div>
         </aside>
         <div id="left-dock-resize-handle" title="Drag to resize the actor panel"></div>
 

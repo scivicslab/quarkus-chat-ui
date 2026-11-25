@@ -2260,7 +2260,7 @@
                 renderActorTree(root);
                 // Only while the tree is shown: other code refreshes the tree too (opening a conversation), and the
                 // Graph view's count must not be overwritten.
-                if (status && leftView !== "graph") status.textContent = countActors(root) + " actor(s)";
+                if (status && leftView === "tree") status.textContent = countActors(root) + " actor(s)";
             })
             .catch(function (err) {
                 if (status) status.textContent = "error: " + err.message;
@@ -2302,7 +2302,10 @@
     // the roles a conversation plays as emoji in front of its label. A project row folds and unfolds its
     // conversations; which are folded is remembered like the view choice.
     var LEFT_VIEW_KEY = "chat-ui-left-view";
-    var leftView = localStorage.getItem(LEFT_VIEW_KEY) === "graph" ? "graph" : "tree";
+    var leftView = (function () {
+        var saved = localStorage.getItem(LEFT_VIEW_KEY);
+        return saved === "graph" || saved === "extensions" ? saved : "tree";
+    })();
     var GRAPH_COLLAPSED_KEY = "chat-ui-graph-collapsed";
     var graphCollapsed = (function () {
         try {
@@ -2639,9 +2642,10 @@
         var tree = document.getElementById("actors-tree");
         var graph = document.getElementById("conv-graph");
         var view = document.getElementById("left-view-select");
-        var isGraph = leftView === "graph";
-        if (tree) tree.hidden = isGraph;
-        if (graph) graph.hidden = !isGraph;
+        var extensions = document.getElementById("extensions-view");
+        if (tree) tree.hidden = leftView !== "tree";
+        if (graph) graph.hidden = leftView !== "graph";
+        if (extensions) extensions.hidden = leftView !== "extensions";
         if (view) view.value = leftView;
         // The count under the menu belongs to the view; cleared until the view's own refresh writes it.
         var status = document.getElementById("actors-status");
@@ -2651,19 +2655,20 @@
 
     // What Refresh and Auto refresh: the view shown.
     function refreshLeftDock() {
+        if (leftView === "extensions") { extShow(); return Promise.resolve(); }
         return leftView === "graph" ? refreshGraph(false) : refreshActors();
     }
 
     function initLeftViews() {
         var view = document.getElementById("left-view-select");
         if (view) view.addEventListener("change", function () {
-            leftView = view.value === "graph" ? "graph" : "tree";
+            leftView = view.value === "graph" || view.value === "extensions" ? view.value : "tree";
             applyLeftView();
             graphLastSig = null;
             refreshLeftDock();
         });
         applyLeftView();
-        if (leftView === "graph") refreshLeftDock();
+        if (leftView !== "tree") refreshLeftDock();
     }
 
     function initActors() {
@@ -2680,7 +2685,8 @@
                 if (!timer) {
                     timer = setInterval(function () {
                         var dock = document.getElementById("left-dock");
-                        if (dock && !dock.classList.contains("collapsed")) refreshLeftDock();
+                        // The Extensions view is read when it is shown and by Refresh, not every few seconds.
+                        if (dock && !dock.classList.contains("collapsed") && leftView !== "extensions") refreshLeftDock();
                     }, 3000);
                 }
             } else if (timer) {
@@ -3537,29 +3543,18 @@
         else extRenderSkills();
     }
 
+    /** Shows the active tab of the Extensions view: reads the skill catalog, or the project's working directory, afresh. */
+    function extShow() {
+        var panel = document.getElementById("extensions-panel");
+        if (!panel) return;
+        var active = panel.querySelector(".ext-tab.active");
+        extRender(active ? active.getAttribute("data-tab") : "skills");
+    }
+
     function initExtensions() {
-        var btn = document.getElementById("extensions-btn");
         var panel = document.getElementById("extensions-panel");
         var tabs = document.querySelector("#extensions-panel .ext-tabs");
-        if (!btn || !panel) return;
-        btn.addEventListener("click", function (e) {
-            e.stopPropagation();
-            var showing = panel.style.display === "none" || panel.style.display === "";
-            panel.style.display = showing ? "block" : "none";
-            if (showing) {
-                var active = panel.querySelector(".ext-tab.active");
-                extRender(active ? active.getAttribute("data-tab") : "skills");
-            }
-        });
-        // A click anywhere else closes the panel — except inside the skill dialog, which is a
-        // sibling of the panel in the DOM, so dismissing the dialog would otherwise take the panel
-        // with it and leave the reader back at the chat with no list to return to.
-        document.addEventListener("click", function (e) {
-            if (panel.style.display !== "block") return;
-            if (panel.contains(e.target) || e.target === btn) return;
-            if (e.target.closest && e.target.closest("#ext-dialog-overlay")) return;
-            panel.style.display = "none";
-        });
+        if (!panel) return;
         if (tabs) tabs.addEventListener("click", function (e) {
             var t = e.target.closest(".ext-tab");
             if (!t) return;
