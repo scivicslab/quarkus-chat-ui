@@ -32,7 +32,9 @@ public class FakeClaude {
             out.println("{\"type\":\"assistant\",\"session_id\":\"" + session + "\",\"message\":{\"role\":\"assistant\","
                     + "\"content\":[{\"type\":\"text\",\"text\":\"" + answer + "\"}],\"usage\":" + usage + "}}");
             out.println("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"" + session
-                    + "\",\"result\":\"" + answer + "\",\"total_cost_usd\":0,\"duration_ms\":1,\"usage\":" + usage + "}");
+                    + "\",\"result\":\"" + answer + "\",\"total_cost_usd\":0,\"duration_ms\":1,\"usage\":" + usage
+                    + ",\"modelUsage\":{\"claude-sonnet-5-5\":{\"inputTokens\":3,\"outputTokens\":12,\"cacheReadInputTokens\":0,"
+                    + "\"cacheCreationInputTokens\":0,\"contextWindow\":1000000,\"maxOutputTokens\":128000}}}");
         }
     }
 }

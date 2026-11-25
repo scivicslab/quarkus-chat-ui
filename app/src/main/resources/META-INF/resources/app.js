@@ -1172,6 +1172,7 @@
                 clearThinking();
                 setBusy(false);
                 scrollToBottom();
+                showResolvedModel();
                 break;
             case "error":
                 appendMessage("error", "Error: " + (event.content || "unknown error"));
@@ -1428,9 +1429,35 @@
             .catch(function () { /* leave the dropdown empty on failure */ });
     }
 
+    // Shows, read-only, the model the provider resolved this conversation to and its limits, from what it reported after
+    // the last turn (GET api/chats/<project>/chat-<id>/model-limits). "not yet known" until a turn has reported them.
+    function showResolvedModel() {
+        var box = el("resolved-model-id");
+        if (!box) return;
+        var forChat = PROJECT_ID + "/" + CHAT_ID;
+        var show = function (id, text) { var d = el(id); if (d) d.textContent = text; };
+        var group = function (n) { return n > 0 ? Number(n).toLocaleString("en-US") + " tokens" : "not reported"; };
+        fetch("api/chats/" + PROJECT_ID + "/chat-" + CHAT_ID + "/model-limits")
+            .then(function (r) { return r.json(); })
+            .then(function (m) {
+                if (forChat !== PROJECT_ID + "/" + CHAT_ID) return;
+                if (!m || !m.known) {
+                    var unknown = m && m.provider && m.provider !== "claude" ? "not reported by this provider" : "not yet known";
+                    ["resolved-model-id", "resolved-window", "resolved-maxout", "resolved-effort"].forEach(function (id) { show(id, unknown); });
+                    return;
+                }
+                show("resolved-model-id", m.model);
+                show("resolved-window", group(m.contextWindow));
+                show("resolved-maxout", group(m.maxOutputTokens));
+                show("resolved-effort", m.effort ? m.effort : "harness default (the CLI does not report it)");
+            })
+            .catch(function () { /* leave what was shown */ });
+    }
+
     // Points the dropdown at the model this conversation is on. A model the list does not offer is
     // not selected: the dropdown would then name one thing while the conversation runs another.
     function showCurrentModel() {
+        showResolvedModel();
         if (!modelSelect) return;
         var forChat = PROJECT_ID + "/" + CHAT_ID;
         fetch(apiUrl(chatUrl("/status")))

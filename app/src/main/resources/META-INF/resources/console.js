@@ -3308,7 +3308,8 @@
         howtoLine(["Last request: the last request of the last turn, the window as full as it got. All requests: the sum of what "
                    + "each of the " + b.cumulativeRequests + " measured requests carried (of " + b.requests + " sent; the others have no "
                    + "reported input and are left out). " + b.cumulativeNote]);
-        howtoLine(["Window (max): " + (b.windowLimit ? b.windowLimitSource : "not set (add the model to chat-ui.window-limits)") + "."]);
+        howtoLine(["Window (max): " + (b.windowLimit ? b.windowLimitSource + (b.window.basis === "estimated" ? " (estimated: shown in blue)"
+                   : " (measured)") : "not set (add the model to chat-ui.window-limits)") + "."]);
         box.appendChild(howto);
 
         var table = tokensTable(head, rows, 1);

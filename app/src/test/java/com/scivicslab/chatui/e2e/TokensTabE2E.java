@@ -56,6 +56,10 @@ public class TokensTabE2E {
         rest("POST", "/api/projects/project1/chats", null);
         String switched = rest("POST", "/api/projects/project1/chats/02/provider", "{\"provider\":\"claude\"}");
         check(switched.contains("\"accepted\""), "chat-02 was switched to Claude Code: " + switched);
+        // chat-03 is on Claude Code too but has no turn: nothing was reported for it, so its window can only come from the table.
+        rest("POST", "/api/projects/project1/chats", null);
+        String switched3 = rest("POST", "/api/projects/project1/chats/03/provider", "{\"provider\":\"claude\"}");
+        check(switched3.contains("\"accepted\""), "chat-03 was switched to Claude Code: " + switched3);
         for (String chat : List.of("01", "02")) {
             for (String text : List.of("HELLO-ONLY first turn", "HELLO-ONLY second turn")) {
                 rest("POST", "/api/projects/project1/chats/" + chat + "/chat", "{\"text\":\"" + text + "\"}");
@@ -72,6 +76,10 @@ public class TokensTabE2E {
                 checkTab(page, "01", "chat-ui's MCP server (tools/list", "openai-compat", 1000);
                 checkTab(page, "02", "CLI built-in prompt and tools (not measurable here)", "claude", 41000);
                 checkTab(page, "02", "chat-ui's MCP server (tools/list", "claude (chat-ui's own MCP server)", 41000);
+                checkSettings(page, "01", "not reported by this provider", null, "openai-compat");
+                checkSettings(page, "02", null, "claude-sonnet-5-5", "claude");
+                checkSettings(page, "03", "not yet known", null, "claude, before its first turn");
+                checkWindowFromTable(page, "03");
             } finally {
                 browser.close();
             }
@@ -231,7 +239,77 @@ public class TokensTabE2E {
             check(growth.startsWith("+"), label + ": turn 2 shows its growth: " + growth);
         }
         checkNumbers(page, label);
+        if (!label.equals("openai-compat")) checkReportedWindow(page, label);
         page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/tokens-" + label + ".png")));
+    }
+
+    /** The class and the text of the Window (max) row's first figure. */
+    private static java.util.Map<String, String> windowCell(Page page) {
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, String> r = (java.util.Map<String, String>) page.evaluate("() => {"
+                + " const row = Array.from(document.querySelectorAll('#tokens-breakdown tr'))"
+                + "   .find(r => r.children[0] && r.children[0].textContent.trim().startsWith('Window (max)'));"
+                + " return row ? { cls: row.children[1].className, text: row.children[1].textContent.trim() } : null; }");
+        return r;
+    }
+
+    /**
+     * A Claude Code conversation's window is the one its CLI reported (the scripted CLI says 1,000,000 for claude-sonnet-5-5),
+     * shown as a measured figure, and Free follows it; the how-to-read note says where it came from.
+     */
+    private void checkReportedWindow(Page page, String label) {
+        java.util.Map<String, String> w = windowCell(page);
+        check(w != null && "1,000,000".equals(w.get("text")), label + ": Window (max) is the window the CLI reported: " + w);
+        check(w != null && w.get("cls").contains("tk-measured") && !w.get("cls").contains("tk-estimated"),
+                label + ": the reported window has the measured style: " + w);
+        long used = cell(page, "Used = input the provider reported", 1);
+        check(used > 0 && cell(page, "Free = Window - Used", 1) == 1_000_000 - used,
+                label + ": Free = Window - Used with the reported window (used " + used + ", free " + cell(page, "Free = Window - Used", 1) + ")");
+        String howto = page.locator("#tokens-breakdown .tk-howto").textContent();
+        check(howto.contains("reported for claude-sonnet-5-5") && howto.contains("modelUsage.contextWindow") && howto.contains("(measured)"),
+                label + ": the note says the window was reported by the CLI for the resolved model");
+    }
+
+    /** With nothing reported yet the window is the table's guess, in the estimated style, and the note says so. */
+    private void checkWindowFromTable(Page page, String chat) {
+        page.evaluate("() => window.chatUiSwitchChat('project1', '" + chat + "')");
+        page.selectOption("#right-tab-select", "tokens");
+        page.locator("#tokens-refresh").click();
+        page.locator("#tokens-breakdown table").first().waitFor();
+        java.util.Map<String, String> w = windowCell(page);
+        check(w != null && "1,000,000".equals(w.get("text")), "chat-" + chat + ": Window (max) falls back to the table's value: " + w);
+        check(w != null && w.get("cls").contains("tk-estimated") && !w.get("cls").contains("tk-measured"),
+                "chat-" + chat + ": the fallback window has the estimated style: " + w);
+        String howto = page.locator("#tokens-breakdown .tk-howto").textContent();
+        check(howto.contains("chat-ui.window-limits") && howto.contains("has not reported") && howto.contains("estimated"),
+                "chat-" + chat + ": the note says the window is a guess from the model's name");
+    }
+
+    /**
+     * The Settings entry shows, read-only, the model the provider resolved to, its window, its max output and the effort.
+     *
+     * @param expectAll   the text all four lines show (a provider that reports nothing, or nothing yet), or {@code null}
+     * @param resolvedModel the resolved model the first line shows, or {@code null}
+     */
+    private void checkSettings(Page page, String chat, String expectAll, String resolvedModel, String label) {
+        page.evaluate("() => window.chatUiSwitchChat('project1', '" + chat + "')");
+        page.selectOption("#right-tab-select", "settings");
+        page.waitForTimeout(600);
+        String id = page.locator("#resolved-model-id").textContent().strip();
+        String window = page.locator("#resolved-window").textContent().strip();
+        String maxOut = page.locator("#resolved-maxout").textContent().strip();
+        String effort = page.locator("#resolved-effort").textContent().strip();
+        if (expectAll != null) {
+            check(expectAll.equals(id) && expectAll.equals(window) && expectAll.equals(maxOut) && expectAll.equals(effort),
+                    "Settings [" + label + "]: all four lines say '" + expectAll + "': " + List.of(id, window, maxOut, effort));
+        } else {
+            check(resolvedModel.equals(id), "Settings [" + label + "]: the resolved model is " + resolvedModel + ": " + id);
+            check("1,000,000 tokens".equals(window), "Settings [" + label + "]: the context window is grouped and in tokens: " + window);
+            check("128,000 tokens".equals(maxOut), "Settings [" + label + "]: the max output is 128,000 tokens: " + maxOut);
+            check(effort.startsWith("harness default"), "Settings [" + label + "]: no effort was set, so it says the harness default: " + effort);
+        }
+        check(page.locator("#resolved-model input, #resolved-model select, #resolved-model button").count() == 0,
+                "Settings [" + label + "]: the block is read-only, no control in it");
     }
 
     /**

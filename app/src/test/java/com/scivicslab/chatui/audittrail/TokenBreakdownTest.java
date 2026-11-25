@@ -279,4 +279,18 @@ class TokenBreakdownTest {
         assertEquals("11 topics", t.topics().size() + " topics");
         assertEquals("28.6%", topics.get("Rows compared with the measured input (last request)"), "4000/14000");
     }
+
+    @Test
+    void aWindowTheProviderReportedIsMeasured_aWindowFromTheTableIsEstimated() {
+        List<Req> reqs = List.of(req(1, 1, TokenBreakdown.splitOpenAiBody(body()), 5000));
+        Table fromProvider = TokenBreakdown.table("claude", "sonnet", 1_000_000, "reported", "measured", reqs, "estimated", List.of());
+        assertEquals("measured", fromProvider.window().basis());
+        assertEquals(995_000, fromProvider.free().lastRequest(), "Free = Window - Used follows the window");
+        Table fromTable = TokenBreakdown.table("claude", "sonnet", 1_000_000, TokenBreakdown.WINDOW_FROM_TABLE, reqs, "estimated", List.of());
+        assertEquals("estimated", fromTable.window().basis(), "the old signature reads the table's source as an estimate");
+        Table fromServer = TokenBreakdown.table("openai-compat", "m", 8192, "the server's own value", reqs, "estimated", List.of());
+        assertEquals("measured", fromServer.window().basis());
+        Table none = TokenBreakdown.table("claude", "x", null, "unused", "estimated", reqs, "estimated", List.of());
+        assertEquals("not available", none.window().basis());
+    }
 }

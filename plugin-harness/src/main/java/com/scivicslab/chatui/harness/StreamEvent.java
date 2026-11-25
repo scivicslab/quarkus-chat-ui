@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.harness;
 
+import com.scivicslab.chatui.core.rest.ModelUsage;
 import com.scivicslab.chatui.core.rest.TokenUsage;
 
 import java.util.List;
@@ -23,6 +24,8 @@ import java.util.List;
  * @param toolUseId  identifier pairing a {@code tool_use} with its {@code tool_result}
  * @param usage      the tokens of the model request, on the first event of an {@code assistant} line
  *                   and on {@code result}; {@code null} elsewhere
+ * @param modelUsage the resolved model and its limits, from the {@code modelUsage} of a {@code result} line;
+ *                   {@code null} elsewhere, and when the CLI reports none
  */
 public record StreamEvent(
     String type,
@@ -37,8 +40,17 @@ public record StreamEvent(
     List<String> options,
     String toolName,
     String toolUseId,
-    TokenUsage usage
+    TokenUsage usage,
+    ModelUsage modelUsage
 ) {
+
+    /** Event without the resolved model's limits. */
+    public StreamEvent(String type, String content, String sessionId, double costUsd, long durationMs,
+                       boolean isError, String rawJson, String promptId, String promptType,
+                       List<String> options, String toolName, String toolUseId, TokenUsage usage) {
+        this(type, content, sessionId, costUsd, durationMs, isError, rawJson, promptId, promptType, options,
+                toolName, toolUseId, usage, null);
+    }
 
     /** Event without token usage. */
     public StreamEvent(String type, String content, String sessionId, double costUsd, long durationMs,
@@ -51,7 +63,13 @@ public record StreamEvent(
     /** @return this event carrying the given token usage */
     public StreamEvent withUsage(TokenUsage usage) {
         return new StreamEvent(type, content, sessionId, costUsd, durationMs, isError, rawJson, promptId, promptType,
-                options, toolName, toolUseId, usage);
+                options, toolName, toolUseId, usage, modelUsage);
+    }
+
+    /** @return this event carrying the resolved model and its limits */
+    public StreamEvent withModelUsage(ModelUsage modelUsage) {
+        return new StreamEvent(type, content, sessionId, costUsd, durationMs, isError, rawJson, promptId, promptType,
+                options, toolName, toolUseId, usage, modelUsage);
     }
 
     /** Plain event without prompt or tool fields. */

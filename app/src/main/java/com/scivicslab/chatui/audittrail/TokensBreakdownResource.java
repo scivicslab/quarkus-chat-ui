@@ -89,20 +89,31 @@ public class TokensBreakdownResource {
             }
             notes.add("This provider reports no token usage, so the input is not measured and the residual is not shown.");
         }
+        // The window, best source first: what the provider reported for this conversation's resolved model (Claude Code's
+        // modelUsage, recorded in the I/O log), then what the server reports (a local LLM), then the table, which only the
+        // model's name decides and so is shown as an estimate.
         Integer limit = null;
         String limitSource = "not set (add the model to chat-ui.window-limits)";
-        int fromServer = windowOfProvider(id);
-        if (fromServer > 0) {
+        String windowBasis = "measured";
+        IoLogView.ModelLimits recorded = sessionId < 0 || !"claude".equals(provider) ? null : ioLogView.modelLimits(sessionId);
+        int fromServer = recorded != null && recorded.contextWindow() > 0 ? -1 : windowOfProvider(id);
+        if (recorded != null && recorded.contextWindow() > 0) {
+            limit = recorded.contextWindow();
+            limitSource = "the context window Claude Code reported for " + recorded.model()
+                    + " (modelUsage.contextWindow of its result in turn " + recorded.turn() + ")";
+        } else if (fromServer > 0) {
             limit = fromServer;
             limitSource = "the server's own value";
         } else {
             int fromTable = WindowLimits.of(windowLimits.orElse(null)).windowOf(model);
             if (fromTable > 0) {
                 limit = fromTable;
-                limitSource = "chat-ui.window-limits";
+                windowBasis = "estimated";
+                limitSource = TokenBreakdown.WINDOW_FROM_TABLE + " (the provider has not reported this conversation's window, so the model's name"
+                        + " decides it)";
             }
         }
-        return Response.ok(TokenBreakdown.table(provider, model, limit, limitSource, reqs, basis, notes)).build();
+        return Response.ok(TokenBreakdown.table(provider, model, limit, limitSource, windowBasis, reqs, basis, notes)).build();
     }
 
     private static Response notFound(String id) {

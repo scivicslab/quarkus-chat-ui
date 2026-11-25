@@ -63,8 +63,19 @@ public record ChatEvent(
     /** The {@code ask_chat} request the turn's prompt is, or answers; on {@code turn} and {@code result}. */
     String requestId,
     /** The tokens the request used, on {@code result} events of a provider that reports them; otherwise {@code null}. */
-    TokenUsage usage
+    TokenUsage usage,
+    /** The resolved model and its limits, on {@code result} events of a provider that reports them; otherwise {@code null}. */
+    ModelUsage modelUsage
 ) {
+
+    /** Every event made before the resolved model's limits were reported: they are not set. */
+    public ChatEvent(String type, String content, String sessionId, Double costUsd, Long durationMs, String model,
+                     Boolean busy, String promptId, String promptType, List<String> options, String logLevel,
+                     String loggerName, Long timestamp, List<String> images, String toolName, String toolUseId,
+                     Boolean isError, String origin, String turnId, String requestId, TokenUsage usage) {
+        this(type, content, sessionId, costUsd, durationMs, model, busy, promptId, promptType, options, logLevel,
+                loggerName, timestamp, images, toolName, toolUseId, isError, origin, turnId, requestId, usage, null);
+    }
 
     /** Every event made before the token usage existed: it is not set. */
     public ChatEvent(String type, String content, String sessionId, Double costUsd, Long durationMs, String model,
@@ -99,7 +110,8 @@ public record ChatEvent(
     /** @return this event with the turn and request ids it belongs to */
     public ChatEvent withTurn(String turnId, String requestId) {
         return new ChatEvent(type, content, sessionId, costUsd, durationMs, model, busy, promptId, promptType, options,
-                logLevel, loggerName, timestamp, images, toolName, toolUseId, isError, origin, turnId, requestId, usage);
+                logLevel, loggerName, timestamp, images, toolName, toolUseId, isError, origin, turnId, requestId, usage,
+                modelUsage);
     }
 
     /**
@@ -152,7 +164,15 @@ public record ChatEvent(
     /** @return this event with the given token usage */
     public ChatEvent withUsage(TokenUsage usage) {
         return new ChatEvent(type, content, sessionId, costUsd, durationMs, model, busy, promptId, promptType, options,
-                logLevel, loggerName, timestamp, images, toolName, toolUseId, isError, origin, turnId, requestId, usage);
+                logLevel, loggerName, timestamp, images, toolName, toolUseId, isError, origin, turnId, requestId, usage,
+                modelUsage);
+    }
+
+    /** @return this event with the resolved model and its limits */
+    public ChatEvent withModelUsage(ModelUsage modelUsage) {
+        return new ChatEvent(type, content, sessionId, costUsd, durationMs, model, busy, promptId, promptType, options,
+                logLevel, loggerName, timestamp, images, toolName, toolUseId, isError, origin, turnId, requestId, usage,
+                modelUsage);
     }
 
     /**

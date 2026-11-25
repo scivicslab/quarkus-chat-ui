@@ -493,7 +493,8 @@ public class ClaudeCodeProvider implements LlmProvider {
                 }
                 if (event.sessionId() != null) saveSession(event.sessionId());
                 emitter.accept(ChatEvent.result(event.sessionId(), event.costUsd(), event.durationMs(),
-                        cliProcess.getConfig().model(), false, callUsage(event.usage())));
+                        cliProcess.getConfig().model(), false, callUsage(event.usage()))
+                        .withModelUsage(event.modelUsage()));
             }
             case "error" -> {
                 if (event.content() != null

@@ -122,6 +122,73 @@ public class IoLogView {
                 .orElse("");
     }
 
+    /**
+     * What a turn's {@code turnN/model-limits} entry holds: the model the provider resolved the conversation's model to,
+     * the limits it reported for it, and the effort the conversation ran with. Written once a turn ends, by a provider
+     * that reports them (Claude Code, in the {@code modelUsage} of its {@code result} line).
+     *
+     * @param turn            the turn the entry belongs to
+     * @param model           the resolved model id
+     * @param contextWindow   the most input tokens one request can take; {@code 0} when not reported
+     * @param maxOutputTokens the most tokens one answer can have; {@code 0} when not reported
+     * @param effort          the effort the conversation was set to (what chat-ui passed as {@code --effort}); empty
+     *                        when it left the harness on its own default, which the CLI does not report
+     */
+    public record ModelLimits(int turn, String model, int contextWindow, int maxOutputTokens, String effort) {
+
+        /** @return the text of the entry: one {@code KEY: value} line per field */
+        public String toMessage() {
+            return "MODEL: " + model + "\nCONTEXT_WINDOW: " + contextWindow + "\nMAX_OUTPUT_TOKENS: " + maxOutputTokens
+                    + "\nEFFORT: " + (effort == null ? "" : effort);
+        }
+    }
+
+    private static final java.util.regex.Pattern MODEL_LIMITS_LABEL =
+            java.util.regex.Pattern.compile("turn(\\d+)/model-limits");
+
+    /**
+     * The latest {@code turnN/model-limits} entry of a session: the model the conversation last ran on, and its limits.
+     *
+     * @return the entry of the highest turn, or {@code null} when no turn recorded one (a conversation that has not had a
+     *         turn answered by a provider that reports them, or one recorded before the entry existed)
+     */
+    public ModelLimits modelLimits(long sessionId) {
+        return modelLimitsOf(allLogs(sessionId));
+    }
+
+    static ModelLimits modelLimitsOf(List<LogEntry> raw) {
+        ModelLimits latest = null;
+        long latestId = -1;
+        for (LogEntry e : raw) {
+            java.util.regex.Matcher m = MODEL_LIMITS_LABEL.matcher(nz(e.getLabel()));
+            if (!m.matches()) continue;
+            int turn = Integer.parseInt(m.group(1));
+            if (latest != null && (turn < latest.turn() || (turn == latest.turn() && e.getId() < latestId))) continue;
+            String model = "", effort = "";
+            int window = 0, maxOut = 0;
+            for (String line : nz(e.getMessage()).split("\n")) {
+                int colon = line.indexOf(": ");
+                String key = colon < 0 ? line.strip() : line.substring(0, colon);
+                String value = colon < 0 ? "" : line.substring(colon + 2).strip();
+                switch (key) {
+                    case "MODEL" -> model = value;
+                    case "CONTEXT_WINDOW" -> window = positiveInt(value);
+                    case "MAX_OUTPUT_TOKENS" -> maxOut = positiveInt(value);
+                    case "EFFORT" -> effort = value;
+                    default -> { }
+                }
+            }
+            if (model.isEmpty()) continue;
+            latest = new ModelLimits(turn, model, window, maxOut, effort);
+            latestId = e.getId();
+        }
+        return latest;
+    }
+
+    private static int positiveInt(String s) {
+        try { return Math.max(0, Integer.parseInt(s)); } catch (NumberFormatException e) { return 0; }
+    }
+
     /** One model request: the tokens its {@code USAGE:} line holds. {@code total} is the whole input. */
     public record TokenRequest(int turn, int step, int input, int cacheCreation, int cacheRead, int output,
                                int total) {}

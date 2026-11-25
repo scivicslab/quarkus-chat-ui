@@ -11,8 +11,15 @@ import java.util.Map;
  */
 public final class WindowLimits {
 
-    /** What the table holds when the setting names nothing: the Claude families and GLM-5.3. */
-    public static final String DEFAULTS = "opus=200000,sonnet=200000,haiku=200000,glm-5.3=262144";
+    /**
+     * What the table holds when the setting names nothing: the Claude families and GLM-5.3. Only a fallback: a conversation
+     * whose provider reported the window ({@code modelUsage.contextWindow} of Claude Code's {@code result} line) uses that.
+     * The Claude values are what CLI 2.1.331 reported for the aliases {@code sonnet}, {@code opus} and {@code haiku} on
+     * 2026-11-25 (1,000,000 for each; {@code CLAUDE_CODE_DISABLE_1M_CONTEXT=1} made {@code sonnet} report 200,000). A
+     * different CLI version, account or model flag can give another window, so they are unverified beyond that run.
+     * The GLM-5.3 value is unverified here.
+     */
+    public static final String DEFAULTS = "opus=1000000,sonnet=1000000,haiku=1000000,glm-5.3=262144";
 
     private final Map<String, Integer> table = new LinkedHashMap<>();
 

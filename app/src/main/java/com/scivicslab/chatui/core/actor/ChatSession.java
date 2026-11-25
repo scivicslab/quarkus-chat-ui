@@ -16,6 +16,7 @@ import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.plugin.ConversationTool;
 import com.scivicslab.chatui.core.provider.ProviderContext;
 import com.scivicslab.chatui.core.rest.ChatEvent;
+import com.scivicslab.chatui.core.rest.ModelUsage;
 import com.scivicslab.chatui.core.rest.TokenUsage;
 import com.scivicslab.chatui.core.service.AuthMode;
 import com.scivicslab.pojoactor.action.ActionResult;
@@ -1073,6 +1074,7 @@ public class ChatSession extends Interpreter {
                         // Persist the completed turn to the I/O log in the Sessions-tab marker format.
                         recordTurnIo(ioSession, ioTurnNo, prompt, assistantBuf.toString(), thinkingBuf.toString(),
                                 event.usage());
+                        recordModelLimits(event.modelUsage(), p.getEffort());
                     }
                     emitter.accept(event);
                 };
@@ -1990,6 +1992,7 @@ public class ChatSession extends Interpreter {
         int[] responseStart = {0};
         // The tokens the provider reported for this step's request, or null when it reports none.
         TokenUsage[] stepUsage = {null};
+        ModelUsage[] stepModelUsage = {null};
         ActorRef<LlmProvider> providerRef = providerRef();
 
         // The ConversationSquad log used to receive nothing between here and recordStepIo() below, so a step
@@ -2024,6 +2027,7 @@ public class ChatSession extends Interpreter {
                     // completion signal is finish()'s result event, emitted once for the turn.
                     // The tokens it reports belong to this step's row of the I/O log.
                     stepUsage[0] = event.usage();
+                    stepModelUsage[0] = event.modelUsage();
                 } else if ("tool_call".equals(event.type())) {
                     definedCalls.add(new ToolCall(event.toolUseId(), event.toolName(),
                             event.content() == null ? "" : event.content()));
@@ -2106,6 +2110,7 @@ public class ChatSession extends Interpreter {
         List<ToolCall> calls = analysis.broken() ? List.of() : analysis.calls();
         answerStream.finish(cutOff[0] || failed || !calls.isEmpty() || analysis.broken());
         recordStepIo(promptToSend, sentBody[0], text, thinkingBuf.toString(), calls, stepUsage[0]);
+        recordModelLimits(stepModelUsage[0], provider.getEffort());
         turnTranscript.append("You wrote:\n").append(text).append("\n\n");
         return new LlmStepOutcome(text, calls, cutOff[0], analysis, failed);
     }
@@ -4101,6 +4106,22 @@ public class ChatSession extends Interpreter {
      */
     private void recordTurnIo(long ioSession, int turnNo, String prompt, String assistant, String thinking) {
         recordTurnIo(ioSession, turnNo, prompt, assistant, thinking, null);
+    }
+
+    /**
+     * Records which model the provider resolved this turn to and the limits it reported for it
+     * ({@code turnN/model-limits}, an entry of its own: the turn's {@code llm} entry keeps its shape), with the effort
+     * the conversation ran with. No-op when the provider reported none, or logging is off.
+     */
+    private void recordModelLimits(ModelUsage usage, String effort) {
+        if (ioLog == null || ioSession < 0 || usage == null || usage.model() == null || usage.model().isBlank()) return;
+        try {
+            ioLog.record(ioSession, "agent", "turn" + ioTurnNo + "/model-limits",
+                    new com.scivicslab.chatui.core.iolog.IoLogView.ModelLimits(ioTurnNo, usage.model(),
+                            usage.contextWindow(), usage.maxOutputTokens(), effort).toMessage());
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "I/O log model limits record failed", e);
+        }
     }
 
     /** As above; {@code usage} is the tokens the provider reported for the turn, or {@code null}. */

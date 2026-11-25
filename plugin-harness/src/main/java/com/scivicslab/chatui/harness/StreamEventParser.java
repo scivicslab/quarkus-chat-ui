@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.harness;
 
+import com.scivicslab.chatui.core.rest.ModelUsage;
 import com.scivicslab.chatui.core.rest.TokenUsage;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -167,6 +168,29 @@ public class StreamEventParser {
     }
 
     /**
+     * Reads the {@code modelUsage} object of a {@code result} line: one entry per model the turn used, keyed by the
+     * resolved model id, each with {@code contextWindow} and {@code maxOutputTokens}. A turn that used several models
+     * (a subagent on a smaller one) is reported as the model that took the most tokens.
+     *
+     * @return the resolved model and its limits, or {@code null} when {@code modelUsage} is absent or empty
+     */
+    static ModelUsage readModelUsage(JSONObject modelUsage) {
+        if (modelUsage == null) return null;
+        String best = null;
+        long bestTokens = -1;
+        for (String id : modelUsage.keySet()) {
+            JSONObject entry = modelUsage.optJSONObject(id);
+            if (entry == null) continue;
+            long tokens = (long) entry.optInt("inputTokens", 0) + entry.optInt("outputTokens", 0)
+                    + entry.optInt("cacheReadInputTokens", 0) + entry.optInt("cacheCreationInputTokens", 0);
+            if (tokens > bestTokens) { best = id; bestTokens = tokens; }
+        }
+        if (best == null) return null;
+        JSONObject entry = modelUsage.getJSONObject(best);
+        return new ModelUsage(best, entry.optInt("contextWindow", 0), entry.optInt("maxOutputTokens", 0));
+    }
+
+    /**
      * Reads a stream-json {@code usage} object.
      *
      * @return the four counts, or {@code null} when {@code usage} is absent
@@ -315,7 +339,8 @@ public class StreamEventParser {
         // no assistant event for this turn.
         String finalText = json.optString("result", "");
         return List.of(new StreamEvent("result", finalText.isEmpty() ? null : finalText,
-                sessionId, costUsd, durationMs, false, rawJson).withUsage(readUsage(json.optJSONObject("usage"))));
+                sessionId, costUsd, durationMs, false, rawJson).withUsage(readUsage(json.optJSONObject("usage")))
+                .withModelUsage(readModelUsage(json.optJSONObject("modelUsage"))));
     }
 
     /**

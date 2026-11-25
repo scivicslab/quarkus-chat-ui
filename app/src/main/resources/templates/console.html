@@ -301,6 +301,16 @@
                             <input id="effort-input" type="text" size="6" placeholder="harness">
                         </label>
                     </div>
+                    <!-- What the conversation is really running on, as its provider reported it after a turn. Read-only. -->
+                    <div id="resolved-model" class="resolved-model" title="Reported by the provider in the result of the last turn (Claude Code: modelUsage). Read-only.">
+                        <div class="resolved-title">Running on (reported by the provider)</div>
+                        <dl>
+                            <dt>Resolved model</dt><dd id="resolved-model-id">not yet known</dd>
+                            <dt>Context window</dt><dd id="resolved-window">not yet known</dd>
+                            <dt>Max output</dt><dd id="resolved-maxout">not yet known</dd>
+                            <dt>Effort</dt><dd id="resolved-effort">not yet known</dd>
+                        </dl>
+                    </div>
                 </section>
 
                 <section id="tab-logdb" class="rtab-content active" data-perspective="chat">

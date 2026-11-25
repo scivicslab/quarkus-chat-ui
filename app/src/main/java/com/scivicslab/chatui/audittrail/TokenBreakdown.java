@@ -404,6 +404,21 @@ public final class TokenBreakdown {
      */
     public static Table table(String provider, String model, Integer windowLimit, String windowLimitSource, List<Req> reqs,
                               String basis, List<String> notes) {
+        return table(provider, model, windowLimit, windowLimitSource, WINDOW_FROM_TABLE.equals(windowLimitSource) ? "estimated" : "measured",
+                reqs, basis, notes);
+    }
+
+    /** The {@code windowLimitSource} of a window that came from the {@code chat-ui.window-limits} table, not from the provider. */
+    public static final String WINDOW_FROM_TABLE = "chat-ui.window-limits";
+
+    /**
+     * As above, saying how the window was got.
+     *
+     * @param windowBasis {@code "measured"} for a window the provider reported, {@code "estimated"} for one read from the
+     *                    {@code chat-ui.window-limits} table, which only a model's name decides
+     */
+    public static Table table(String provider, String model, Integer windowLimit, String windowLimitSource, String windowBasis,
+                              List<Req> reqs, String basis, List<String> notes) {
         Req last = reqs.isEmpty() ? null : reqs.get(reqs.size() - 1);
         boolean anyMeasured = reqs.stream().anyMatch(r -> r.measuredTotal() != null);
         List<Req> counted = new ArrayList<>();
@@ -440,7 +455,7 @@ public final class TokenBreakdown {
                 measuredLast, measuredCum, anyMeasured ? "measured" : "not available");
         Integer freeLast = windowLimit == null || measuredLast == null ? null : windowLimit - measuredLast;
         Line window = new Line("WINDOW", "Window", WINDOW_LABEL, "The most one request can take: the model's context window.",
-                windowLimit, null, windowLimit == null ? "not available" : windowLimitSource);
+                windowLimit, null, windowLimit == null ? "not available" : windowBasis);
         Line free = new Line("FREE", "Window", FREE_LABEL, "The window's limit minus the input of the last request.",
                 freeLast, null, freeLast == null ? "not available" : "calculated");
         Line usedTotal = new Line("USED_TOTAL", "Used, broken down", USED_TOTAL_LABEL,
