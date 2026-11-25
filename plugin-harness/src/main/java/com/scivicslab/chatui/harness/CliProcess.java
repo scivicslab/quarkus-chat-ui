@@ -327,6 +327,9 @@ public class CliProcess {
     /** How long Claude Code waits for one call to chat-ui's tools: a day, as long as any step of a turn. */
     static final long MCP_TOOL_TIMEOUT_MS = 24L * 60 * 60 * 1000;
 
+    /** Claude Code's variable for the prompt cache lifetime of the main conversation: {@code 5m} or {@code 1h}. */
+    static final String PROMPT_CACHE_TTL_ENV = "CLAUDE_CODE_PROMPT_CACHE_TTL";
+
     /** How long, after one parked call, the calls the CLI makes alongside it are waited for. */
     static final long PARK_SETTLE_MS = 300;
 
@@ -699,6 +702,10 @@ public class CliProcess {
         // A call to chat-ui's tools waits while the conversation runs it as a step of its own; Claude Code must not
         // give up on it first (https://code.claude.com/docs/en/mcp, MCP_TOOL_TIMEOUT).
         if (mcpConfigJson != null) added.put("MCP_TOOL_TIMEOUT", String.valueOf(MCP_TOOL_TIMEOUT_MS));
+        // Without this, a Claude Code process whose account is using extra usage writes every request after its first with a
+        // 5-minute cache lifetime, so a conversation that waits longer than that between turns re-creates its whole context.
+        // The variable takes precedence over that rule in the CLI.
+        added.put(PROMPT_CACHE_TTL_ENV, "1h");
         CliConfig config = getConfig();
         // The conversation's window choice, as the process's own environment: 200K sets the CLI's switch for this process
         // only; any other choice removes it, so a variable this program inherited cannot decide a conversation's window.
