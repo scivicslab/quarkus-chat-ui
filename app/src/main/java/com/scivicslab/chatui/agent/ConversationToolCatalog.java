@@ -52,11 +52,10 @@ public final class ConversationToolCatalog {
         // First in the list: it is read before any tool a model might reach for instead of asking
         // (AskThePersonEndsTheTurn_261119_oo01). Never run by runTool: stepExpectingAction reads it.
         add(m, "ask_person", """
-                ask the person a question and end your turn at once. Use it whenever you need a decision or an
-                answer before you can go on. Write what the person needs to know before the call, in the same
-                reply; put the question itself in "question". No other tool in that reply runs. In a
-                conversation that is not the liaison, the question goes to whoever sent the request you are
-                working on, or to your superior when no request did.
+                ask the person a question and end your turn at once; use it when you need a decision or answer
+                before you can go on. Write what the person needs to know before the call, in the same reply;
+                put the question in "question". No other tool in that reply runs. A conversation that is not the
+                liaison asks whoever sent the request it is working on, or its superior when none did.
                 """,
                 List.of(
                     new ToolParameter("question", "string", true, "")),
@@ -65,11 +64,11 @@ public final class ConversationToolCatalog {
         m.put("calc", ToolCatalog.core("calc"));
         m.put("search_docs", ToolCatalog.core("search_docs"));
         add(m, "list_running_tools", """
-                list the tool instances the AI-workspace that runs this chat-ui is running — each one's name,
-                port, state (READY, STARTING, ...), address and title — and, for a chat-ui instance, "node
-                <name>": the node name ask_chat's "node" takes. Known nodes no row matched come on a last line;
-                without an AI-workspace it lists the known node names alone. "tool" is optional: give a tool's
-                name to list only its instances. It only reads the list; it cannot start or stop anything.
+                list the tool instances the AI-workspace running this chat-ui is running: name, port, state
+                (READY, STARTING, ...), address, title and, for a chat-ui instance, "node <name>", the node name
+                ask_chat's "node" takes. Known nodes no row matched come on a last line; without an AI-workspace
+                only the known node names are listed. "tool" optionally limits it to one tool's instances.
+                Read-only.
                 """,
                 List.of(
                     new ToolParameter("tool", "string", false, "")),
@@ -79,34 +78,23 @@ public final class ConversationToolCatalog {
         m.put("edit", ToolCatalog.core("edit"));
         m.put("remove", ToolCatalog.core("remove"));
         add(m, "ask_chat", """
-                send an instruction to another conversation. Write chatId by where that conversation is: in your
-                own project, "chat-02"; in another project of this chat-ui instance, "project1/chat-01", with no
-                node. Every project shown on this instance's screen is on this instance, so a conversation of
-                this instance, in any project, takes no node. On another chat-ui instance: to find the node name
-                of another instance, call list_running_tools first; give it as "node", and write chatId with the
-                project on that instance first, e.g. "project1/chat-01"; with node, a chatId without its project
-                ("chat-01") is refused.
-                It does NOT wait: the result says the instruction was sent, to which conversation of which
-                project on which instance (node), and under which request id, e.g.
-                "project1/chat-01:s40:t5:r2" (your conversation, session, turn, and the number of this ask_chat
-                in your turn). The reply reaches you only AFTER YOU END YOUR TURN: it comes as a new message
-                starting with "[reply to request <request id>, from <the turn that wrote it>]" — match the id
-                against the one you were given to tell which request it answers — followed by one line, [ended:
-                answered; model calls: N; tool calls: M], saying how its turn ended: "answered", "step-limit"
-                when it ran out of steps, "time-limit" when it ran out of time, "repeated-call" when it made the same
-                call three times with the same result. In these three it was asked for an answer in text, so the
-                reply is what it found so far, or a line saying it gave none; it may be unfinished. A turn also ends
-                "asked" when it
-                ended with ask_person (then the reply is a question that waits for your decision: answer it with
-                ask_chat, or ask_person yourself). If its turn left no reply, the message says so and why. So
-                once you have sent your instructions, end your turn and wait; do not call get_chat_log or
-                get_chat_status over and over to look for the reply, since it cannot arrive while your turn goes
-                on. Several replies wait in order and come to you one per turn. Use this to direct or review
-                another ConversationSquad's work; get_chat_log is for checking once whether the other
-                conversation is stuck.
-                "noThink" is optional (default false): true asks the receiving conversation to answer this one
-                request without thinking, which is faster and cheaper for a short question or a status report;
-                left out or false, its own setting applies.
+                send an instruction to another conversation. chatId: in your own project "chat-02"; in another
+                project of this chat-ui instance "project1/chat-01", with no node. Every project shown on this
+                instance's screen is on this instance, so a conversation of this instance, in any project, takes
+                no node. On another chat-ui instance, to find the node name of another instance, call
+                list_running_tools first; give it as "node" and write chatId with its project first, e.g.
+                "project1/chat-01"; with node, a chatId without its project ("chat-01") is refused.
+                It does NOT wait: the result names the conversation and the request id (e.g.
+                "project1/chat-01:s40:t5:r2"). The reply reaches you only AFTER YOU END YOUR TURN, as a new
+                message "[reply to request <request id>, from <turn>]" with a line [ended: answered; model calls:
+                N; tool calls: M] saying how its turn ended: "answered", "step-limit", "time-limit",
+                "repeated-call" (the last three: the reply is what it found so far, possibly unfinished) or
+                "asked" (it ended with ask_person: the reply is a question waiting for your decision, answer it
+                with ask_chat or ask_person). So once you have sent your instructions, end your turn; do not poll
+                get_chat_log or get_chat_status for the reply, since it cannot arrive while your turn goes on.
+                Several replies come one per turn.
+                "noThink" (default false): true asks the receiver to answer this one request without thinking,
+                faster and cheaper for a short question or status report.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
@@ -132,29 +120,23 @@ public final class ConversationToolCatalog {
                 true);
         add(m, "cancel_request", """
                 take back a request you sent with ask_chat or ask_chat_urgent while it still waits in the other
-                conversation's queue. "node" is optional and only for a request sent to another chat-ui instance
-                (to find the node name of another instance, call list_running_tools first); a request to a
-                conversation of this instance, in any
-                project, takes no node. A request sent to another instance is found by its id; its result then
-                arrives as a new message. "requestId" is the id the ask_chat result gave, e.g.
-                "project1/chat-01:s40:t5:r2". Only you, the sender, can cancel it. The result says what
-                happened: "removed" (it is out of the queue and no reply will come, so do not wait for one),
-                "already running" (the other conversation has started it and it is not stopped; send a follow-up
-                request if the work is no longer wanted), "already answered" (nothing to take back), or "not
-                found". Use it when the work is no longer wanted, or when you are about to send the same request
-                again.
+                conversation's queue. "requestId" is the id the ask_chat result gave. "node" is only for a
+                request sent to another chat-ui instance (to find the node name of another instance, call
+                list_running_tools first); a request to a conversation of this instance, in any project, takes
+                no node. The result is "removed" (no reply will come), "already running" (not stopped; send a
+                follow-up if the work is no longer wanted), "already answered" or "not found". Use it when the
+                work is no longer wanted or you are about to send the same request again.
                 """,
                 List.of(
                     new ToolParameter("requestId", "string", true, ""),
                     new ToolParameter("node", "string", false, "")),
                 true);
         add(m, "set_chat_timekeeper", """
-                change another conversation of this project's timekeeper. urgentWaitMinutes is how long an
-                urgent request may wait while that conversation runs a long turn before the turn is paused to
-                answer it (default 10); childReplyWarnMinutes is how long a request it sent may go without a
-                reply before it is told (default 5). Give at least one of the two, in whole minutes; one left
-                out keeps its value. 0 turns that watch off: childReplyWarnMinutes 0 gives no "no reply yet"
-                notices at all, urgentWaitMinutes 0 never pauses a turn. It also takes your own chatId.
+                change the timekeeper of another conversation of this project, or your own. urgentWaitMinutes:
+                how long an urgent request may wait during a long turn before the turn is paused to answer it
+                (default 10). childReplyWarnMinutes: how long a request it sent may go without a reply before it
+                is told (default 5). Give at least one, in whole minutes; one left out keeps its value. 0 turns
+                that watch off.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
@@ -162,26 +144,22 @@ public final class ConversationToolCatalog {
                     new ToolParameter("childReplyWarnMinutes", "integer", false, "")),
                 false);
         add(m, "accept_reply", """
-                record that the reply to your request "requestId" is enough: the work is done, or you need
-                nothing more from it. When a turn of yours begins with a reply ([reply to request …] or [follow-
-                up to request …]), record one decision on it before you end the turn: accept_reply,
-                expect_report, or ask_chat to the one that replied.
+                record that the reply to your request "requestId" is enough. When a turn of yours begins with a
+                reply ([reply to request …] or [follow-up to request …]), record one decision on it before you
+                end the turn: accept_reply, expect_report, or ask_chat to the one that replied.
                 """,
                 List.of(
                     new ToolParameter("requestId", "string", false, "")),
                 true);
         add(m, "expect_report", """
-                when a reply says a report will come later (for example "I will report later" or "not finished
-                yet, about 20 more minutes"), register it with that conversation's timekeeper. After "minutes"
-                it is reminded once, and the answer it writes then comes to you as [follow-up to request …,
-                reminder N]. If that says "not yet" again, register again. "minutes" is in whole minutes. A
-                conversation of this instance, in any project, takes no node. Give "node" only when the
-                conversation that promised the report is on another chat-ui instance, as you gave it to ask_chat
-                (to find the node name of another instance, call list_running_tools first), and then write chatId
-                with its project first, e.g.
-                "project1/chat-01".
-                You do not register a reminder for a report you promise yourself: the end of your turn decides
-                that.
+                when a reply says a report will come later (e.g. "not finished yet, about 20 more minutes"),
+                register it with that conversation's timekeeper. After "minutes" (whole minutes) it is reminded
+                once, and its answer comes to you as [follow-up to request …, reminder N]; if that says "not
+                yet" again, register again. A conversation of this instance, in any project, takes no node. Give
+                "node" only when the conversation that promised the report is on another chat-ui instance (to
+                find the node name of another instance, call list_running_tools first), and then write chatId
+                with its project first, e.g. "project1/chat-01". Do not register a report you promise yourself:
+                the end of your turn decides that.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", false, ""),
@@ -191,40 +169,35 @@ public final class ConversationToolCatalog {
                 true);
         add(m, "set_chat_name", """
                 give a conversation of this project, your own included, the name a person reads beside its id,
-                saying what it is for (for example "worker 1-3: Wikipedia articles A-F"). The id does not
-                change, and the other tools still take the id. A blank name clears it; at most 80 characters.
+                saying what it is for (e.g. "worker 1-3: Wikipedia articles A-F"). The id does not change. A
+                blank name clears it; at most 80 characters.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
                     new ToolParameter("name", "string", false, "")),
                 false);
         add(m, "set_agent_loop", """
-                replace another ConversationSquad's agent loop — the Turing workflow that runs each of its turns
-                — with the given YAML text (not a file path). Use this to author an agent loop for another
-                ConversationSquad to run, then use ask_chat to start a turn under it.
+                replace another ConversationSquad's agent loop, the Turing workflow that runs each of its turns,
+                with the given YAML text (not a file path); then start a turn under it with ask_chat.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
                     new ToolParameter("yaml", "string", true, "")),
                 false);
         add(m, "load_skill", """
-                read one of the skills listed after this tool list in full — its step-by-step instructions, the
-                routes it says to call, its own files. Each skill's description says when it applies; when one
-                applies to the task at hand, load it before you act rather than after.
+                read one of the skills listed after this tool list in full. When one applies to the task at hand,
+                load it before you act.
                 """,
                 List.of(
                     new ToolParameter("name", "string", true, "")),
                 false);
         add(m, "set_collaborator", """
-                record that, for ConversationSquad "chatId", the ConversationSquad playing role "role" (e.g.
-                "worker") is "collaboratorChatId". A conversation of this instance, in any project, takes no
-                node. Give "node" only when the one playing the role is a conversation of another chat-ui
-                instance, as ask_chat takes it (to find the node name of another instance, call list_running_tools
-                first); then write
-                collaboratorChatId with its project on that instance first, e.g. "project1/chat-01", and the
-                agent loop sends its work there. An agent loop installed via set_agent_loop can then
-                resolve that role instead of a hardcoded chat id, and you can reassign it again later by calling
-                this a second time.
+                record that, for ConversationSquad "chatId", the one playing role "role" (e.g. "worker") is
+                "collaboratorChatId"; an agent loop from set_agent_loop can resolve the role instead of a fixed
+                chat id, and calling this again reassigns it. A conversation of this instance, in any project,
+                takes no node. Give "node" only when the collaborator is on another chat-ui instance (to find
+                the node name of another instance, call list_running_tools first); then write collaboratorChatId
+                with its project first, e.g. "project1/chat-01".
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
@@ -233,25 +206,24 @@ public final class ConversationToolCatalog {
                     new ToolParameter("node", "string", false, "")),
                 false);
         add(m, "get_chat_status", """
-                report which model, provider and tool set another conversation is on, and whether it is busy
-                right now. "chatId" is, for example, "02", or "project2/02" for another project. It does not
-                wait for the conversation's turn, so it answers even while that conversation is running.
+                report which model, provider and tool set another conversation is on, and whether it is busy. It
+                answers even while that conversation runs a turn. "chatId" is e.g. "02", or "project2/02" for
+                another project.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, "")),
                 false);
         add(m, "list_chat_models", """
-                list the models another conversation's provider offers, one per line as name (type, server). Use
-                it to find the exact name to give set_chat_model.
+                list the models another conversation's provider offers, one per line as name (type, server);
+                set_chat_model takes one of these names.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, "")),
                 false);
         add(m, "set_chat_model", """
-                put another conversation of this project on a different model, for the jobs you hand it with
-                ask_chat. The name must be one list_chat_models printed; any other is refused with the list. The
-                change takes effect after that conversation's current turn. A conversation of another project is
-                refused.
+                put another conversation of this project on a different model, taking effect after its current
+                turn. The name must be one list_chat_models printed; any other is refused with the list, and so
+                is a conversation of another project.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
@@ -259,26 +231,22 @@ public final class ConversationToolCatalog {
                 false);
         add(m, "list_providers", """
                 list the providers a conversation of this instance can be put on, one per line as value (label),
-                e.g. "openai-compat (Local LLM)" or "claude (Claude Code)". Give the value to create_chat or
-                set_chat_provider. Takes no parameters.
+                e.g. "openai-compat (Local LLM)"; create_chat and set_chat_provider take the value. No
+                parameters.
                 """,
                 List.of(),
                 false);
         add(m, "create_chat", """
-                add a new, empty conversation to your own project and return its id (for example "06"), which
-                you can then pass as "chatId" to ask_chat, set_chat_model, get_request_messages and the other
-                conversation tools. All parameters are optional: "provider" is a value list_providers printed
-                (default: claude, Claude Code), and "model" is one of that provider's models (default: the
-                provider's own default). A wrong provider or model is refused with the names you can use, and no
-                conversation is left behind. Name openai-compat (a local LLM) only for workers that repeat the
-                same kind of job many times (for example, processing Wikipedia articles one by one), where calls
-                cost nothing and many run at once. Instead of provider and model you may give "role" (manager,
-                worker or repeater): the role decides the provider, model, name and timekeeper limits, and a
-                role given together with a provider or model is refused. Nothing else creates a conversation: a
-                "chatId" that does not exist is an error. The new conversation reports to you; give the optional
-                "superior" parameter another conversation's id to put it under that one instead, or "none" for
-                no superior. A superior already holding the subordinate limit is refused, naming its
-                subordinates that still have room: put the new one under one of them.
+                add a new, empty conversation to your own project and return its id (e.g. "06") for the other
+                conversation tools. All parameters are optional. "provider": a value list_providers printed
+                (default claude, Claude Code); "model": one of its models (default the provider's own); a wrong
+                one is refused with the usable names and nothing is created. Name openai-compat (a local LLM)
+                only for workers that repeat one kind of job many times, where calls cost nothing and many run at
+                once. Instead of provider and model you may give "role" (manager, worker or repeater), which
+                decides provider, model, name and timekeeper limits; role with a provider or model is refused.
+                The new conversation reports to you; "superior" puts it under another conversation's id, "none"
+                under nobody. A superior already at the subordinate limit is refused, naming its subordinates
+                with room left.
                 """,
                 List.of(
                     new ToolParameter("provider", "string", false, ""),
@@ -288,43 +256,41 @@ public final class ConversationToolCatalog {
                 false);
         add(m, "list_chats", """
                 list the conversations of your project, one per line: id, name, superior, number of
-                subordinates, provider and model, busy or idle. You and the liaison (the one conversation that
-                talks with the person) are marked. Takes no parameters.
+                subordinates, provider and model, busy or idle; you and the liaison (the conversation that talks
+                with the person) are marked. No parameters.
                 """,
                 List.of(),
                 false);
         add(m, "set_superior", """
-                make "superiorChatId" the superior of conversation "chatId" of your project, or, with "none",
-                leave it with no superior. A conversation reports to its superior and sends it the questions it
-                cannot decide. Refused, with nothing changed, when it would make a loop, when "chatId" is the
-                liaison, and when the superior already has the subordinate limit.
+                make "superiorChatId" the superior of conversation "chatId" of your project, or with "none"
+                leave it with none. A conversation reports to its superior and sends it the questions it cannot
+                decide. Refused, nothing changed, when it would make a loop, when "chatId" is the liaison, or
+                when the superior is at the subordinate limit.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
                     new ToolParameter("superiorChatId", "string", false, "")),
                 false);
         add(m, "set_chat_provider", """
-                put another conversation of this project on a different provider. "provider" is a value
-                list_providers printed. Its model becomes that provider's default; call set_chat_model after it
-                for another. The change takes effect after that conversation's current turn. A conversation of
-                another project is refused.
+                put another conversation of this project on a different provider, a value list_providers
+                printed, taking effect after its current turn. Its model becomes the provider's default; call
+                set_chat_model for another. A conversation of another project is refused.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
                     new ToolParameter("provider", "string", true, "")),
                 false);
         add(m, "delete_chat", """
-                delete a conversation of your own project, for example one you made with create_chat. Refused,
-                with the reason and nothing changed, for project1's chat-01, the project's last conversation,
-                one that is answering or has queued prompts, one with conversations under it, and your own.
+                delete a conversation of your own project, e.g. one made with create_chat. Refused, nothing
+                changed, for project1's chat-01, the project's last conversation, one answering or with queued
+                prompts, one with conversations under it, and your own.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, "")),
                 false);
         add(m, "get_chat_log", """
-                read the newest entries of another conversation's log without sending it anything — to see what
-                it is doing while an ask_chat to it waits, or why a call to it failed. "count" is optional
-                (default 20, at most 200).
+                read the newest entries of another conversation's log without sending it anything, to check
+                once what it is doing or why a call to it failed. "count": default 20, at most 200.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
@@ -332,17 +298,17 @@ public final class ConversationToolCatalog {
                 false);
         add(m, "get_request_messages", """
                 read the messages array another conversation will send to its model next, as a JSON array of
-                {"role","content"}. This is what the model reads, not the screen's record. Refused while that
-                conversation is answering.
+                {"role","content"}; this is what the model reads, not the screen's record. Refused while it is
+                answering.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, "")),
                 false);
         add(m, "set_request_messages", """
-                replace the whole messages array another conversation of this project will send next. "messages"
-                is a JSON array of {"role","content"} with roles system, user and assistant. An array that is
-                malformed or too long for the model is refused and nothing changes. To drop one message, read
-                the array, remove it, and set the result.
+                replace the whole messages array another conversation of this project will send next;
+                "messages" is a JSON array of {"role","content"} with roles system, user and assistant. A
+                malformed or too long array is refused, nothing changes. To drop one message, read the array,
+                remove it, set the result.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
@@ -350,8 +316,8 @@ public final class ConversationToolCatalog {
                 false);
         add(m, "complete_messages", """
                 call the model of another conversation once with exactly the given messages and return its
-                reply. Nothing is added to that conversation's history, and it works while that conversation is
-                answering. "model" and "noThink" are optional.
+                reply; nothing is added to its history, and it works while that conversation is answering.
+                "model" and "noThink" are optional.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
@@ -361,12 +327,11 @@ public final class ConversationToolCatalog {
                 false);
         // ExternalMcpServersOfAConversation_261120_oo01
         add(m, "set_mcp_servers", """
-                register the external MCP servers a conversation of this project uses, replacing the ones it
-                had. "servers" is a JSON object from a server name (a lowercase letter, then lowercase letters,
-                digits or '-', at most 20) to the URL of its MCP endpoint, for example
-                {"htmlsaurus": "http://localhost:28001/mcp"}; {} removes them all. From that conversation's
-                next turn, a local LLM there is given each server's tools named <server>__<tool>, for example
-                htmlsaurus__search.
+                register the external MCP servers a conversation of this project uses, replacing its old ones.
+                "servers" is a JSON object from a server name (a lowercase letter, then lowercase letters,
+                digits or '-', at most 20) to its MCP endpoint URL, e.g. {"htmlsaurus":
+                "http://localhost:28001/mcp"}; {} removes all. From its next turn a local LLM there gets each
+                server's tools as <server>__<tool>.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
