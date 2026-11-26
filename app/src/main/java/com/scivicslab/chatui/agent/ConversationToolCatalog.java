@@ -115,20 +115,14 @@ public final class ConversationToolCatalog {
                     new ToolParameter("noThink", "boolean", false, "")),
                 true);
         add(m, "ask_chat_urgent", """
-                as ask_chat, with chatId and node written as ask_chat says: a conversation of this instance, in
-                any project, takes no node ("chat-02", "project1/chat-01"); on another instance (to find the node
-                name of another instance, call list_running_tools first), give the node and write chatId with its
-                project, e.g. "project1/chat-01". The
-                request goes into the other conversation's queue ahead of
-                every waiting message that is not urgent, and its reply comes back to you the same way. It does
-                not interrupt a turn the other conversation is running; it is answered next. Use it when someone
-                asks you how the work you handed out is going: send each conversation you gave work to an urgent
-                request asking, in one paragraph, how far it has got — saying it should answer only that and
-                keep the work it is doing — then end your turn. When every answer is back, sum up how far each
-                one has got.
-                "noThink" is optional (default false): true asks the receiving conversation to answer this one
-                request without thinking, which is faster and cheaper for a short question or a status report;
-                left out or false, its own setting applies.
+                as ask_chat (same chatId, node and noThink): a conversation of this instance takes no node
+                ("project1/chat-01"); to find the node name of another instance, call list_running_tools first.
+                The request goes into the other conversation's queue ahead of every waiting message that is not
+                urgent, and its reply comes back to you the same way. It does not interrupt a turn the other
+                conversation is running; it is answered next. Use it when someone asks how the work you handed
+                out is going: send each conversation you gave work to an urgent request asking, in one paragraph,
+                how far it has got (it should answer only that and keep its work), then end your turn. When
+                every answer is back, sum up how far each one has got.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
