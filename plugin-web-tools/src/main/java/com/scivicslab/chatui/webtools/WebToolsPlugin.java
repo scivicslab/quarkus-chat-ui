@@ -67,11 +67,9 @@ public class WebToolsPlugin implements ChatUiPlugin {
         @Override
         public String description() {
             return """
-                    - fetch(url): fetch one specific URL you already have and return its readable text.
-                      A PDF is extracted to text (its first 60 pages), so a paper's open-access URL can
-                      be read with this. Stops at 5,000 characters and says "[truncated N chars total]"
-                      with the page's real length, so you can tell a whole page from a cut one. This is
-                      how you read a page web_search only summarised for you.
+                    - fetch(url): fetch one URL you already have and return its readable text. A PDF is
+                      extracted to text (first 60 pages). Stops at 5,000 characters with "[truncated N chars
+                      total]" giving the real length. Use it to read a page web_search only summarised.
                     """;
         }
 
@@ -88,15 +86,12 @@ public class WebToolsPlugin implements ChatUiPlugin {
         @Override
         public String description() {
             return """
-                    - scholar_search(query, sort, year_from, limit): search the scholarly literature
-                      through OpenAlex (journal articles, conference papers, books, preprints). Returns,
-                      per work, the title, authors, year, venue, citation count, DOI, an open-access URL
-                      when one exists, and the abstract. For a research question use this rather than
-                      web_search, which returns web pages and cannot see how often a paper is cited.
-                      "sort" is "relevance" (default) or "cited" (most cited first) — for a survey run
-                      both; "year_from" keeps works published in or after that year; "limit" is 1–25
-                      (default 10). To read a paper, call fetch on its open-access URL. Query in
-                      English: the abstracts indexed are mostly English.
+                    - scholar_search(query, sort, year_from, limit): search the scholarly literature through
+                      OpenAlex (articles, papers, books, preprints). Returns per work the title, authors,
+                      year, venue, citation count, DOI, open-access URL if any, and abstract. Use it rather
+                      than web_search for a research question. "sort" is "relevance" (default) or "cited"
+                      (for a survey run both); "year_from" keeps works from that year on; "limit" is 1–25
+                      (default 10). To read a paper, call fetch on its open-access URL. Query in English.
                     """;
         }
 

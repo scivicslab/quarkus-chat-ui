@@ -47,13 +47,10 @@ public class ShellPlugin implements ChatUiPlugin {
         @Override
         public String description() {
             return """
-                    - bash(command): run one shell command and get back its exit status and its
-                      output, standard output and standard error together. It starts in the working
-                      directory, and the command is written as you would type it, so pipes and
-                      redirection work. Each call is a new shell: a cd in one call is not in effect
-                      in the next, so put the cd in the same command. A command still running after
-                      120 seconds is killed, and output past 30,000 characters is cut with a note
-                      saying how much there was. Every command and its whole output are recorded.
+                    - bash(command): run one shell command in the working directory and get back its exit
+                      status and output (stdout and stderr together). Pipes and redirection work. Each call
+                      is a new shell, so a cd does not carry over. Killed after 120 seconds; output past
+                      30,000 characters is cut with a note. Every command and its output are recorded.
                     """;
         }
 
