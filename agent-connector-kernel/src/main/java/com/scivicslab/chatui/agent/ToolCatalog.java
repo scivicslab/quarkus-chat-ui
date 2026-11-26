@@ -168,12 +168,9 @@ public final class ToolCatalog {
     private static Map<String, Spec> core() {
         Map<String, Spec> m = new LinkedHashMap<>();
         add(m, "read", """
-                read a file, or a whole directory recursively, under the working directory. To read several
-                files at once, put one path per line in the same "path" parameter — use that instead of reading
-                a parent directory when you want three specific files, since the parent brings everything else
-                under it along too. A read that would return more than 4,000,000 characters or 1,000 files stops
-                early and says where it stopped, listing the paths it did not reach so you can ask for them
-                separately.
+                read a file, or a directory recursively, under the working directory. For several files put one
+                path per line in "path" rather than reading their parent directory. A read of more than
+                4,000,000 characters or 1,000 files stops early and lists the paths it did not reach.
                 """,
                 List.of(
                     new ToolParameter("path", "string", true, "")),
@@ -185,34 +182,24 @@ public final class ToolCatalog {
                     new ToolParameter("expression", "string", true, "")),
                 false);
         add(m, "search_docs", """
-                search this team's internal documentation. It returns a ranked list of CANDIDATE documents —
-                title, id, source path and a short summary each — not the answer to your question. A summary
-                says what a document is about, not what it says, so to actually answer you must then call read
-                on the "path" of the candidates that look relevant, and read more than one when the summaries do
-                not settle which is right. Answering straight from a summary, or from a single top-ranked
-                candidate you did not open, is how you get the answer wrong. Three unrelated searches — over
-                words, over term frequencies, over meaning — always run, and their results are merged; each
-                candidate says which of them found it, and one found by more than one is the strongest signal in
-                the list. Search in the language the documents are written in: these are mostly Japanese. "node"
-                is optional: leave it out to search the default documentation portal, or give the name of
-                another html-saurus node to search that one instead.
+                search this team's internal documentation (mostly Japanese; search in that language). It returns
+                a ranked list of CANDIDATE documents (title, id, source path, short summary), not the answer: a
+                summary says what a document is about, not what it says, so call read on the "path" of the
+                relevant candidates, more than one when unsure, before answering. Word, term-frequency and
+                meaning searches always run and are merged; a candidate found by more than one of them is the
+                strongest. "node" optionally names another html-saurus node; the default is the default portal.
                 """,
                 List.of(
                     new ToolParameter("query", "string", true, ""),
                     new ToolParameter("node", "string", false, "")),
                 false);
         add(m, "list_references", """
-                follow the reference links an author declared between documents. Pass the "id" a search_docs
-                candidate printed. Direction "forward" (the default) returns the documents that one refers to;
-                "backward" returns the documents that refer to it. Each edge has a kind, written by the author —
-                the kinds are not a fixed list, so read the kind that comes back rather than expecting a
-                particular word; pass "relation" to keep only one kind, or omit it for every kind. This is not a
-                search: the relation is written in the document's own source, so it is the way to reach a
-                document whose wording never matches the question — the value you need may be stated only in a
-                document its author told you to read first. It returns the same kind of candidate list
-                search_docs does, so call read on a path to see what a document actually says. "backward" stops
-                at 30 documents and says so when it did; a standard that many documents declare as their
-                prerequisite has that many edges. "node" is optional and means what it means for search_docs.
+                follow the reference links an author declared between documents, starting from the "id" a
+                search_docs candidate printed. "direction": "forward" (default) returns the documents it refers
+                to, "backward" those that refer to it (at most 30, said when it stops). "relation" keeps one kind
+                of edge, any kind the author wrote; omit it for all. Not a search: it reaches a document whose
+                wording never matches the question. It returns candidates like search_docs, so read a path to
+                see what a document says. "node" as in search_docs.
                 """,
                 List.of(
                     new ToolParameter("id", "string", true, ""),
@@ -221,21 +208,19 @@ public final class ToolCatalog {
                     new ToolParameter("node", "string", false, "")),
                 false);
         add(m, "write", """
-                save text to a file under the working directory. Missing parent directories are created, so you
-                can write straight to a new subdirectory without making it first. An existing file is
-                OVERWRITTEN, not appended to — read it first if you meant to add to it. The reply gives the
-                absolute path written and how many characters went into it.
+                save text to a file under the working directory; missing parent directories are created. An
+                existing file is OVERWRITTEN, not appended to. The reply gives the absolute path and the number
+                of characters written.
                 """,
                 List.of(
                     new ToolParameter("path", "string", true, ""),
                     new ToolParameter("content", "string", false, "")),
                 false);
         add(m, "edit", """
-                change a few lines of an existing file under the working directory without rewriting it: the exact
-                text old_string is replaced by new_string. old_string must be in the file exactly as written,
-                spaces and line breaks included, and must occur once — add the lines around it until it is unique,
-                or pass replace_all as "true" to replace every occurrence. Nothing is changed when it is absent or
-                not unique, and the reply says which. Use write for a new file or a complete rewrite.
+                replace the exact text old_string with new_string in an existing file under the working directory.
+                old_string must match exactly, spaces and line breaks included, and occur once (add surrounding
+                lines until unique) unless replace_all is "true". Nothing changes when it is absent or not
+                unique, and the reply says which. Use write for a new file or a full rewrite.
                 """,
                 List.of(
                     new ToolParameter("path", "string", true, ""),
@@ -244,10 +229,9 @@ public final class ToolCatalog {
                     new ToolParameter("replace_all", "boolean", false, "")),
                 false);
         add(m, "remove", """
-                take one file away from the working directory. It is MOVED to .trash/<timestamp>/ keeping the
-                path it had, not deleted, so a wrong one can be put back and nothing is lost. The reply gives
-                both paths. One file per call: a directory is refused, so clear a tree one file at a time or
-                leave it to a person. Emptying the trash is a person's job — do not try to.
+                take one file away from the working directory: it is MOVED to .trash/<timestamp>/ keeping its
+                path, not deleted, and the reply gives both paths. One file per call; a directory is refused.
+                Emptying the trash is a person's job.
                 """,
                 List.of(
                     new ToolParameter("path", "string", true, "")),
