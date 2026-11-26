@@ -951,7 +951,8 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
 .chat-identity { display: flex; align-items: baseline; gap: 10px; font-size: 12px; color: var(--text-secondary, #b8b8b8);
     min-width: 0; flex-wrap: wrap; }
 .chat-identity #chat-identity-id { color: var(--text-primary, #e6e6e6); font-weight: 600; }
-.chat-identity #chat-identity-provider::after { content: "·"; margin-left: 10px; }
+.chat-identity #chat-identity-id::after, .chat-identity #chat-identity-provider::after { content: "·"; margin-left: 10px; font-weight: 400; color: var(--text-secondary, #b8b8b8); }
+.chat-identity #chat-identity-settings { font-size: 12px; padding: 1px 8px; cursor: pointer; }
 
 /* ── The conversation's settings in the right pane: one under the other ── */
 #tab-settings .chat-settings { flex-direction: column; align-items: flex-start; gap: 10px; padding: 8px 2px; }

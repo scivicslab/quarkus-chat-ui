@@ -95,6 +95,9 @@
         });
         showRightTabDescription();
         sel.addEventListener("change", function () { showRightTab(sel.value); });
+        // The centre header's Settings button opens the conversation's settings, so they can be found without knowing the menu.
+        var settingsButton = document.getElementById("chat-identity-settings");
+        if (settingsButton) settingsButton.addEventListener("click", function () { showRightTab("settings"); });
     }
 
     // ── Project perspective, right pane: run a workflow, list the jobs, read a job's log ────

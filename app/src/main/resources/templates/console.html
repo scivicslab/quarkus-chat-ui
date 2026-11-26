@@ -121,10 +121,11 @@
                      reloads them when another chat is opened (ChatSettingsInTheChatHeader_261012_oo01). -->
                 <header>
                     <!-- Which conversation this is, read-only; its settings are in the right pane's Settings entry. -->
-                    <div id="chat-identity" class="chat-identity" title="The provider and model this conversation runs on, and its id. Change them in the right pane: Settings.">
+                    <div id="chat-identity" class="chat-identity" title="The provider and model this conversation runs on, and its id. Change them with the Settings button.">
+                        <span id="chat-identity-id"></span>
                         <span id="chat-identity-provider"></span>
                         <span id="chat-identity-model"></span>
-                        <span id="chat-identity-id"></span>
+                        <button id="chat-identity-settings" type="button" title="Open Settings in the right pane: provider, model, temperature and effort of this conversation.">Settings</button>
                     </div>
                     <div class="left-pane-actions" style="display:flex;align-items:center;gap:8px">
                         <button id="save-chat-btn" title="Save conversation as Markdown">Save Chat</button>
