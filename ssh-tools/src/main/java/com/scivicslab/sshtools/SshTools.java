@@ -71,16 +71,14 @@ public final class SshTools implements ToolExtension {
     /** @return the tools' definitions, in {@link #NAMES} order */
     public static List<ToolCatalog.Spec> specs() {
         return List.of(
-                spec("run_command", "Run one shell command on the cluster's login node under your own account and "
-                                + "return its exit status and output. One line; no line breaks.",
+                spec("run_command", "Run one one-line shell command on the cluster's login node under your own account; "
+                                + "returns its exit status and output.",
                         new ToolParameter("command", "string", true, "the command line for the cluster's shell")),
-                spec("submit_job", "Submit a Slurm batch script with sbatch. The script is stored in a new job "
-                                + "directory on the cluster; the answer is the job id.",
+                spec("submit_job", "Submit a Slurm batch script with sbatch; returns the job id.",
                         new ToolParameter("script", "string", true, "the whole batch script, with its #SBATCH lines"),
                         new ToolParameter("name", "string", false,
                                 "the job's name: letters, digits, '-' and '_', up to 64 characters")),
-                spec("job_status", "Show a Slurm job's state, from squeue while it is queued or running and from "
-                                + "sacct after it ended.",
+                spec("job_status", "Show a Slurm job's state (squeue while it is live, sacct after it ended).",
                         new ToolParameter("job_id", "string", true, "the job id, such as 4242 or 4242_3")),
                 spec("cancel_job", "Cancel a Slurm job with scancel.",
                         new ToolParameter("job_id", "string", true, "the job id, such as 4242 or 4242_3")),
