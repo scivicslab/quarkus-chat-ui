@@ -27,7 +27,9 @@ class CodexCancelWindowTest {
     @Test
     void aCancelWhileTheRunStartsIsNotLost(@TempDir Path dir) throws Exception {
         Path fake = dir.resolve("fake-codex");
-        Files.writeString(fake, "#!/bin/sh\ncat >/dev/null\nsleep 30\n");
+        // exec: the process that is stopped is the one that holds stdout; a child left behind by a stopped shell would keep
+        // the pipe open and the turn would wait for it to end
+        Files.writeString(fake, "#!/bin/sh\ncat >/dev/null\nexec sleep 30\n");
         assertTrue(fake.toFile().setExecutable(true));
         HarnessSettings settings = new HarnessSettings("bypassPermissions", dir.resolve("sessions"), 1, "sonnet", null, dir);
         for (int round = 0; round < 200; round++) {
