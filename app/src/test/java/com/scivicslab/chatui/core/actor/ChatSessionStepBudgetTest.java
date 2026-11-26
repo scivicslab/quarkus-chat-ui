@@ -68,6 +68,12 @@ class ChatSessionStepBudgetTest {
     private record Outcome(BudgetProvider provider, String answer, String ending) {}
 
     private static Outcome runTurn(BudgetProvider provider, int stepLimit, int timeLimitMinutes, AtomicLong clock) {
+        return runTurn(provider, stepLimit, timeLimitMinutes, clock, 0);
+    }
+
+    /** @param maxObservationChars a ceiling on one observation, or 0 to leave the default */
+    private static Outcome runTurn(BudgetProvider provider, int stepLimit, int timeLimitMinutes, AtomicLong clock,
+                                   int maxObservationChars) {
         IIActorSystem system = new IIActorSystem("chat-session-step-budget-test");
         ChatSessionIIAR iiar = new ChatSessionIIAR("chat", provider, Optional.empty(), null, system);
         system.addIIActor(iiar);
@@ -78,6 +84,7 @@ class ChatSessionStepBudgetTest {
             c.setStepLimit(stepLimit);
             c.setTimeLimitMinutes(timeLimitMinutes);
             if (clock != null) c.setClock(clock::get);
+            if (maxObservationChars > 0) c.setMaxObservationChars(maxObservationChars);
         }).join();
         ActorRef<ChatSession> chatRef = iiar.asChatSessionRef();
         String[] result = new String[2];
@@ -200,5 +207,87 @@ class ChatSessionStepBudgetTest {
         ChatSession session = new ChatSession(alwaysCalls("x"), Optional.empty());
         assertEquals(100, session.getStepLimit());
         assertEquals(10, session.getTimeLimitMinutes());
+    }
+
+    @Test
+    void timeLineGivesUsedAndLeftAndSwitchesToTheStrongWordingBelowTwentyPercentLeft() {
+        long min = 60_000L;
+        assertEquals("\n[time: 6.5 of 30 min used, 23.5 min left]", ChatSession.timeLine(390_000L, 30));
+        assertEquals("\n[time: 0 of 30 min used, 30 min left]", ChatSession.timeLine(0, 30));
+        // 24 of 30 minutes is exactly 20% left: not yet below it.
+        assertEquals("\n[time: 24 of 30 min used, 6 min left]", ChatSession.timeLine(24 * min, 30));
+        assertEquals("\n[time: 24.5 of 30 min used, 5.5 min left. Do not start long commands. Answer in text soon.]",
+                ChatSession.timeLine(24 * min + 30_000L, 30));
+        assertEquals("\n[time: 31 of 30 min used, 0 min left. Do not start long commands. Answer in text soon.]",
+                ChatSession.timeLine(31 * min, 30));
+        assertEquals("", ChatSession.timeLine(5 * min, 0), "no limit, no line");
+    }
+
+    @Test
+    void everyObservationEndsWithTheTimeLineOnTheInjectedClockAndTheLineIsAbsentWithoutALimit() {
+        AtomicLong clock = new AtomicLong();
+        // Each request takes one minute of the injected clock; the limit is 10 minutes.
+        BudgetProvider provider = new BudgetProvider(true,
+                (n, textOnly) -> n < 4 ? call(n) : "Done.", () -> clock.addAndGet(60_000L));
+        runTurn(provider, 100, 10, clock);
+        assertTrue(provider.prompts.get(1).contains("[time: 1 of 10 min used, 9 min left]"), provider.prompts.get(1));
+        assertTrue(provider.prompts.get(2).contains("[time: 2 of 10 min used, 8 min left]"), provider.prompts.get(2));
+
+        AtomicLong clock2 = new AtomicLong();
+        BudgetProvider unlimited = new BudgetProvider(true,
+                (n, textOnly) -> n < 4 ? call(n) : "Done.", () -> clock2.addAndGet(60_000L));
+        runTurn(unlimited, 100, 0, clock2);
+        assertTrue(unlimited.prompts.stream().noneMatch(p -> p.contains("[time:")), "no limit, no line");
+    }
+
+    @Test
+    void theStrongWordingComesWhenLessThanTwentyPercentIsLeft() {
+        AtomicLong clock = new AtomicLong();
+        BudgetProvider provider = new BudgetProvider(true,
+                (n, textOnly) -> n < 4 ? call(n) : "Done.", () -> clock.addAndGet(3 * 60_000L));
+        runTurn(provider, 100, 10, clock);
+        // After the second request it is 6 minutes, after the third 9: 1 minute left of 10.
+        assertTrue(provider.prompts.get(2).contains("[time: 6 of 10 min used, 4 min left]"), provider.prompts.get(2));
+        assertTrue(provider.prompts.get(3).contains(
+                "[time: 9 of 10 min used, 1 min left. Do not start long commands. Answer in text soon.]"), provider.prompts.get(3));
+    }
+
+    @Test
+    void theTimeLineIsNotCutByTheTruncationOfTheObservation() {
+        AtomicLong clock = new AtomicLong();
+        BudgetProvider provider = new BudgetProvider(true,
+                (n, textOnly) -> n < 3 ? call(n) : "Done.", () -> clock.addAndGet(60_000L));
+        runTurn(provider, 100, 10, clock, 10);
+        String second = provider.prompts.get(1);
+        assertTrue(second.contains("characters elided"),
+                "the observation itself was cut: " + second);
+        assertTrue(second.stripTrailing().endsWith("[time: 1 of 10 min used, 9 min left]"), second);
+    }
+
+    @Test
+    void theFinalRequestAtTheTimeLimitAsksForPlainText() {
+        AtomicLong clock = new AtomicLong();
+        BudgetProvider provider = new BudgetProvider(true,
+                (n, textOnly) -> textOnly ? "Summary." : call(n), () -> clock.addAndGet(4 * 60_000L));
+        runTurn(provider, 100, 10, clock);
+        assertTrue(provider.prompts.get(3).contains(
+                "You reached the time limit of 10 minutes; say what you found and what is left. Answer in plain text now."),
+                provider.prompts.get(3));
+    }
+
+    @Test
+    void ifTheFinalRequestReturnsNoTextTheLastTextTheModelWroteIsTheAnswer() {
+        // The model wrote a line beside its first call, and then nothing, also at the final request.
+        BudgetProvider provider = new BudgetProvider(true,
+                (n, textOnly) -> n == 1 ? "I found the config file.\n" + call(n) : textOnly ? "" : call(n), () -> {});
+        Outcome o = runTurn(provider, 5, 0, null);
+        assertEquals("I found the config file.", o.answer());
+        assertEquals("[ended: step-limit; model calls: 6; tool calls: 5]", o.ending());
+    }
+
+    @Test
+    void ifTheFinalRequestReturnsNoTextAndTheModelWroteNoneTheErrorTextStays() {
+        Outcome o = runTurn(alwaysCalls(""), 5, 0, null);
+        assertEquals("The step limit of 5 was reached and the model gave no answer", o.answer());
     }
 }

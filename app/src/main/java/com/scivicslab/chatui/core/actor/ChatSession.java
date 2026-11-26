@@ -159,6 +159,8 @@ public class ChatSession extends Interpreter {
     private boolean timeLimitHit;
     /** Whether this turn has been warned that its steps are running out, which is done once. */
     private boolean stepWarningGiven;
+    /** The last non-empty text the model wrote this turn (beside a tool call or not); the answer if the final request returns none. */
+    private String lastAssistantText = "";
 
     /** Steps one turn of a conversation whose provider takes a step budget may make, unless the conversation sets it. */
     public static final int DEFAULT_CONVERSATION_STEP_LIMIT = 100;
@@ -1367,6 +1369,7 @@ public class ChatSession extends Interpreter {
         this.finalRequest = FinalRequest.NONE;
         this.timeLimitHit = false;
         this.stepWarningGiven = false;
+        this.lastAssistantText = "";
         this.repeatedCallHit = false;
         this.personQuestion = null;
         cancelScope.begin();
@@ -1825,13 +1828,15 @@ public class ChatSession extends Interpreter {
         // A reply of a model's tool-call markup is no answer even here: the call is not run, and it is not shown as text.
         if (finalRequest != FinalRequest.NONE && byDefinition() && ToolCallMarkup.in(writtenText)) writtenText = "";
         if (finalRequest != FinalRequest.NONE) {
-            finalAnswer = writtenText.isEmpty() ? noAnswerText() : writtenText;
+            finalAnswer = !writtenText.isEmpty() ? writtenText
+                    : !lastAssistantText.isEmpty() ? lastAssistantText : noAnswerText();
             logToConversationSquad(writtenText.isEmpty() ? "WARNING" : "INFO", "turn" + ioTurnNo + "/step" + stepCount
                     + ": the request after the " + finalRequest.name().toLowerCase().replace('_', ' ') + " "
                     + (writtenText.isEmpty() ? "returned no text" : "was answered in text")
                     + (outcome.calls().isEmpty() ? "" : "; a call in it was not run"));
             return new ActionResult(false, "answer after the " + finalRequest.name().toLowerCase().replace('_', ' '));
         }
+        if (!writtenText.isEmpty()) lastAssistantText = writtenText;
         // Any text the model writes ends a run of identical calls, except for a provider that calls tools by definition: its
         // system message asks for a short line before each call, so text beside a call says nothing about whether the model
         // is going round in a circle, and a model repeating one call with a fresh line each time is still repeating it.
@@ -2421,6 +2426,29 @@ public class ChatSession extends Interpreter {
         }
     }
 
+    /**
+     * The line appended to every tool observation: how much of the turn's time limit is used. With less than 20% left it
+     * tells the model to stop starting long commands. Empty when the limit is 0 (none).
+     *
+     * @param elapsedMs the turn's running time so far, by the conversation's clock
+     * @param limitMinutes the conversation's time limit, 0 for none
+     */
+    static String timeLine(long elapsedMs, int limitMinutes) {
+        if (limitMinutes <= 0) return "";
+        long limitMs = limitMinutes * 60_000L;
+        String used = minutes(elapsedMs / 60_000.0);
+        String left = minutes(Math.max(0, limitMs - elapsedMs) / 60_000.0);
+        if (limitMs - elapsedMs < limitMs / 5) {
+            return "\n[time: " + used + " of " + limitMinutes + " min used, " + left
+                    + " min left. Do not start long commands. Answer in text soon.]";
+        }
+        return "\n[time: " + used + " of " + limitMinutes + " min used, " + left + " min left]";
+    }
+
+    private static String minutes(double m) {
+        return m == Math.rint(m) ? String.valueOf((long) m) : String.format(java.util.Locale.ROOT, "%.1f", m);
+    }
+
     /** What the turn answers when the request for an answer in text returned none. */
     private String noAnswerText() {
         return switch (finalRequest) {
@@ -2443,7 +2471,7 @@ public class ChatSession extends Interpreter {
         long limitMs = timeLimit * 60_000L;
         if (clock.getAsLong() - turnStartedAt < limitMs) return new ActionResult(false, "within the time limit");
         askForAnAnswerInText(FinalRequest.TIME_LIMIT,
-                "You reached the time limit of " + timeLimit + " minutes; say what you found and what is left.");
+                "You reached the time limit of " + timeLimit + " minutes; say what you found and what is left. Answer in plain text now.");
         return new ActionResult(true, "time limit reached: asking for an answer in text");
     }
 
@@ -2737,6 +2765,8 @@ public class ChatSession extends Interpreter {
             String forModel = ContextBudget.truncateObservation(fitted,
                     Math.min(parsePositiveOr(observationChars, ContextBudget.OBS_THRESHOLD),
                              maxObservationChars));
+            // After the truncation, so that the line can never be cut off.
+            if (provider.takesStepBudget()) forModel = forModel + timeLine(clock.getAsLong() - turnStartedAt, getTimeLimitMinutes());
             if (recordHere) recordToolIo(tc, fullObservation);
             results.add(new LlmProvider.ToolCallResult(tc.id(), tc.name(), forModel));
             turnEmitter.accept(ChatEvent.thinking("Observation (" + tc.name() + "): "
