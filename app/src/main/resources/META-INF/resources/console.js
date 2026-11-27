@@ -2606,6 +2606,7 @@
             // this instance, or one whose provider could not be read, is not looked up: "model unknown".
             tip += "\n" + (r.node && r.node.provider
                 ? r.node.provider + ": " + (r.node.model || "(no model chosen yet)")
+                    + (r.node.model && r.node.window ? " · " + r.node.window : "")
                 : "model unknown");
             if (played.length) {
                 tip += "\n" + played.map(function (x) { return roleEmoji(x.role) + " " + x.role + " for " + x.forChat; }).join("\n");

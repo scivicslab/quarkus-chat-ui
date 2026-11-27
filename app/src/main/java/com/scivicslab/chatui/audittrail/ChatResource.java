@@ -23,6 +23,7 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -709,6 +710,7 @@ public class ChatResource {
         Map<String, Object> status = new java.util.LinkedHashMap<>();
         status.put("busy", chatSessionIIAR.isBusyDirect());
         status.put("model", model == null ? "" : model);
+        status.put("contextWindow", chatSessionIIAR.getContextWindowLabelDirect(null));
         status.put("provider", chatSessionIIAR.getProviderIdDirect());
         status.put("tools", chatSessionIIAR.getToolSetDirect());
         status.put("noThink", chatSessionIIAR.isNoThinkDirect());
@@ -1142,19 +1144,50 @@ public class ChatResource {
     }
 
     /**
+     * Says how large the context window is for one model on this ConversationSquad's provider, so the screen can show it
+     * beside the model the person has just picked, before the ConversationSquad has settled on it.
+     *
+     * @param model the model value; the one the ConversationSquad is on now when omitted
+     * @return {@code {"model": "...", "contextWindow": "1M"|"200K"|"131K"|"?"}}
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/window")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Map<String, Object> window(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
+                                      @QueryParam("model") String model) {
+        requireChat(projectId, chatId);
+        ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
+        String asked = model == null || model.isBlank() ? null : model.strip();
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("model", asked != null ? asked : String.valueOf(chatSessionIIAR.getModelDirect()));
+        out.put("contextWindow", chatSessionIIAR.getContextWindowLabelDirect(asked));
+        return out;
+    }
+
+    /**
      * Lists the models available from one ConversationSquad's provider.
      *
      * @param chatId ConversationSquad identifier
-     * @return the provider's {@link LlmProvider.ModelEntry} list
+     * @return the provider's {@link LlmProvider.ModelEntry} list, each with its {@code contextWindow} label
      */
     @GET
     @Path("/{projectId}/chats/{chatId}/models")
     @Produces(MediaType.APPLICATION_JSON)
-    public List<LlmProvider.ModelEntry> models(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+    public List<Map<String, Object>> models(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
         requireChat(projectId, chatId);
         ChatSessionIIAR chatSessionIIAR = actorSystem.getChatSession(projectId, chatId);
         try {
-            return chatSessionIIAR.getAvailableModelsDirect();
+            List<Map<String, Object>> out = new java.util.ArrayList<>();
+            for (LlmProvider.ModelEntry m : chatSessionIIAR.getAvailableModelsDirect()) {
+                Map<String, Object> e = new java.util.LinkedHashMap<>();
+                e.put("name", m.name());
+                e.put("type", m.type());
+                e.put("server", m.server());
+                e.put("label", m.label());
+                e.put("contextWindow", chatSessionIIAR.getContextWindowLabelDirect(m.name()));
+                out.add(e);
+            }
+            return out;
         } catch (Exception e) {
             LOG.warning("Failed to list models for ConversationSquad " + chatId + ": " + e.getMessage());
             return List.of();

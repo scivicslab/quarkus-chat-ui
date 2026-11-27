@@ -186,8 +186,8 @@ class ConversationToolsTest {
     @Test
     void listChatModelsListsTheOtherConversationsModels() {
         String result = callFromChat01(invoke("list_chat_models", "chatId", "02"), MODELS, new FakeControls());
-        assertTrue(result.contains("gemma (chat, broker)"), result);
-        assertTrue(result.contains("qwen-tensorfold (chat, broker)"), result);
+        assertTrue(result.contains("gemma · ? (chat, broker)"), result);
+        assertTrue(result.contains("qwen-tensorfold · ? (chat, broker)"), result);
     }
 
     @Test

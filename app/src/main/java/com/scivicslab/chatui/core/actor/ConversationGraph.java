@@ -29,16 +29,27 @@ public record ConversationGraph(String projectId, String name, String liaison, L
      * @param provider the provider as the screen's dropdown names it, e.g. {@code "Claude Code"}, or {@code null}
      *                 when it could not be read
      * @param model    the model the provider is on now, or {@code null} when none is settled yet
+     * @param window   the model's context window as {@code ContextWindowLabel} words it ({@code 1M}, {@code 200K},
+     *                 {@code ?}), or {@code null} when the conversation could not be read
      */
-    public record Node(String chatId, String name, boolean liaison, String provider, String model) {}
+    public record Node(String chatId, String name, boolean liaison, String provider, String model, String window) {
+        /** A node whose window is not known. */
+        public Node(String chatId, String name, boolean liaison, String provider, String model) {
+            this(chatId, name, liaison, provider, model, null);
+        }
+    }
 
     /**
      * What a conversation runs on, read from it at the time of the call.
      *
      * @param provider the provider's label, as the screen's dropdown shows it
      * @param model    the model the provider is on, or {@code null}
+     * @param window   the model's context window label, or {@code null} when not read
      */
-    public record Model(String provider, String model) {}
+    public record Model(String provider, String model, String window) {
+        /** A model whose window is not known. */
+        public Model(String provider, String model) { this(provider, model, null); }
+    }
 
     /**
      * Every project of the instance, each as one {@link ConversationGraph}, for the left pane's single tree
@@ -83,7 +94,7 @@ public record ConversationGraph(String projectId, String name, String liaison, L
         for (String id : ids) {
             Model m = models.get(id);
             nodes.add(new Node(id, names.get(id), id.equals(liaison), m == null ? null : m.provider(),
-                    m == null ? null : m.model()));
+                    m == null ? null : m.model(), m == null ? null : m.window()));
         }
 
         List<SuperiorEdge> sup = new ArrayList<>();

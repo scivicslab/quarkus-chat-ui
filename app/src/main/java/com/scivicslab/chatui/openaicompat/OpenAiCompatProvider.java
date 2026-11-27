@@ -718,7 +718,12 @@ public class OpenAiCompatProvider implements LlmProvider {
     /** @return the server's own context length of the current model, or -1 when it has not reported one */
     @Override
     public int contextWindowTokens() {
-        String model = currentModel();
+        return contextWindowTokens(currentModel());
+    }
+
+    /** @return the server's own context length of {@code model}, or -1 when it has not reported one */
+    @Override
+    public int contextWindowTokens(String model) {
         if (model == null || model.isBlank()) return -1;
         OpenAiCompatClient client = selectClient(model);
         if (client == null) return -1;

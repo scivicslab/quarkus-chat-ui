@@ -32,10 +32,10 @@ class ChatInspectionTest {
 
     @Test
     void modelsAreOneLineEachAndMissingFieldsShowAsDash() {
-        assertEquals("a (chat, broker)\nb (-, -)",
+        assertEquals("a · 1M (chat, broker)\nb · 200K (-, -)",
                 ChatInspection.formatModels(List.of(new ModelEntry("a", "chat", "broker"),
-                        new ModelEntry("b", null, " "))));
-        assertTrue(ChatInspection.formatModels(List.of()).startsWith("no models are listed"));
+                        new ModelEntry("b", null, " ")), m -> m.equals("a") ? "1M" : "200K"));
+        assertTrue(ChatInspection.formatModels(List.of(), m -> "?").startsWith("no models are listed"));
     }
 
     @Test

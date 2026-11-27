@@ -1404,6 +1404,30 @@
         if (match) providerSelect.value = match.value;
     }
 
+    // The context window label of each model the dropdown offers, by model value, for the header and Settings.
+    var windowOfModel = {};
+
+    // Shows the window of the model now chosen, next to the selector and in the header: the list's own answer when it
+    // has one, else the server's (GET .../window), so a model never shows without its window.
+    function showWindow(model) {
+        var box = el("model-window"), head = el("chat-identity-window");
+        var put = function (w) {
+            if (box) box.textContent = w ? "· " + w : "";
+            if (head) head.textContent = w ? "· " + w : "";
+        };
+        if (!model) { put(""); return; }
+        if (windowOfModel[model]) { put(windowOfModel[model]); return; }
+        var forChat = PROJECT_ID + "/" + CHAT_ID;
+        fetch(apiUrl(chatUrl("/window?model=" + encodeURIComponent(model))))
+            .then(function (r) { return r.json(); })
+            .then(function (w) {
+                if (forChat !== PROJECT_ID + "/" + CHAT_ID || !w || !w.contextWindow) return;
+                windowOfModel[model] = w.contextWindow;
+                if (modelSelect && modelSelect.value === model) put(w.contextWindow);
+            })
+            .catch(function () { /* leave the window unshown rather than a wrong one */ });
+    }
+
     // Fills the dropdown with what this conversation's provider offers, then shows the one it is on.
     function loadModels() {
         if (!modelSelect) return;
@@ -1417,10 +1441,13 @@
                 // the box for exactly the conversation being watched work.
                 if ((models || []).length > 0) {
                     modelSelect.textContent = "";
+                    windowOfModel = {};
                     models.forEach(function (m) {
                         var opt = document.createElement("option");
                         opt.value = m.name;
-                        opt.textContent = m.label || m.name;
+                        // The window is part of what a model is, so each option says it (ContextWindowLabel).
+                        opt.textContent = (m.label || m.name) + (m.contextWindow ? " · " + m.contextWindow : "");
+                        if (m.contextWindow) windowOfModel[m.name] = m.contextWindow;
                         modelSelect.appendChild(opt);
                     });
                 }
@@ -1467,6 +1494,7 @@
             .then(function (s) {
                 if (forChat !== PROJECT_ID + "/" + CHAT_ID) return;
                 showProvider(s);
+                if (s && s.model && s.contextWindow) windowOfModel[s.model] = s.contextWindow;
                 showIdentity();
                 var box = el("temperature-input");
                 // Empty when this conversation asks for nothing, so the box says what is true
@@ -1486,7 +1514,7 @@
                 if (!offered) {
                     var opt = document.createElement("option");
                     opt.value = model;
-                    opt.textContent = model;
+                    opt.textContent = model + (s.contextWindow ? " · " + s.contextWindow : "");
                     modelSelect.appendChild(opt);
                 }
                 modelSelect.value = model;
@@ -1503,6 +1531,7 @@
         var chosen = providerSelect && providerSelect.selectedOptions && providerSelect.selectedOptions[0];
         p.textContent = chosen ? chosen.textContent : "";
         m.textContent = modelSelect && modelSelect.value ? modelSelect.value : "";
+        showWindow(modelSelect && modelSelect.value ? modelSelect.value : "");
         i.textContent = PROJECT_ID + "/chat-" + CHAT_ID;
     }
 

@@ -125,6 +125,7 @@
                         <span id="chat-identity-id"></span>
                         <span id="chat-identity-provider"></span>
                         <span id="chat-identity-model"></span>
+                        <span id="chat-identity-window"></span>
                         <button id="chat-identity-settings" type="button" title="Open Settings in the right pane: provider, model, temperature and effort of this conversation.">Settings</button>
                     </div>
                     <div class="left-pane-actions" style="display:flex;align-items:center;gap:8px">
@@ -293,6 +294,7 @@
                             <select id="model-select">
                                 <!-- Populated dynamically from /api/models -->
                             </select>
+                            <span id="model-window" title="The context window this model runs with: 1M or 200K for Claude, the server's own length for others, ? when the provider does not report one."></span>
                             <button id="refresh-models-btn" title="Refresh model list">&#x21bb;</button>
                         </label>
                         <label id="temperature-label" title="What this conversation asks the server to sample at. Empty asks for nothing and leaves the server on its own default (ConversationTemperature_260914_oo01).">Temp:

@@ -32,15 +32,17 @@ public final class ListChatModelsTool {
     public static String list(IIActorSystem system, String myProjectId, String target) {
         if (target == null || target.isBlank()) return "error: chatId is required";
         List<LlmProvider.ModelEntry> models;
+        ChatSessionIIAR chat;
         try {
-            models = modelsOf(system, myProjectId, target);
+            chat = chatOf(system, myProjectId, target);
+            models = chat.getAvailableModelsDirect();
         } catch (IllegalArgumentException e) {
             return e.getMessage();
         } catch (Exception e) {
             LOG.log(Level.WARNING, "list_chat_models: failed for " + target, e);
             return "error: list_chat_models failed: " + e.getMessage();
         }
-        return ChatInspection.formatModels(models);
+        return ChatInspection.formatModels(models, chat::getContextWindowLabelDirect);
     }
 
     /**
@@ -49,12 +51,20 @@ public final class ListChatModelsTool {
      */
     static List<LlmProvider.ModelEntry> modelsOf(IIActorSystem system, String myProjectId, String target)
             throws Exception {
+        return chatOf(system, myProjectId, target).getAvailableModelsDirect();
+    }
+
+    /**
+     * @return the target conversation
+     * @throws IllegalArgumentException with an {@code error: ...} message when the chat does not exist
+     */
+    private static ChatSessionIIAR chatOf(IIActorSystem system, String myProjectId, String target) {
         String targetName = ChatUiActorSystem.resolveChatName(myProjectId, target);
         IIActorRef<?> iiar = system.getIIActor(targetName + ".chat");
         if (!(iiar instanceof ChatSessionIIAR chat)) {
             throw new IllegalArgumentException("error: chat not found: " + target
                     + OtherInstances.notFoundHint(targetName));
         }
-        return chat.getAvailableModelsDirect();
+        return chat;
     }
 }

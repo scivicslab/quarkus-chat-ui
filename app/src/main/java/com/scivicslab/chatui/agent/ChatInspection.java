@@ -1,5 +1,6 @@
 package com.scivicslab.chatui.agent;
 
+import com.scivicslab.chatui.core.provider.ContextWindowLabel;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.logging.RecentEntriesAccumulator;
 
@@ -8,6 +9,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 /**
@@ -39,11 +41,15 @@ public final class ChatInspection {
                 .collect(Collectors.joining("\n"));
     }
 
-    /** @return one line per model, {@code name (type, server)}, or a sentence saying there are none */
-    public static String formatModels(List<LlmProvider.ModelEntry> models) {
+    /**
+     * @param windowOf the context window label of a model name, from {@code ContextWindowLabel}
+     * @return one line per model, {@code name · window (type, server)}, or a sentence saying there are none
+     */
+    public static String formatModels(List<LlmProvider.ModelEntry> models, UnaryOperator<String> windowOf) {
         if (models == null || models.isEmpty()) return "no models are listed for this conversation's provider";
         return models.stream()
-                .map(m -> m.name() + " (" + nonBlank(m.type()) + ", " + nonBlank(m.server()) + ")")
+                .map(m -> ContextWindowLabel.withModel(m.name(), windowOf.apply(m.name()))
+                        + " (" + nonBlank(m.type()) + ", " + nonBlank(m.server()) + ")")
                 .collect(Collectors.joining("\n"));
     }
 

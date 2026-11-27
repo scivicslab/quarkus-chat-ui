@@ -66,6 +66,14 @@ public interface LlmProvider {
      */
     default int contextWindowTokens() { return -1; }
 
+    /**
+     * Like {@link #contextWindowTokens()}, for a named model, so a model list can show each entry's window.
+     * A provider that knows only its current model reports that one and {@code -1} for the others.
+     */
+    default int contextWindowTokens(String model) {
+        return model != null && model.equals(getCurrentModel()) ? contextWindowTokens() : -1;
+    }
+
 
     /**
      * Sets what the conversation asks the server to sample at, where that means anything.

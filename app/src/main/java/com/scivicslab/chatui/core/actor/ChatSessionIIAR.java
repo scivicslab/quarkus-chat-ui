@@ -1,6 +1,7 @@
 package com.scivicslab.chatui.core.actor;
 
 import com.scivicslab.chatui.core.iolog.IoLogStore;
+import com.scivicslab.chatui.core.provider.ContextWindowLabel;
 import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.core.rest.ChatEvent;
 import com.scivicslab.pojoactor.action.Action;
@@ -235,6 +236,18 @@ public class ChatSessionIIAR extends InterpreterIIAR {
      */
     public com.scivicslab.chatui.core.provider.PersistedLog persistedLogDirect(int limit, long before) {
         return chatSession().status().provider().persistedLog(limit, before);
+    }
+
+    /**
+     * The context window the conversation would have on {@code model}, as {@link ContextWindowLabel} words it ({@code 1M},
+     * {@code 200K}, {@code ?}); read directly, without waiting for a running turn.
+     *
+     * @param model the model value to describe, or {@code null} for the one the conversation is on now
+     */
+    public String getContextWindowLabelDirect(String model) {
+        var provider = chatSession().status().provider();
+        String chosen = model != null ? model : provider.getCurrentModel();
+        return ContextWindowLabel.of(provider.id(), chosen, () -> provider.contextWindowTokens(chosen));
     }
 
     /** The conversation's provider kind ({@code openai-compat}, {@code claude}, {@code codex}), read directly. */

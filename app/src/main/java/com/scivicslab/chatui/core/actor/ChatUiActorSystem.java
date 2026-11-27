@@ -2075,7 +2075,7 @@ public class ChatUiActorSystem implements ConversationControls {
             try {
                 models.put(id, new ConversationGraph.Model(
                         providerLabel(options, session.getProviderIdDirect(), session.getToolSetDirect()),
-                        session.getModelDirect()));
+                        session.getModelDirect(), session.getContextWindowLabelDirect(null)));
             } catch (RuntimeException e) {
                 LOG.log(Level.FINE, "Could not read what " + id + " runs on", e);
             }

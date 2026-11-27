@@ -36,6 +36,7 @@ public final class GetChatStatusTool {
         status.put("busy", chat.isBusyDirect());
         String model = chat.getModelDirect();
         status.put("model", model == null ? "" : model);
+        status.put("contextWindow", chat.getContextWindowLabelDirect(null));
         status.put("provider", chat.getProviderIdDirect());
         status.put("tools", chat.getToolSetDirect());
         status.put("noThink", chat.isNoThinkDirect());
