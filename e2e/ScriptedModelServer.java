@@ -43,7 +43,7 @@ import java.util.regex.Pattern;
  * what was read (McpServerCheck, OpenAiCompatStandardToolCalling_261120_oo01).</li>
  * <li>A revision request from html-saurus's Revise panel ({@code Review lines ...}): one proposal in the JSON form the
  * panel reads, quoting the first twelve characters of the text (RevisionPanel_261120_oo01).</li>
- * <li>{@code IMG-SHOW}: an answer that refers to nine pictures by path and address (LocalImageCheck).</li>
+ * <li>{@code IMG-SHOW}: an answer that refers to nine pictures and carries raw html with event handlers by path and address (LocalImageCheck).</li>
  * <li>A prediction request from the Predict prompt button: six prompts {@code PREDICT-ONE} to {@code PREDICT-SIX} in a
  * fenced JSON array, or a sentence that is no list when the conversation holds {@code PREDICT-BAD} (PredictPromptCheck).</li>
  * <li>Anything else: "OK. I will report back in 12 minutes."</li>
@@ -248,7 +248,7 @@ public class ScriptedModelServer {
                     + "C relative:\n\n![rel](sub/rel.png)\n\nD file url:\n\n![fu](file:///tmp/imgcheck/home/works/in.png)\n\n"
                     + "E tilde:\n\n![t](~/works/in.png)\n\nF svg file:\n\n![s](/tmp/imgcheck/home/works/in.svg)\n\n"
                     + "G http:\n\n![h](http://127.0.0.1:1/x.png)\n\nH data png:\n\n![d](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==)\n\n"
-                    + "I data svg:\n\n![ds](data:image/svg+xml;base64,PHN2Zy8+)\n\nEND-IMG";
+                    + "I data svg:\n\n![ds](data:image/svg+xml;base64,PHN2Zy8+)\n\nJ raw html:\n\n<img src=\"x\" onerror=\"window.__pwned=1\"> <a href=\"#\" onclick=\"window.__pwned=1\">link</a>\n\nEND-IMG";
         }
         if (last.contains("bookkeeping check")) {
             return last.contains("I will report back") ? "REGISTER 12 | \"I will report back\"" : "NONE | nothing promised";

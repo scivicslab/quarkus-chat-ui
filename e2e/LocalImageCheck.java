@@ -137,5 +137,8 @@ public class LocalImageCheck {
         check(notices.stream().anyMatch(n -> n.contains("http://127.0.0.1:1/x.png")), t + "an http address is not shown");
         check(notices.stream().anyMatch(n -> n.contains("data:image/svg+xml")), t + "a data: svg is not shown");
         check(imgs.stream().noneMatch(i -> String.valueOf(i.get("src")).startsWith("http")), t + "no <img> points at an http address");
+        check(Boolean.FALSE.equals(page.evaluate("() => window.__pwned === 1")), t + "an onerror in the answer's raw html did not run");
+        check(Boolean.TRUE.equals(page.evaluate("() => document.querySelectorAll('.message.assistant [onerror], .message.assistant [onclick]').length === 0")),
+                t + "no on* attribute is left in the answer");
     }
 }

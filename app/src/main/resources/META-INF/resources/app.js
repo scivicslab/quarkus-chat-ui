@@ -130,6 +130,9 @@
             img.setAttribute("src", "api/local-image?path=" + encodeURIComponent(filePath));
             img.setAttribute("data-local-path", filePath);
         });
+        // marked passes raw HTML through, so an answer can carry <img onerror=...> or <a onclick=...>;
+        // the same strip that the model's own svg gets removes the executable surface from all of it.
+        sanitizeSvgElement(holder);
         renderInlineSvg(holder);
         return holder.innerHTML;
     }
