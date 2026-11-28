@@ -340,8 +340,9 @@ public final class AskChatTool {
 
     /** What the sender can expect after a running turn was stopped. */
     private static final String CANCELLED_RUNNING_MEANING = "The turn ends without an answer. You will not get the work's "
-            + "answer; you get one message, \"[request ... ended without a reply: its turn was cancelled]\", when the turn "
-            + "has ended (later, if that turn is still waiting for requests it sent on for this work). A request queued "
+            + "answer; you get one message when the turn "
+            + "has ended: \"[request ... ended without a reply: its turn was cancelled]\", or for a reminder turn a follow-up "
+            + "that says its turn left no answer (later, if that turn is still waiting for requests it sent on for this work). A request queued "
             + "behind it starts as usual. If the work is still wanted, send the conversation a new request.";
 
     /** @return whether the sending conversation is the target's superior in their project's organization */
