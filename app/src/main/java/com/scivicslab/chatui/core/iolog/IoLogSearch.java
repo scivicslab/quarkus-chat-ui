@@ -166,7 +166,9 @@ public class IoLogSearch {
     /**
      * Finds the entries of one conversation whose text contains {@code query}
      * ({@code SearchChatLogsThenReadAround_261128_oo01}). Every session the conversation's name was recorded under is
-     * searched, ended ones ({@code /clear}) included; no other conversation's entry can match.
+     * searched, ended ones ({@code /clear}) included; no other conversation's entry can match. Only the question and
+     * answer entries ({@code turnN/question} and {@code turnN/conversation}) are searched: LLM request rows, tool rows and
+     * other bulky rows are never hit, because a request row repeats the whole history.
      *
      * @param conversation the ConversationSquad's name, e.g. {@code project1/chat-01}
      * @param query        what to look for; blank finds nothing rather than everything
@@ -184,6 +186,7 @@ public class IoLogSearch {
                 SELECT l.id, l.session_id, l.timestamp, l.node_id, l.label, l.message, s.workflow_name
                 FROM logs l JOIN sessions s ON s.id = l.session_id
                 WHERE s.workflow_name = ? AND LOWER(l.message) LIKE ?
+                  AND REGEXP_LIKE(l.label, '^turn[0-9]+/(question|conversation)$')
                 """ + (since == null ? "" : "  AND l.timestamp >= ?\n") + (until == null ? "" : "  AND l.timestamp <= ?\n") + """
                 ORDER BY l.timestamp DESC, l.id DESC
                 LIMIT ?

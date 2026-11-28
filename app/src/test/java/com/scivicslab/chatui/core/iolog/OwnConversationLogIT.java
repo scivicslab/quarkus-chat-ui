@@ -235,4 +235,48 @@ class OwnConversationLogIT {
 
         assertEquals(41, text.lines().filter(l -> l.startsWith("--- logId")).count(), "20 + 1 + 20");
     }
+
+    @Test
+    void anLlmRequestRowHoldingTheQueryIsNotHit() throws Exception {
+        long s = log.ensureSession(ME);
+        // The request carries the whole history again, so the word is in it; only the question and the answer count.
+        record(s, "turn7/step1/llm", "request: ... job 6257116 ... history ...", "2026-11-28T09:00:00");
+        record(s, "turn7/step1/tool", "tool result: job 6257116", "2026-11-28T09:00:10");
+        record(s, "turn7/answer-meta", "meta 6257116", "2026-11-28T09:00:20");
+        record(s, "turn8/question", "what became of job 6257116?", "2026-11-28T09:01:00");
+        record(s, "turn8/conversation", "job 6257116 was dropped", "2026-11-28T09:02:00");
+
+        IoLogSearch.Result r = search.searchConversation(ME, "6257116", null, null, 20);
+
+        assertEquals(List.of("turn8/conversation", "turn8/question"), r.hits().stream().map(IoLogSearch.Hit::label).toList());
+        String text = new OwnLogTools(log, ME).search("6257116", null, null, null);
+        assertTrue(text.startsWith("2 hits in project1/chat-01"), text);
+        assertFalse(text.contains("step1"), text);
+        assertFalse(text.contains("answer-meta"), text);
+        // A query that only the request row holds finds nothing at all.
+        record(s, "turn9/step1/llm", "request holding only-in-request", "2026-11-28T09:03:00");
+        assertEquals("no hits for \"only-in-request\" in " + ME, new OwnLogTools(log, ME).search("only-in-request", null, null, null));
+    }
+
+    @Test
+    void aLongEntryIsCutAndSaysSo() throws Exception {
+        long s = log.ensureSession(ME);
+        String huge = "a".repeat(182_345);
+        record(s, "turn3/question", "short before", "2026-11-28T09:00:00");
+        record(s, "turn3/step1/llm", huge, "2026-11-28T09:01:00");
+        record(s, "turn3/conversation", "b".repeat(4000), "2026-11-28T09:02:00");
+        record(s, "turn4/question", "c".repeat(4001), "2026-11-28T09:03:00");
+
+        String text = new OwnLogTools(log, ME).read(String.valueOf(idOf(s, "turn3/step1/llm")), "5");
+
+        assertTrue(text.contains("a".repeat(4000) + "\n[cut: 4000 of 182,345 characters]"), "the huge row is cut and says so");
+        assertFalse(text.contains("a".repeat(4001)), "no more than 4000 characters of it");
+        assertTrue(text.contains("b".repeat(4000) + "\n"), "a row of exactly 4000 characters is kept whole");
+        assertFalse(text.contains("[cut: 4000 of 4,000"), text);
+        assertTrue(text.contains("c".repeat(4000) + "\n[cut: 4000 of 4,001 characters]"), "4001 is cut");
+        assertTrue(text.contains("short before\n"), text);
+        assertEquals(2, text.split("\\[cut: ", -1).length - 1, "only the two long rows carry the mark");
+        assertEquals(182_345, history.readAround(ME, idOf(s, "turn3/step1/llm"), 0).get(0).message().length(),
+                "the store's own read is never cut");
+    }
 }

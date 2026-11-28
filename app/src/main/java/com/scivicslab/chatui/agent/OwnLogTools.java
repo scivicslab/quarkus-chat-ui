@@ -7,6 +7,7 @@ import com.scivicslab.chatui.core.iolog.IoLogStore;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * The {@code search_own_log} and {@code read_own_log} tools: a ConversationSquad actor searches its own conversation's
@@ -25,6 +26,8 @@ public final class OwnLogTools {
     public static final int DEFAULT_COUNT = 5;
     /** The most entries read on each side. */
     public static final int MAX_COUNT = 20;
+    /** The longest text of one entry {@code read_own_log} returns; a longer entry is cut and says so. */
+    public static final int MAX_ENTRY_CHARS = 4000;
 
     private final IoLogSearch search;
     private final IoLogHistory history;
@@ -86,7 +89,8 @@ public final class OwnLogTools {
     /**
      * @param logId the number {@code search_own_log} gave
      * @param count optional, how many entries on each side; default {@value #DEFAULT_COUNT}, at most {@value #MAX_COUNT}
-     * @return the entry and its neighbours in whole, oldest first, or an {@code error: ...} string
+     * @return the entry and its neighbours, oldest first, each cut at {@value #MAX_ENTRY_CHARS} characters with a
+     *         {@code [cut: 4000 of N characters]} mark, or an {@code error: ...} string
      */
     public String read(String logId, String count) {
         if (history == null) return "error: this instance keeps no I/O log";
@@ -108,9 +112,15 @@ public final class OwnLogTools {
         for (IoLogHistory.Around r : rows) {
             out.append("--- logId ").append(r.logId()).append(" | ").append(r.when()).append(" | ").append(r.label())
                     .append(r.requested() ? " | <== the one asked for" : "").append('\n')
-                    .append(r.message()).append('\n');
+                    .append(capped(r.message())).append('\n');
         }
         return out.toString().stripTrailing();
+    }
+
+    private static String capped(String message) {
+        if (message.length() <= MAX_ENTRY_CHARS) return message;
+        return message.substring(0, MAX_ENTRY_CHARS) + "\n[cut: " + MAX_ENTRY_CHARS + " of "
+                + String.format(Locale.ROOT, "%,d", message.length()) + " characters]";
     }
 
     private static LocalDateTime time(String text) {
