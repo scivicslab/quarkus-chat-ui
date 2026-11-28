@@ -35,12 +35,14 @@ final class ChatBoard {
      * @param ioSession           the I/O-log session of the turn, or -1
      * @param ioTurnNo            the number of the turn in the log
      * @param stepCount           the step the turn is at
+     * @param runningRequests     the ids of the requests the running turn is for (its own id, the request it answers, the
+     *                            request a reminder turn reminds of); empty when no turn runs
      */
     record Status(boolean busy, long turnStartedAt, List<ChatSession.HistoryEntry> history,
                   List<OpenRequests.Outstanding> outstanding, Set<String> promised, Map<String, String> unanswered,
                   List<String> replyWatchLines, String lastReminderDecision,
                   LlmProvider provider, SessionEntries entries, com.scivicslab.chatui.agent.ToolSet toolSet,
-                  String promptWorkflowFile, long ioSession, int ioTurnNo, int stepCount) {}
+                  String promptWorkflowFile, long ioSession, int ioTurnNo, int stepCount, Set<String> runningRequests) {}
 
     /**
      * What a read of a conversation that was deleted gets: a status with nothing in it (not busy, no history, no requests,
@@ -48,7 +50,7 @@ final class ChatBoard {
      * conversations while one is deleted then sees it as empty instead of getting an exception; it is gone from the next list.
      */
     static final Status GONE = new Status(false, 0, List.of(), List.of(), Set.of(), Map.of(), List.of(), null, noProvider(),
-            null, com.scivicslab.chatui.agent.ToolSet.FULL, null, -1, 0, 0);
+            null, com.scivicslab.chatui.agent.ToolSet.FULL, null, -1, 0, 0, Set.of());
 
     private static LlmProvider noProvider() {
         return (LlmProvider) java.lang.reflect.Proxy.newProxyInstance(LlmProvider.class.getClassLoader(),

@@ -292,7 +292,8 @@ public final class AskChatTool {
      * @param system    the actor system the conversations live in
      * @param myName    the calling conversation's qualified name
      * @param requestId the id {@code ask_chat} gave back
-     * @return a line starting with {@code removed}, {@code already running}, {@code already answered} or
+     * @return a line starting with {@code removed}, {@code cancelled while running}, {@code already running},
+     *         {@code already answered} or
      *         {@code not found}, saying what happened and what the caller can do next
      */
     public static String cancel(IIActorSystem system, String myName, String requestId) {
@@ -303,31 +304,45 @@ public final class AskChatTool {
                     + "instance. Check the id in the result of your ask_chat call.";
         }
         String id = requestId.trim();
-        if (sent.done().isDone()) {
-            return "already answered: request " + id + " has already been answered or ended, so there is nothing "
-                    + "to take back. Its reply is, or was, a message in your queue.";
-        }
         if (sent.node() != null) return cancelRemote(system, myName, id, sent);
-        boolean removed;
-        try {
-            removed = sent.targetQueue().ask(q -> q.withdraw(id, ChatSession.ASK_CHAT_SOURCE_PREFIX + myName))
-                    .get(5, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "cancel_request: could not reach the queue of " + sent.targetName(), e);
-            return "error: could not reach the queue of " + sent.targetName() + ": " + e.getClass().getSimpleName();
+        boolean removed = false;
+        if (!sent.done().isDone()) {
+            try {
+                removed = sent.targetQueue().ask(q -> q.withdraw(id, ChatSession.ASK_CHAT_SOURCE_PREFIX + myName))
+                        .get(5, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "cancel_request: could not reach the queue of " + sent.targetName(), e);
+                return "error: could not reach the queue of " + sent.targetName() + ": " + e.getClass().getSimpleName();
+            }
         }
         if (removed) {
             return "removed: request " + id + " was taken out of " + sent.targetName() + "'s queue before it ran. "
                     + "No reply will come for it; do not wait for one.";
         }
+        // Not waiting: the turn it started may still run, also when the request was answered already (a reminder turn
+        // of the request, or a follow-up turn).
+        IIActorRef<?> target = system.getIIActor(sent.targetName() + ".chat");
+        if (target instanceof ChatSessionIIAR targetChat && targetChat.cancelRunningTurnOfDirect(id)) {
+            return CANCELLED_RUNNING + ": " + sent.targetName() + "'s running turn for request " + id + " was told to stop. "
+                    + CANCELLED_RUNNING_MEANING;
+        }
         if (sent.done().isDone()) {
             return "already answered: request " + id + " has already been answered or ended, so there is nothing "
                     + "to take back. Its reply is, or was, a message in your queue.";
         }
-        return "already running: " + sent.targetName() + " has started request " + id + ", and it is not stopped. "
-                + "Its reply will arrive as usual; if the work is no longer wanted, send " + sent.targetName()
-                + " a follow-up request saying so.";
+        return "already running: " + sent.targetName() + " has started request " + id + ", but its turn could not be "
+                + "found running to stop (it may have just ended). Its reply will arrive as usual; if the work is no "
+                + "longer wanted, send " + sent.targetName() + " a follow-up request saying so.";
     }
+
+    /** What {@code cancel_request} says when it stopped the turn that was running for the request. */
+    public static final String CANCELLED_RUNNING = "cancelled while running";
+
+    /** What the sender can expect after a running turn was stopped. */
+    private static final String CANCELLED_RUNNING_MEANING = "The turn ends without an answer. You will not get the work's "
+            + "answer; you get one message, \"[request ... ended without a reply: its turn was cancelled]\", when the turn "
+            + "has ended (later, if that turn is still waiting for requests it sent on for this work). A request queued "
+            + "behind it starts as usual. If the work is still wanted, send the conversation a new request.";
 
     /** @return whether the sending conversation is the target's superior in their project's organization */
     public static boolean isSuperiorOf(IIActorSystem system, String myProjectId, String myChatId, String targetName) {
@@ -745,7 +760,7 @@ public final class AskChatTool {
             return "error: node " + sent.node() + " did not receive the cancel: " + receipt.detail();
         }
         return "cancel sent: request " + id + " went to " + sent.targetName() + " on node " + sent.node()
-                + ". Whether it was removed arrives as a new message: \"removed\" means no reply will come.";
+                + ". What became of it arrives as a new message: \"removed\" or \"cancelled while running\" means no answer will come.";
     }
 
     /**
@@ -880,7 +895,9 @@ public final class AskChatTool {
             }
             // Neither waiting nor being worked on: it reached this instance (the sender has it as sent here), so its
             // turn has ended.
-            result = removed ? "removed" : targetChat.isWorkingOnDirect(localId, sender) ? "already running" : "already answered";
+            if (removed) result = "removed";
+            else if (targetChat.cancelRunningTurnOfDirect(localId)) result = CANCELLED_RUNNING;
+            else result = targetChat.isWorkingOnDirect(localId, sender) ? "already running" : "already answered";
         }
         sendOrLog(nodes, m.getString("senderNode"), "enqueueCancelResult", new JSONObject().put("requestId", requestId)
                 .put("asker", sender).put("from", target).put("result", result), "cancel result of " + requestId);
@@ -896,7 +913,8 @@ public final class AskChatTool {
         String where = sent == null ? m.optString("from", "?") : sent.targetName() + " on node " + sent.node();
         String meaning = switch (result) {
             case "removed" -> "It was taken out of the queue before it ran. No reply will come for it; do not wait for one.";
-            case "already running" -> "It has started and is not stopped. Its reply will arrive as usual.";
+            case CANCELLED_RUNNING -> "Its running turn was told to stop. " + CANCELLED_RUNNING_MEANING;
+            case "already running" -> "It has started, but its turn could not be found running to stop. Its reply will arrive as usual.";
             case "already answered" -> "It was already answered; its reply is, or was, a message in your queue.";
             default -> "The other instance has no such request from you.";
         };

@@ -121,13 +121,18 @@ public final class ConversationToolCatalog {
                     new ToolParameter("think", "boolean", false, "")),
                 true);
         add(m, "cancel_request", """
-                take back a request you sent with ask_chat or ask_chat_urgent while it still waits in the other
-                conversation's queue. "requestId" is the id the ask_chat result gave. "node" is only for a
+                take back a request you sent with ask_chat or ask_chat_urgent, or stop the turn it started. While the
+                request waits in the other conversation's queue it is taken out ("removed": no reply will come). When
+                its turn is already running, the turn is stopped, the way the Cancel button stops it ("cancelled
+                while running"): use that when the turn has made no progress for a long time (its get_chat_status
+                shows no change) or the work is no longer wanted. The stopped turn gives no answer; you get one
+                message "ended without a reply: its turn was cancelled" when it has ended, and the next message in
+                that conversation's queue starts as usual. It also stops a reminder or follow-up turn of a request
+                that was answered already. "requestId" is the id the ask_chat result gave. "node" is only for a
                 request sent to another chat-ui instance (to find the node name of another instance, call
                 list_running_tools first); a request to a conversation of this instance, in any project, takes
-                no node. The result is "removed" (no reply will come), "already running" (not stopped; send a
-                follow-up if the work is no longer wanted), "already answered" or "not found". Use it when the
-                work is no longer wanted or you are about to send the same request again.
+                no node. Other results: "already answered", "already running" (its turn was not found running; send
+                a follow-up if the work is no longer wanted) and "not found". You can cancel only requests you sent.
                 """,
                 List.of(
                     new ToolParameter("requestId", "string", true, ""),

@@ -1345,6 +1345,7 @@ public class ChatSession extends Interpreter {
         boolean isReminder = reminder != null && requestId != null;
         this.turnReminder = isReminder ? requestId : resumed != null ? resumed.reminderRequest() : null;
         this.turnFollowUp = isReminder ? reminder : resumed != null ? resumed.followUp() : null;
+        publishStatus();   // the running turn's request ids are now complete
 
         this.turnTask = resumed != null && resumed.task() != null ? resumed.task() : prompt;
         this.question = prompt;
@@ -2541,7 +2542,17 @@ public class ChatSession extends Interpreter {
     private ChatBoard.Status currentStatus() {
         return new ChatBoard.Status(busy, turnStartedAt, historySnapshot, outstandingSnapshot, promisedSnapshot,
                 unansweredSnapshot, lastReplyWatchLines, lastReminderDecision, provider, entries, toolSet,
-                promptWorkflowFile, ioSession, ioTurnNo, stepCount);
+                promptWorkflowFile, ioSession, ioTurnNo, stepCount, runningRequestIds());
+    }
+
+    /** The ids of the requests the running turn is for; empty when no turn runs. */
+    private java.util.Set<String> runningRequestIds() {
+        if (!busy) return java.util.Set.of();
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        if (turnRequestId != null) ids.add(turnRequestId);
+        if (turnOriginal != null) ids.add(turnOriginal);
+        if (turnReminder != null) ids.add(turnReminder);
+        return java.util.Set.copyOf(ids);
     }
 
     /** Tells the board the state other threads read. Called by the turn after each change of one of its values. */

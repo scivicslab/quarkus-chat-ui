@@ -212,6 +212,18 @@ public class ChatSessionIIAR extends InterpreterIIAR {
     }
 
     /**
+     * Stops the running turn if it is for that request (its own request, the request it answers, or the request a
+     * reminder turn reminds of), the way the Cancel button does; does not wait for the turn.
+     *
+     * @return whether such a turn was running and was told to stop
+     */
+    public boolean cancelRunningTurnOfDirect(String requestId) {
+        if (requestId == null || !chatSession().status().runningRequests().contains(requestId)) return false;
+        tellNow(a -> ((ChatSession) a).cancel());   // the path of the Cancel button (ChatUiActorSystem.cancelPrompt)
+        return true;
+    }
+
+    /**
      * Has the conversation write its settings now, without waiting for a running turn: a change made on the provider
      * (model, effort, temperature) is recorded at once, as it was before the conversation recorded itself.
      *

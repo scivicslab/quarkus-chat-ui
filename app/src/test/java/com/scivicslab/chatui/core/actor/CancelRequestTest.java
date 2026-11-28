@@ -48,7 +48,14 @@ class CancelRequestTest {
         @Override public List<ModelEntry> getAvailableModels() { return List.of(); }
         @Override public String getCurrentModel() { return "fake-model"; }
         @Override public void setModel(String model) {}
-        @Override public void cancel() {}
+        volatile boolean cancelled;
+        final java.util.concurrent.atomic.AtomicInteger cancelCalls = new java.util.concurrent.atomic.AtomicInteger();
+        /** Like a real provider: a cancel ends the call that is held, without a result. */
+        @Override public void cancel() {
+            cancelCalls.incrementAndGet();
+            cancelled = true;
+            release.countDown();
+        }
 
         @Override
         public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
@@ -57,6 +64,7 @@ class CancelRequestTest {
                 started.countDown();
                 try { release.await(10, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
             }
+            if (cancelled) return;
             emitter.accept(ChatEvent.delta(replies.get(Math.min(prompts.size() - 1, replies.size() - 1))));
             emitter.accept(ChatEvent.result(null, 0, 0));
         }
@@ -134,7 +142,7 @@ class CancelRequestTest {
     }
 
     @Test
-    void cancelRefusesARequestThatIsAlreadyRunning() throws Exception {
+    void cancelStopsTheTurnThatIsRunningForTheRequestAndTheSenderIsToldItEnded() throws Exception {
         IIActorSystem system = new IIActorSystem("cancel-request-running");
         Fake asker = new Fake(false, "noted");
         Fake worker = new Fake(true, "the answer");
@@ -146,11 +154,101 @@ class CancelRequestTest {
         assertTrue(worker.started.await(10, TimeUnit.SECONDS), "the request did not start");
 
         String result = AskChatTool.cancel(system, ONE, request);
-        assertTrue(result.startsWith("already running"), result);
+        assertTrue(result.startsWith(AskChatTool.CANCELLED_RUNNING), result);
+        assertTrue(result.contains("ended without a reply"), "the result says whether a reply still comes: " + result);
+        assertEquals(1, worker.cancelCalls.get(), "the provider of the running turn was told to cancel");
 
+        waitFor(() -> !asker.prompts.isEmpty(), "the sender was not told the turn ended");
+        String told = asker.prompts.get(0);
+        assertTrue(told.contains("[request " + request + " to project1/chat-02 ended without a reply: "), told);
+        assertTrue(told.contains("its turn was cancelled"), told);
+        assertEquals(1, asker.prompts.size(), "one message, not a reply as well: " + asker.prompts);
+    }
+
+    @Test
+    void theMessageQueuedBehindACancelledTurnStartsAsUsual() throws Exception {
+        IIActorSystem system = new IIActorSystem("cancel-request-next-starts");
+        Fake asker = new Fake(false, "noted");
+        Fake worker = new Fake(true, "next one done");
+        squad(system, "01", asker);
+        Squad two = squad(system, "02", worker);
+
+        String request = "project1/chat-01:s1:t1:r1";
+        AskChatTool.send(system, "project1", "01", "02", "do the thing", request);
+        assertTrue(worker.started.await(10, TimeUnit.SECONDS), "the request did not start");
+        two.queue().tellNow(q -> q.enqueue("the next message", null, "queue", e -> { },
+                two.chat().asChatSessionRef(), "human")).join();
+        assertEquals(1, waiting(two).size(), "the next message waits behind the running turn");
+
+        assertTrue(AskChatTool.cancel(system, ONE, request).startsWith(AskChatTool.CANCELLED_RUNNING));
+
+        waitFor(() -> worker.prompts.size() == 2, "the next message did not start: " + worker.prompts);
+        assertTrue(worker.prompts.get(1).endsWith("the next message"), worker.prompts.get(1));
+        assertEquals(List.of(), waiting(two), "the queue is empty again");
+    }
+
+    @Test
+    void onlyTheSenderCanStopTheRunningTurnAndAnAnsweredRequestStopsNothing() throws Exception {
+        IIActorSystem system = new IIActorSystem("cancel-request-running-owner");
+        Fake asker = new Fake(false, "noted");
+        Fake worker = new Fake(true, "the answer");
+        squad(system, "01", asker);
+        squad(system, "02", worker);
+        squad(system, "03", new Fake(false, "noted"));
+
+        String request = "project1/chat-01:s1:t1:r1";
+        AskChatTool.send(system, "project1", "01", "02", "do the thing", request);
+        assertTrue(worker.started.await(10, TimeUnit.SECONDS), "the request did not start");
+
+        String byAnother = AskChatTool.cancel(system, "project1/chat-03", request);
+        assertTrue(byAnother.startsWith("not found"), byAnother);
+        assertEquals(0, worker.cancelCalls.get(), "a request someone else sent does not stop the turn");
         worker.release.countDown();
-        waitFor(() -> !asker.prompts.isEmpty(), "the reply of the running request still arrives");
+        waitFor(() -> !asker.prompts.isEmpty(), "the reply did not arrive");
         assertTrue(asker.prompts.get(0).contains("[reply to request " + request), asker.prompts.get(0));
+    }
+
+    @Test
+    void anAnsweredRequestDoesNotStopAnUnrelatedTurnThatRunsNow() throws Exception {
+        IIActorSystem system = new IIActorSystem("cancel-request-answered-other-turn");
+        Fake asker = new Fake(false, "noted");
+        Fake worker = new Fake(false, "the answer");
+        squad(system, "01", asker);
+        Squad two = squad(system, "02", worker);
+
+        String request = "project1/chat-01:s1:t1:r1";
+        AskChatTool.send(system, "project1", "01", "02", "do the thing", request);
+        waitFor(() -> !asker.prompts.isEmpty(), "the reply did not arrive");
+
+        Fake slow = new Fake(true, "slow");
+        Squad three = squad(system, "03", slow);
+        startRunning(three, slow, "a person's long job");
+        assertTrue(AskChatTool.cancel(system, ONE, request).startsWith("already answered"));
+        assertEquals(0, slow.cancelCalls.get(), "a turn for no request of the sender is left alone");
+        assertEquals(0, worker.cancelCalls.get());
+        slow.release.countDown();
+    }
+
+    /** A conversation takes back a request of its own with the tool while the turn runs, as the LLM would call it. */
+    @Test
+    void theCancelToolStopsARunningTurnWhenAConversationCallsIt() throws Exception {
+        IIActorSystem system = new IIActorSystem("cancel-request-tool-running");
+        Fake one = new Fake(false, "thanks");
+        Fake two = new Fake(false, invoke("ask_chat", "chatId", "03", "prompt", "side job"),
+                invoke("cancel_request", "requestId", "project1/chat-02:t1:r1"), "final report");
+        Fake three = new Fake(true, "never");
+        squad(system, "01", one);
+        squad(system, "02", two);
+        squad(system, "03", three);
+
+        AskChatTool.send(system, "project1", "01", "02", "do the work", "project1/chat-01:s1:t1:r1");
+
+        assertTrue(three.started.await(10, TimeUnit.SECONDS), "chat-03 did not start the side job");
+        waitFor(() -> two.prompts.size() >= 3, "chat-02 did not get the result of the tool: " + two.prompts);
+        assertEquals(1, three.cancelCalls.get(), "the cancel tool stopped chat-03's running turn");
+        assertTrue(two.prompts.get(2).contains(AskChatTool.CANCELLED_RUNNING), two.prompts.get(2));
+        waitFor(() -> !one.prompts.isEmpty(), "chat-01 never got its reply: " + two.prompts);
+        assertTrue(one.prompts.get(0).contains("final report"), one.prompts.get(0));
     }
 
     @Test

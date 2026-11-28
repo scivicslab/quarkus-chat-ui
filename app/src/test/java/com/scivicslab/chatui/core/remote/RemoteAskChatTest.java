@@ -370,8 +370,8 @@ class RemoteAskChatTest {
             waitUntil(() -> asker.prompts.stream().anyMatch(p -> p.contains("project1/chat-01:s9:t2:r2") && p.contains("removed")),
                     "job two was removed: " + asker.prompts);
             assertTrue(AskChatTool.cancel(a, "project1/chat-01", "project1/chat-01:s9:t2:r1").startsWith("cancel sent"));
-            waitUntil(() -> asker.prompts.stream().anyMatch(p -> p.contains("project1/chat-01:s9:t2:r1") && p.contains("already running")),
-                    "job one is running: " + asker.prompts);
+            waitUntil(() -> asker.prompts.stream().anyMatch(p -> p.contains("project1/chat-01:s9:t2:r1") && p.contains("cancelled while running")),
+                    "job one was running and was stopped: " + asker.prompts);
         } finally {
             runner.release.countDown();
             if (log.store() != null) log.store().close();
