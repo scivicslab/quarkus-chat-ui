@@ -337,24 +337,29 @@ public final class ConversationToolCatalog {
         // SearchChatLogsThenReadAround_261128_oo01: the caller's own conversation only; no argument names one.
         add(m, "search_own_log", """
                 search your own conversation's I/O log, the part before a /clear included, for a word: a substring,
-                case-insensitive. Returns the newest hits first, each with its logId, time, turn, label and a short
-                snippet; it does not return whole entries. "since" and "until" (e.g. 2026-11-28T09:00) narrow the
-                period. "limit": default 20, at most 100. Read around a hit with read_own_log.
+                case-insensitive. Only the questions this conversation received and the answers it gave are searched;
+                tool calls and model requests are not. Returns the newest hits first, each with its logId, time, turn,
+                label and a short snippet; it does not return whole entries. "since" and "until" (e.g.
+                2026-11-28T09:00) narrow the period. "limit": default 20, at most 100. Read around a hit with
+                read_own_log.
                 """,
                 List.of(
-                    new ToolParameter("query", "string", true, ""),
-                    new ToolParameter("since", "string", false, ""),
-                    new ToolParameter("until", "string", false, ""),
-                    new ToolParameter("limit", "integer", false, "")),
+                    new ToolParameter("query", "string", true,
+                            "the word or phrase to find in a question or an answer, case-insensitive"),
+                    new ToolParameter("since", "string", false, "only entries at or after this time, e.g. 2026-11-28T09:00"),
+                    new ToolParameter("until", "string", false, "only entries at or before this time, e.g. 2026-11-28T18:00"),
+                    new ToolParameter("limit", "integer", false, "how many hits at most; default 20, at most 100")),
                 false);
         add(m, "read_own_log", """
-                read one entry of your own conversation's I/O log, and the entries before and after it, in whole,
-                oldest first. "logId" is the number search_own_log gave; an entry of another conversation is
-                refused. "count": how many entries on each side, default 5, at most 20.
+                read one entry of your own conversation's I/O log, and the entries before and after it, oldest
+                first. Each returned entry is cut at 4,000 characters, and a cut entry ends with a mark that gives its
+                full length, e.g. [cut: 4000 of 182,345 characters]. "logId" is the number search_own_log gave; an
+                entry of another conversation is refused. "count": how many entries on each side, default 5, at most 20.
                 """,
                 List.of(
-                    new ToolParameter("logId", "integer", true, ""),
-                    new ToolParameter("count", "integer", false, "")),
+                    new ToolParameter("logId", "integer", true, "the logId a hit of search_own_log gave"),
+                    new ToolParameter("count", "integer", false,
+                            "how many entries to read on each side of it; default 5, at most 20")),
                 false);
         add(m, "get_request_messages", """
                 read the messages array another conversation will send to its model next, as a JSON array of

@@ -101,6 +101,21 @@ class ToolCatalogTest {
     }
 
     @Test
+    void ownLogToolDescriptionsTellTheRealBehaviour() {
+        var tools = ConversationToolCatalog.builtInTools();
+        String search = tools.get("search_own_log").description();
+        assertTrue(search.contains("questions this conversation received and the answers it gave"), search);
+        assertTrue(search.contains("tool calls and model requests are not"), search);
+        String read = tools.get("read_own_log").description();
+        assertTrue(read.contains("cut at 4,000 characters"), read);
+        assertEquals(4000, OwnLogTools.MAX_ENTRY_CHARS);
+        assertTrue(read.contains("[cut: 4000 of 182,345 characters]"), read);
+        tools.forEach((name, spec) -> {
+            if (name.endsWith("_own_log")) spec.parameters().forEach(p -> assertFalse(p.description().isBlank(), name + "." + p.name()));
+        });
+    }
+
+    @Test
     void descriptionsDoNotDependOnTheInvokeForm() {
         ConversationToolCatalog.builtInTools().forEach((name, spec) -> {
             assertFalse(spec.description().contains("<parameter"), name + ": " + spec.description());
