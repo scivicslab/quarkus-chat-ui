@@ -138,6 +138,37 @@ public final class ConversationToolCatalog {
                     new ToolParameter("requestId", "string", true, ""),
                     new ToolParameter("node", "string", false, "")),
                 true);
+        add(m, "list_queue", """
+                list the messages waiting in the queue of a conversation of this project (your own included), in the
+                order they will start. Each line gives its entryId, who sent it, its request id, whether it is
+                urgent and whether it starts by itself, and the first 200 characters of its text. The first line
+                says whether the conversation is running a turn now. Use the entryId, not the position, with
+                remove_queued_message and move_queued_message_to_front. A conversation of another project is refused
+                ("not in this project").
+                """,
+                List.of(new ToolParameter("chatId", "string", true, "")),
+                false);
+        add(m, "remove_queued_message", """
+                take one waiting message out of a conversation's queue (any conversation of this project, your own
+                included). "entryId" is the number list_queue gave; the same number is never used twice in a queue, so a
+                message that has started meanwhile is "not found" and nothing else is removed. If the message was a
+                request from another conversation, that conversation is told "ended without a reply: removed from the
+                queue before it ran". The turn that is running is not stopped.
+                """,
+                List.of(
+                    new ToolParameter("chatId", "string", true, ""),
+                    new ToolParameter("entryId", "integer", true, "")),
+                false);
+        add(m, "move_queued_message_to_front", """
+                make one waiting message the next one to start in a conversation's queue (any conversation of this
+                project, your own included), ahead of urgent messages too. "entryId" is the number list_queue gave. The
+                turn that is running is not stopped: the message starts when it ends. Results: "moved", "already at
+                the front" and "not found" (it has started, or is not there).
+                """,
+                List.of(
+                    new ToolParameter("chatId", "string", true, ""),
+                    new ToolParameter("entryId", "integer", true, "")),
+                false);
         add(m, "set_chat_timekeeper", """
                 change the timekeeper of another conversation of this project, or your own. urgentWaitMinutes:
                 how long an urgent request may wait during a long turn before the turn is paused to answer it

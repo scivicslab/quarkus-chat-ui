@@ -38,6 +38,9 @@ public class PromptQueue {
 
     private final List<QueueItem> queue = new ArrayList<>();
 
+    /** The last {@code entryId} handed out; it only grows, so an id is never reused in this queue. */
+    private long lastEntryId = 0;
+
     /**
      * This actor's own reference, set once by the generating side right after
      * {@code createChild} (mirrors {@code ChatSession.setActorSystem}). Lets
@@ -169,7 +172,8 @@ public class PromptQueue {
     }
 
     /** Puts an item in its place: an urgent one ahead of every waiting item that is not urgent, any other at the end. */
-    private int place(QueueItem item) {
+    private int place(QueueItem unstamped) {
+        QueueItem item = unstamped.withEntryId(++lastEntryId);
         if (!item.urgent()) {
             queue.add(item);
             return 0;
@@ -356,7 +360,7 @@ public class PromptQueue {
             case "cancel_and_send" -> {
                 QueueItem item = new QueueItem(prompt, model, emitter, done, source, resultKey, noThink, auto, images,
                         requestId, urgent, System.currentTimeMillis(), java.util.UUID.randomUUID().toString(), link);
-                queue.add(0, item);
+                queue.add(0, item.withEntryId(++lastEntryId));
                 recordEnqueued(item);
                 // tellNow, not tell: the running turn blocks the ChatSession's own thread, so a
                 // queued cancel would be delivered only after that turn ended (ChatSession.cancel).
@@ -474,7 +478,7 @@ public class PromptQueue {
      * deliberately left out (not JSON-serializable, and irrelevant to the browser view).
      */
     public List<QueueEntry> snapshot() {
-        return queue.stream().map(i -> new QueueEntry(i.prompt(), i.source(), i.auto(), i.urgent())).toList();
+        return queue.stream().map(i -> new QueueEntry(i.prompt(), i.source(), i.auto(), i.urgent(), i.entryId(), i.requestId())).toList();
     }
 
     /**
@@ -490,6 +494,44 @@ public class PromptQueue {
         abandon(removed, "removed from the queue before it ran");
         recordLeft(removed, "cancelled");
         return true;
+    }
+
+    /**
+     * Removes the item with this {@code entryId}, the way {@link #removeAt} removes one: the sender of an
+     * {@code ask_chat} request is told it ended without a reply ({@code AgentEditsAnotherQueue_261128_oo01}).
+     * The item is found by its id, not by a position that another item's start may have moved.
+     *
+     * @return {@code true} if the item was still waiting and is now removed; {@code false} when it has started or is not here
+     */
+    public boolean removeById(long entryId) {
+        int index = indexOfEntry(entryId);
+        if (index < 0) return false;
+        QueueItem item = queue.get(index);
+        boolean removed = removeAt(index);
+        if (removed) item.emitter().accept(ChatEvent.queueChanged());
+        return removed;
+    }
+
+    /** What {@link #moveToFrontById} did. */
+    public enum Moved { MOVED, ALREADY_AT_THE_FRONT, NOT_FOUND }
+
+    /**
+     * Moves the item with this {@code entryId} to the front, as {@link #moveToFront} does, ahead of urgent items too.
+     * The turn that is running is not touched; the item starts next after it.
+     */
+    public Moved moveToFrontById(long entryId) {
+        int index = indexOfEntry(entryId);
+        if (index < 0) return Moved.NOT_FOUND;
+        if (index == 0) return Moved.ALREADY_AT_THE_FRONT;
+        QueueItem item = queue.get(index);
+        moveToFront(index);
+        item.emitter().accept(ChatEvent.queueChanged());
+        return Moved.MOVED;
+    }
+
+    private int indexOfEntry(long entryId) {
+        for (int i = 0; i < queue.size(); i++) if (queue.get(i).entryId() == entryId) return i;
+        return -1;
     }
 
     /**
@@ -578,7 +620,10 @@ public class PromptQueue {
      * @param source who queued it — {@code "human"} or {@code "agent:xxx"}
      * @param auto   whether this item auto-dispatches once it's at the front and idle
      */
-    public record QueueEntry(String prompt, String source, boolean auto, boolean urgent) {
+    public record QueueEntry(String prompt, String source, boolean auto, boolean urgent, long entryId, String requestId) {
+        public QueueEntry(String prompt, String source, boolean auto, boolean urgent) {
+            this(prompt, source, auto, urgent, 0L, null);
+        }
         public QueueEntry(String prompt, String source, boolean auto) {
             this(prompt, source, auto, false);
         }
@@ -758,11 +803,24 @@ public class PromptQueue {
             boolean urgent,      // goes ahead of every waiting item that is not urgent
             long queuedAt,       // when it entered the queue, in milliseconds since the epoch
             String id,           // this item's own id, which the queue's recorded events are keyed by
-            OpenRequests.RemoteLink link // the way back to a sender on another chat-ui instance, or null
+            OpenRequests.RemoteLink link, // the way back to a sender on another chat-ui instance, or null
+            long entryId         // this item's number in its queue, never reused there; 0 until it is queued
     ) {
+        public QueueItem(String prompt, String model, Consumer<ChatEvent> emitter, CompletableFuture<TurnReply> done,
+                         String source, String resultKey, boolean noThink, boolean auto, List<String> images,
+                         String requestId, boolean urgent, long queuedAt, String id, OpenRequests.RemoteLink link) {
+            this(prompt, model, emitter, done, source, resultKey, noThink, auto, images, requestId, urgent, queuedAt,
+                    id, link, 0L);
+        }
+
         QueueItem withAuto(boolean newAuto) {
             return new QueueItem(prompt, model, emitter, done, source, resultKey, noThink, newAuto, images, requestId,
-                    urgent, queuedAt, id, link);
+                    urgent, queuedAt, id, link, entryId);
+        }
+
+        QueueItem withEntryId(long newEntryId) {
+            return new QueueItem(prompt, model, emitter, done, source, resultKey, noThink, auto, images, requestId,
+                    urgent, queuedAt, id, link, newEntryId);
         }
     }
 }
