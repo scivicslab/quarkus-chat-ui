@@ -334,6 +334,28 @@ public final class ConversationToolCatalog {
                     new ToolParameter("chatId", "string", true, ""),
                     new ToolParameter("count", "integer", false, "")),
                 false);
+        // SearchChatLogsThenReadAround_261128_oo01: the caller's own conversation only; no argument names one.
+        add(m, "search_own_log", """
+                search your own conversation's I/O log, the part before a /clear included, for a word: a substring,
+                case-insensitive. Returns the newest hits first, each with its logId, time, turn, label and a short
+                snippet; it does not return whole entries. "since" and "until" (e.g. 2026-11-28T09:00) narrow the
+                period. "limit": default 20, at most 100. Read around a hit with read_own_log.
+                """,
+                List.of(
+                    new ToolParameter("query", "string", true, ""),
+                    new ToolParameter("since", "string", false, ""),
+                    new ToolParameter("until", "string", false, ""),
+                    new ToolParameter("limit", "integer", false, "")),
+                false);
+        add(m, "read_own_log", """
+                read one entry of your own conversation's I/O log, and the entries before and after it, in whole,
+                oldest first. "logId" is the number search_own_log gave; an entry of another conversation is
+                refused. "count": how many entries on each side, default 5, at most 20.
+                """,
+                List.of(
+                    new ToolParameter("logId", "integer", true, ""),
+                    new ToolParameter("count", "integer", false, "")),
+                false);
         add(m, "get_request_messages", """
                 read the messages array another conversation will send to its model next, as a JSON array of
                 {"role","content"}; this is what the model reads, not the screen's record. Refused while it is

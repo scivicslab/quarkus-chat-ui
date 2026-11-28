@@ -156,6 +156,98 @@ public final class IoLogHistory {
         return rows;
     }
 
+    /**
+     * One entry of {@link #readAround}.
+     *
+     * @param logId     the row in {@code logs}
+     * @param when      when it was recorded, to the second
+     * @param label     its label, e.g. {@code turn7/question}
+     * @param message   its whole text, never cut
+     * @param requested whether this is the entry {@code logId} named
+     */
+    public record Around(long logId, String when, String label, String message, boolean requested) {}
+
+    /** What {@link #readAround} answers when {@code logId} is not one of the conversation's entries. */
+    public static final String NOT_OF_THIS_CONVERSATION = "not a log entry of this conversation";
+
+    /**
+     * Reads an entry of a conversation and the entries around it ({@code SearchChatLogsThenReadAround_261128_oo01}),
+     * in whole. The neighbours are the conversation's own entries in the order they were recorded, across every session
+     * its name was recorded under ({@code /clear} does not stop the read), whatever their labels.
+     *
+     * @param conversationSquadName the conversation's name, e.g. {@code project1/chat-02}
+     * @param logId                 the entry to read around, as {@link IoLogSearch.Hit#logId()} gave it
+     * @param count                 how many entries to read before it and after it, at least 0
+     * @return the entries, oldest first
+     * @throws IllegalArgumentException with {@link #NOT_OF_THIS_CONVERSATION} when {@code logId} is no entry of the
+     *         conversation (another conversation's entry is refused the same way as one that does not exist)
+     * @throws IllegalStateException when there is no I/O log or it could not be read
+     */
+    public List<Around> readAround(String conversationSquadName, long logId, int count) {
+        if (ioLog == null) throw new IllegalStateException("this instance keeps no I/O log");
+        String workflowName = CONVERSATION_PREFIX + conversationSquadName;
+        String pick = "SELECT l.id, l.timestamp, l.label, l.message FROM logs l JOIN sessions s ON s.id = l.session_id "
+                + "WHERE s.workflow_name = ? AND ";
+        ioLog.flush();   // what was told before this read is in the file the connection below reads
+        try (Connection c = DriverManager.getConnection(ioLog.jdbcUrl())) {
+            Timestamp at;
+            List<Around> out = new ArrayList<>();
+            try (PreparedStatement ps = c.prepareStatement(pick + "l.id = ?")) {
+                ps.setString(1, workflowName);
+                ps.setLong(2, logId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) throw new IllegalArgumentException(NOT_OF_THIS_CONVERSATION);
+                    at = rs.getTimestamp("timestamp");
+                    out.add(around(rs, true));
+                }
+            }
+            // The same order the history is read in: by time, and by row number within one instant.
+            List<Around> before = new ArrayList<>();
+            try (PreparedStatement ps = c.prepareStatement(pick
+                    + "(l.timestamp < ? OR (l.timestamp = ? AND l.id < ?)) ORDER BY l.timestamp DESC, l.id DESC LIMIT ?")) {
+                ps.setString(1, workflowName);
+                ps.setTimestamp(2, at);
+                ps.setTimestamp(3, at);
+                ps.setLong(4, logId);
+                ps.setInt(5, count);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) before.add(around(rs, false));
+                }
+            }
+            Collections.reverse(before);
+            List<Around> after = new ArrayList<>();
+            try (PreparedStatement ps = c.prepareStatement(pick
+                    + "(l.timestamp > ? OR (l.timestamp = ? AND l.id > ?)) ORDER BY l.timestamp ASC, l.id ASC LIMIT ?")) {
+                ps.setString(1, workflowName);
+                ps.setTimestamp(2, at);
+                ps.setTimestamp(3, at);
+                ps.setLong(4, logId);
+                ps.setInt(5, count);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) after.add(around(rs, false));
+                }
+            }
+            List<Around> all = new ArrayList<>(before);
+            all.addAll(out);
+            all.addAll(after);
+            return all;
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("the I/O log could not be read: " + e.getMessage(), e);
+        }
+    }
+
+    private static final java.time.format.DateTimeFormatter WHEN =
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    private static Around around(ResultSet rs, boolean requested) throws Exception {
+        Timestamp t = rs.getTimestamp("timestamp");
+        String message = rs.getString("message");
+        return new Around(rs.getLong("id"), t == null ? "" : t.toLocalDateTime().format(WHEN),
+                rs.getString("label") == null ? "" : rs.getString("label"), message == null ? "" : message, requested);
+    }
+
     private static boolean hasSession(Connection c, String workflowName) throws Exception {
         try (PreparedStatement ps = c.prepareStatement("SELECT 1 FROM sessions WHERE workflow_name = ? LIMIT 1")) {
             ps.setString(1, workflowName);
