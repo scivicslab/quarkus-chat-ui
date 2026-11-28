@@ -1,0 +1,26 @@
+# The fixed questions of the Suggest prompt work frame (design 340), by work type.
+# A question's id is its work type and its place in the list, counted from 1.
+# {term}, {step} and {topic} are filled in by the screen.
+common:
+  - 'What does "{term}" mean?'
+  - 'Your earlier explanation was not enough. Explain "{topic}" again, starting from the background.'
+  - 'How far has "{step}" progressed?'
+  - 'What is still undecided before "{step}" can be finished?'
+investigate:
+  - 'What have you found so far about "{topic}", and how sure are you?'
+  - 'What is the evidence for this conclusion, and what else should we check?'
+design:
+  - 'What alternatives did you consider for "{topic}", and why this one?'
+  - 'What are the risks of this design, and what does it leave undecided?'
+implement:
+  - 'Which files will "{step}" change, and what is the smallest change that works?'
+  - 'How will you keep the existing behavior unchanged while doing "{step}"?'
+verify:
+  - 'How was "{step}" checked, and what raw output proves it?'
+  - 'What has not been checked yet?'
+operate:
+  - 'What does "{step}" change on the running system, and can it be undone?'
+  - 'What do you need from me before "{step}"?'
+write:
+  - 'Who is the reader of this document, and what should they be able to do afterwards?'
+  - 'Read it again and list the sentences that are unclear.'

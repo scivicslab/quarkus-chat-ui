@@ -137,6 +137,13 @@ public class ChatUiActorSystem implements ConversationControls {
     @Inject
     com.scivicslab.chatui.audittrail.ActivityWork activityWork;
 
+    /** Where the work frames of Suggest prompt are kept; {@code null} on the no-CDI unit-test path, which has no such actor. */
+    @Inject
+    com.scivicslab.chatui.suggestprompt.SuggestRepository suggestRepository;
+
+    /** How often a conversation's work frame is brought up to date, in minutes; 0 or less means no prompting. */
+    static final long DEFAULT_SUGGEST_UPDATE_MINUTES = 10;
+
     /**
      * How many recorded turns a restarted conversation gets back. The pane's own limit
      * ({@code ChatSession.MAX_HISTORY}) and the provider's token budget both still apply on top,
@@ -285,6 +292,7 @@ public class ChatUiActorSystem implements ConversationControls {
     @PostConstruct
     void init() {
         actorSystem = new IIActorSystem("chat-ui");
+        loadSuggestQuestions();
         startRemoteNodes();
 
         // System-wide log multiplexer (150_TabScopedLogging_260826_oo01): the top of the chat-log
@@ -562,6 +570,16 @@ public class ChatUiActorSystem implements ConversationControls {
     @PreDestroy
     void stopTimekeeperTicker() {
         if (timekeeperTickerRef != null) timekeeperTickerRef.tell(TimekeeperTicker::stop).join();
+    }
+
+    /** Puts the fixed questions of the work frame, from the resource YAML, into the repository ({@code SuggestPromptGuidedByWorkFrame_261128_oo01}). */
+    private void loadSuggestQuestions() {
+        if (suggestRepository == null) return;
+        try {
+            suggestRepository.replaceQuestions(com.scivicslab.chatui.suggestprompt.SuggestQuestionsYaml.load());
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "The fixed questions of Suggest prompt could not be loaded", e);
+        }
     }
 
     /** @return a timekeeper limit in minutes from its configuration key, or the default */
@@ -1596,6 +1614,12 @@ public class ChatUiActorSystem implements ConversationControls {
                             return new Timekeeper.TargetState(true, since != null, since == null ? 0 : since);
                         }));
 
+        // Suggest prompt's work frame — a sibling of the timekeeper, which is its clock
+        // (SuggestPromptGuidedByWorkFrame_261128_oo01). Absent where there is no repository.
+        if (suggestRepository != null) {
+            createSuggestPromptKeeper(conversationSquadRef, projectId, chatId, qualifiedName, chatSessionIIAR);
+        }
+
         // Each actor that holds part of the conversation's state records it in the conversation's own session
         // (EachActorRecordsItsOwnState_261118_oo01): the squad its name, the chat session its settings and agent loop,
         // the timekeeper its limits.
@@ -1607,6 +1631,11 @@ public class ChatUiActorSystem implements ConversationControls {
         if (keeperRef != null) keeperRef.tell(k -> k.recordsTo(own));
         promptQueueRef.tell(q -> q.recordsTo(own, qualifiedName));
         restoreConversation(qualifiedName, chatSessionIIAR, providerRef);
+        // A conversation that was not brought back from its log is a new one: its work frame starts a new generation.
+        // Told after the restore, so a restored conversation has already put its own frame back.
+        ActorRef<com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper> suggestRef =
+                actorSystem.getActor(qualifiedName + ".suggestprompt");
+        if (suggestRef != null) suggestRef.tell(com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper::startIfNew);
         // Its first settings, so that it comes back as it was made even if it never runs a turn; one being brought
         // back already has them and writes nothing (ConversationRestoreOnRestart_260904_oo01).
         try {
@@ -1616,6 +1645,50 @@ public class ChatUiActorSystem implements ConversationControls {
         }
 
         return conversationSquadRef;
+    }
+
+    /**
+     * Creates the conversation's {@code .suggestprompt} child and has its {@code .timekeeper} send it the update at
+     * the configured interval. The parts the keeper needs are handed in here as functions, so it reaches no actor itself.
+     */
+    private void createSuggestPromptKeeper(ActorRef<ConversationSquad> squadRef, String projectId, String chatId,
+                                           String qualifiedName, ChatSessionIIAR chatSessionIIAR) {
+        String keeperName = qualifiedName + ".suggestprompt";
+        var keeper = new com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper(qualifiedName, suggestRepository,
+                new com.scivicslab.chatui.suggestprompt.IoLogTurns(new IoLogHistory(ioLogStore), qualifiedName,
+                        chatSessionIIAR::finishedTurnDirect),
+                prompt -> askLocalOnly(prompt),
+                call -> actorSystem.getManagedThreadPool().execute(call),
+                () -> suggestRoleOf(projectId, chatId), System::currentTimeMillis);
+        ActorRef<com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper> keeperRef = squadRef.createChild(keeperName, keeper);
+        keeperRef.tell(k -> k.bind(keeperRef::tell));
+        long minutes = minutesSetting("chat-ui.suggest-prompt.update-interval-minutes", DEFAULT_SUGGEST_UPDATE_MINUTES);
+        ActorRef<Timekeeper> clock = actorSystem.getActor(qualifiedName + ".timekeeper");
+        if (clock != null && minutes > 0) {
+            long armedAt = System.currentTimeMillis();
+            // A lookup that does not create: when the conversation is deleted the keeper is gone and nothing is sent.
+            clock.tell(t -> t.suggestPromptEvery(TimeUnit.MINUTES.toMillis(minutes), armedAt, () -> {
+                ActorRef<com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper> k = actorSystem.getActor(keeperName);
+                if (k != null) k.tell(com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper::bringUpToDate);
+            }));
+        }
+    }
+
+    /** One completion from the local LLM Translate uses, outside any conversation; gives up after two minutes. */
+    private String askLocalOnly(String prompt) throws Exception {
+        return translator().ask(p -> ((OpenAiCompatProvider) p).completeOutsideConversation(prompt)).get(2, TimeUnit.MINUTES);
+    }
+
+    /** The conversation's place in the organization, by the organization alone, without creating it. */
+    private String suggestRoleOf(String projectId, String chatId) {
+        ActorRef<Organization> org = actorSystem.getActor(organizationActorName(projectId));
+        if (org == null) return com.scivicslab.chatui.suggestprompt.SuggestFrame.STANDALONE;
+        if (!askOrDefault(org, o -> o.subordinatesOf(chatId), List.<String>of()).isEmpty()) {
+            return com.scivicslab.chatui.suggestprompt.SuggestFrame.SUPERIOR;
+        }
+        return askOrDefault(org, o -> o.superiorOf(chatId), (String) null) != null
+                ? com.scivicslab.chatui.suggestprompt.SuggestFrame.SUBORDINATE
+                : com.scivicslab.chatui.suggestprompt.SuggestFrame.STANDALONE;
     }
 
     /**
@@ -1678,6 +1751,9 @@ public class ChatUiActorSystem implements ConversationControls {
         if (squadRef != null) squadRef.tell(ConversationSquad::restore);
         ActorRef<Timekeeper> keeperRef = actorSystem.getActor(conversationSquadName + ".timekeeper");
         if (keeperRef != null) keeperRef.tell(Timekeeper::restore);
+        ActorRef<com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper> suggestRef =
+                actorSystem.getActor(conversationSquadName + ".suggestprompt");
+        if (suggestRef != null) suggestRef.tell(com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper::restore);
         // The requests it received and has not answered, and those it sent and waits on (step 9).
         chatSessionIIAR.tell(a -> ((ChatSession) a).restoreOpenRequests());
 
