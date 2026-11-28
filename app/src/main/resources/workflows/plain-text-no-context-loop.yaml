@@ -67,7 +67,7 @@ steps:
   - states: ["think", "think"]
     label: time-limit
     note: |
-      A turn of a conversation whose provider takes a budget may run for the conversation's time limit (10 minutes
+      A turn of a conversation whose provider takes a budget may run for the conversation's time limit (30 minutes
       unless it sets another; 0 sets none). timeLimitReached succeeds once, before the model is called, when the turn
       has run that long: it queues a note saying so as the next step's prompt, and that step is the turn's last model
       request, sent with tool_choice "none", so the model must answer in text. The turn then ends with the ending

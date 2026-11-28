@@ -201,12 +201,12 @@ class ChatSessionStepBudgetTest {
     }
 
     @Test
-    void theDefaultsAreOneHundredStepsAndTenMinutes() {
+    void theDefaultsAreOneHundredStepsAndThirtyMinutes() {
         assertEquals(100, ChatSession.DEFAULT_CONVERSATION_STEP_LIMIT);
-        assertEquals(10, ChatSession.DEFAULT_TIME_LIMIT_MINUTES);
+        assertEquals(30, ChatSession.DEFAULT_TIME_LIMIT_MINUTES);
         ChatSession session = new ChatSession(alwaysCalls("x"), Optional.empty());
         assertEquals(100, session.getStepLimit());
-        assertEquals(10, session.getTimeLimitMinutes());
+        assertEquals(30, session.getTimeLimitMinutes());
     }
 
     @Test

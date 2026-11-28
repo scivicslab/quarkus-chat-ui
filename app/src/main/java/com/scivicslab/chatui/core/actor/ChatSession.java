@@ -165,7 +165,7 @@ public class ChatSession extends Interpreter {
     /** Steps one turn of a conversation whose provider takes a step budget may make, unless the conversation sets it. */
     public static final int DEFAULT_CONVERSATION_STEP_LIMIT = 100;
     /** Minutes one such turn may run, unless the conversation sets it; {@code 0} sets no time limit. */
-    public static final int DEFAULT_TIME_LIMIT_MINUTES = 10;
+    public static final int DEFAULT_TIME_LIMIT_MINUTES = 30;
     /** The step limit, the time limit, no-think and the MCP servers: an outside thread may change them while a turn runs. */
     private final com.scivicslab.pojoactor.core.ActorRef<ChatSettings> settings =
             new com.scivicslab.pojoactor.core.ActorRef<>("chat-settings", new ChatSettings());

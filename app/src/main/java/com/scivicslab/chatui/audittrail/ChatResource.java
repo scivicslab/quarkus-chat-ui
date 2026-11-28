@@ -853,7 +853,7 @@ public class ChatResource {
      * Sets how many minutes one turn of this conversation may run, for a provider that runs the tool loop here;
      * {@code 0} sets no time limit; the default is {@code ChatSession.DEFAULT_TIME_LIMIT_MINUTES}.
      *
-     * @param body {@code {"timeLimitMinutes": 10}}
+     * @param body {@code {"timeLimitMinutes": 30}}
      * @return {@code {"type": "accepted", "timeLimitMinutes": N}}, or 400 when it is not a whole number from 0 to 1440
      */
     @POST
