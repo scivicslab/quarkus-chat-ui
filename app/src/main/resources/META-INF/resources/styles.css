@@ -961,6 +961,15 @@ footer {
     width: 100px;
 }
 
+/* The Send button with its think box inside: one box the width of the other buttons. A control cannot sit inside a
+   <button>, so the checkbox is laid over the button's right end; the button leaves room for it. */
+#send-group { position: relative; display: flex; width: 100px; }
+#send-group > #send-btn { flex: 1; padding-right: 34px; }
+#send-group > #send-think-check {
+    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    width: 15px; height: 15px; margin: 0; cursor: pointer; accent-color: #fff;
+}
+
 #send-btn, #cancel-btn {
     padding: 8px 16px;
     border: none;

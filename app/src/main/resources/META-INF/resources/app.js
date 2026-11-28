@@ -1394,10 +1394,12 @@
 
     // ── Sending ──────────────────────────────────────────────────────────────
 
-    // thinkMode: whether this one message asks the model to think. Plain Send never does; a message typed on this
-    // screen carries its own answer and the conversation's no-think setting does not apply to it.
+    // thinkMode: true when this one message must ask the model to think (Ctrl+Shift+Enter). Otherwise the box inside the
+    // Send button decides, and sending does not change it. A message typed on this screen carries its own answer and the
+    // conversation's no-think setting does not apply to it.
     function sendPrompt(thinkMode) {
-        var think = thinkMode === true;
+        var box = el("send-think-check");
+        var think = thinkMode === true || (box != null && box.checked);
         var text = promptInput.value.trim();
         if (!text) {
             // Empty send = "send the next one" (quarkus-chat-ui3's own semantics): force-dispatch
@@ -2039,13 +2041,13 @@
         if (viewModeBtn) viewModeBtn.addEventListener("click", toggleViewMode);
         applyViewMode();
 
-        if (sendBtn) sendBtn.addEventListener("click", function () { sendPrompt(false); });
+        if (sendBtn) sendBtn.addEventListener("click", function () { sendPrompt(); });
         initPredictPrompt();
         if (promptInput) {
             promptInput.addEventListener("keydown", function (e) {
-                // Ctrl+Shift+Enter is judged first: it sends this one message with thinking on. Shift+Enter alone does not think.
+                // Ctrl+Shift+Enter is judged first: it thinks whatever the box says. Shift+Enter follows the box.
                 if (e.key === "Enter" && e.shiftKey && e.ctrlKey) { e.preventDefault(); sendPrompt(true); return; }
-                if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); sendPrompt(false); return; }
+                if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); sendPrompt(); return; }
                 if (activeKeybind === "emacs" && emacsKey(e)) e.preventDefault();
             });
             promptInput.addEventListener("paste", function (e) {

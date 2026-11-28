@@ -178,6 +178,26 @@ public class ChatUiShellCheck {
                 check(sent.get(1).contains("\"noThink\":false"), "Ctrl+Shift+Enter says think: " + sent.get(1));
                 check(sent.get(2).contains("\"noThink\":true"), "plain Send never thinks, whatever the old setting is: " + sent.get(2));
             }
+            // The box inside the Send button: ticked, Send and Shift+Enter think; clicking the box alone sends nothing; sending
+            // does not clear it; Ctrl+Shift+Enter thinks whatever it says. The box has no title and no label.
+            check(page.getAttribute("#send-think-check", "title") == null
+                    && page.locator("label[for=send-think-check]").count() == 0, "the box has no title and no label");
+            page.fill("#prompt-input", "BOX-CLICK-ONLY hello");
+            page.click("#send-think-check");
+            page.waitForTimeout(500);
+            check(sent.size() == 3, "clicking the box alone sends nothing: " + sent);
+            page.click("#send-btn");
+            waitIdle();
+            page.fill("#prompt-input", "BOX-ON-SHIFT-ENTER hello");
+            page.press("#prompt-input", "Shift+Enter");
+            waitIdle();
+            check(sent.size() == 5, "two prompts were sent with the box ticked: " + sent);
+            if (sent.size() == 5) {
+                check(sent.get(3).contains("\"noThink\":false"), "Send with the box ticked says think: " + sent.get(3));
+                check(sent.get(4).contains("\"noThink\":false"), "Shift+Enter with the box ticked says think: " + sent.get(4));
+            }
+            check(page.isChecked("#send-think-check"), "sending leaves the box ticked");
+            page.click("#send-think-check");
             String log = rest("GET", "/api/iolog/search?q=enable_thinking&limit=20", null);
             int on = log.split("enable_thinking\\\\\":true", -1).length - 1;
             int off = log.split("enable_thinking\\\\\":false", -1).length - 1;

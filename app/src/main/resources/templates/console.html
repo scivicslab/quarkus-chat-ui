@@ -158,7 +158,8 @@
                             </div>
                             <div id="send-cancel-slot">
                                 <button id="cancel-btn" title="Cancel" disabled>Cancel</button>
-                                <button id="send-btn" title="Send (Shift+Enter). The model is asked not to think. Ctrl+Shift+Enter sends this one message with thinking on (local LLM only; Claude Code and Codex think as their effort says).">Send</button>
+                                <!-- A button cannot hold a control, so the checkbox sits over the button's right end inside one box. -->
+                                <span id="send-group"><button id="send-btn" title="Send (Shift+Enter). With the box ticked the message is sent with thinking on, otherwise the model is asked not to think. Ctrl+Shift+Enter sends this one message with thinking on whatever the box says (local LLM only; Claude Code and Codex think as their effort says).">Send</button><input id="send-think-check" type="checkbox"></span>
                                 <button id="predict-btn" title="Predict long follow-up prompts you may want to type next, from what the assistant last asked. Choosing one puts it in the input box; nothing is sent.">Predict prompt</button>
                             </div>
                         </div>
