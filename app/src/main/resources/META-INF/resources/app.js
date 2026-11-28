@@ -983,7 +983,7 @@
             d.textContent = text;
             body.appendChild(d);
         }
-        function fail(why) { show("pp-error", "Could not predict prompts: " + why); }
+        function fail(why) { show("pp-error", "Could not suggest prompts: " + why); }
         function post(path, payload) {
             var opts = { method: "POST" };
             if (payload) {
@@ -1004,7 +1004,7 @@
         // Stage 2: the follow-ups on the decision made (choice is null when the question had no choices).
         function followups(question, choice) {
             var mine = ++ticket;
-            show("pp-status", "Predicting what you may say next…");
+            show("pp-status", "Suggesting what you may say next…");
             post("/suggest-followups", { question: question, choice: choice })
                 .then(function (res) {
                     if (mine !== ticket) return;
