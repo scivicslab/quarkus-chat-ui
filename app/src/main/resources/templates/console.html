@@ -163,7 +163,6 @@
                                 <button id="cancel-btn" title="Cancel" disabled>Cancel</button>
                                 <!-- A button cannot hold a control, so the checkbox sits over the button's right end inside one box. -->
                                 <span id="send-group"><button id="send-btn" title="Send (Shift+Enter). With the box ticked the message is sent with thinking on, otherwise the model is asked not to think. Ctrl+Shift+Enter sends this one message with thinking on whatever the box says (local LLM only; Claude Code and Codex think as their effort says).">Send</button><input id="send-think-check" type="checkbox"></span>
-                                <button id="suggest-btn" title="Suggest long follow-up prompts you may want to type next, from what the assistant last asked. Choosing one puts it in the input box; nothing is sent.">Suggest prompt</button>
                             </div>
                         </div>
                     </div>
@@ -268,6 +267,7 @@
                     <option value="agentloop" data-perspective="chat">Agent Loop</option>
                     <option value="logsearch" data-perspective="chat">Log Search</option>
                     <option value="tokens" data-perspective="chat">Tokens</option>
+                    <option value="suggest" data-perspective="chat">Suggest prompt</option>
                     <option value="projectprop" data-perspective="project" data-default>Project Property</option>
                     <option value="jobrun" data-perspective="project">Run</option>
                     <option value="joblog" data-perspective="project">Job Log</option>
@@ -384,6 +384,20 @@
                 <!-- Tokens: what the block a conversation's first request starts with is made of, and how
                      the first request grew from turn to turn. Read-only: it shows who may cut a part
                      and cuts nothing. -->
+                <section id="tab-suggest" class="rtab-content" data-perspective="chat">
+                    <div class="tab-toolbar">
+                        <button id="suggest-analyze-btn" type="button" title="Bring the work frame up to date now, without waiting for the interval.">Analyze conversation</button>
+                        <span id="suggest-analyze-status"></span>
+                    </div>
+                    <div id="suggest-frame-line"></div>
+                    <div id="suggest-nav">
+                        <button id="suggest-last-btn" type="button">Suggest for the last message</button>
+                        <button id="suggest-picture-btn" type="button">Show the big picture</button>
+                        <span id="suggest-heading"></span>
+                    </div>
+                    <div id="suggest-picture-reason"></div>
+                    <div id="suggest-body"></div>
+                </section>
                 <section id="tab-tokens" class="rtab-content" data-perspective="chat">
                     <div class="tab-toolbar">
                         <button id="tokens-refresh" type="button">Refresh</button>
@@ -599,26 +613,6 @@
                 <button id="ext-dialog-close" title="Close">&#x00D7;</button>
             </div>
             <div id="ext-dialog-body"></div>
-        </div>
-    </div>
-    <!-- Suggest prompt: pick an offered choice, then a suggested follow-up; choosing one fills the input -->
-    <div id="suggest-overlay" style="display:none">
-        <div id="suggest-dialog">
-            <div id="suggest-dialog-header">
-                <span id="suggest-dialog-title">Suggest prompt</span>
-                <button id="suggest-dialog-close" title="Close (Escape)">&#x00D7;</button>
-            </div>
-            <div id="suggest-tools">
-                <button id="suggest-analyze-btn" title="Bring the work frame up to date now, without waiting for the interval.">Analyze conversation</button>
-                <span id="suggest-analyze-status"></span>
-            </div>
-            <div id="suggest-frame-line"></div>
-            <div id="suggest-nav">
-                <span id="suggest-heading">Suggestions for the last message</span>
-                <button id="suggest-picture-btn">Back to the big picture</button>
-            </div>
-            <div id="suggest-picture-reason"></div>
-            <div id="suggest-dialog-body"></div>
         </div>
     </div>
     <script src="app.js?v={assetVersion}"></script>
