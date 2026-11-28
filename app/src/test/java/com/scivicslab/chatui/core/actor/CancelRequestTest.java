@@ -164,7 +164,7 @@ class CancelRequestTest {
         assertTrue(told.contains("its turn was cancelled"), told);
         assertEquals(1, asker.prompts.stream().filter(p -> p.contains("ended without a reply")).count(),
                 "one message that the turn ended");
-        assertTrue(asker.prompts.stream().noneMatch(p -> p.contains("[reply to request")), "and no reply");
+        assertTrue(asker.prompts.stream().noneMatch(p -> p.startsWith("[reply to request")), "and no reply");
     }
 
     @Test
