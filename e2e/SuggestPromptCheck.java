@@ -10,7 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Browser check of the Predict prompt button: it sits beside Cancel and Send and opens a dialog. When the assistant's
+ * Browser check of the Suggest prompt button: it sits beside Cancel and Send and opens a dialog. When the assistant's
  * last message offers choices, the dialog first asks for one; then it lists four to six long follow-ups, and choosing
  * one puts it in the input box, led by "Go with B. ", without sending. A question with no choices skips the first
  * stage. A conversation with no assistant message yet, and an unreadable reply at either stage, show an error in the
@@ -19,12 +19,12 @@ import java.util.List;
  *
  * <pre>
  * java -cp ~/works/w206-e2e-test/target/w206-e2e-test-1.0.0-shaded.jar e2e/ScriptedModelServer.java 28978 &amp;
- * java -cp ~/works/w206-e2e-test/target/w206-e2e-test-1.0.0-shaded.jar e2e/PredictPromptCheck.java http://localhost:28979
+ * java -cp ~/works/w206-e2e-test/target/w206-e2e-test-1.0.0-shaded.jar e2e/SuggestPromptCheck.java http://localhost:28979
  * </pre>
  *
  * Exits 0 when every check passes, and writes screenshots to /tmp/uitest/ (create the directory first).
  */
-public class PredictPromptCheck {
+public class SuggestPromptCheck {
 
     static String base = "http://localhost:28979";
     static final HttpClient http = HttpClient.newHttpClient();
@@ -74,18 +74,18 @@ public class PredictPromptCheck {
             // The button is in the row of Cancel and Send, after them.
             List<String> row = (List<String>) page.evaluate(
                     "() => Array.from(document.querySelectorAll('#send-cancel-slot button')).map(b => b.textContent.trim())");
-            check(row.equals(List.of("Cancel", "Send", "Predict prompt")), "the buttons beside the input: " + row);
-            check(page.isVisible("#predict-btn") && !page.isVisible("#predict-overlay"), "the button shows; the dialog does not");
+            check(row.equals(List.of("Cancel", "Send", "Suggest prompt")), "the buttons beside the input: " + row);
+            check(page.isVisible("#suggest-btn") && !page.isVisible("#suggest-overlay"), "the button shows; the dialog does not");
 
             // A conversation with no assistant message: the dialog says so, and the input box is untouched.
             page.fill("#prompt-input", "KEEP-ME");
-            page.click("#predict-btn");
-            page.waitForSelector("#predict-dialog-body .pp-error");
-            String empty = page.textContent("#predict-dialog-body");
+            page.click("#suggest-btn");
+            page.waitForSelector("#suggest-dialog-body .pp-error");
+            String empty = page.textContent("#suggest-dialog-body");
             check(empty.contains("no assistant message"), "no message yet: the dialog gives the reason: " + empty);
             check("KEEP-ME".equals(page.inputValue("#prompt-input")), "the input box is unchanged after the error");
             page.keyboard().press("Escape");
-            check(!page.isVisible("#predict-overlay"), "Escape closes the dialog");
+            check(!page.isVisible("#suggest-overlay"), "Escape closes the dialog");
 
             // Choices offered: stage 1 asks for one, stage 2 lists the follow-ups on that decision.
             page.fill("#prompt-input", "ASK-CHOICES which design?");
@@ -93,27 +93,27 @@ public class PredictPromptCheck {
             waitIdle();
             int sentBefore = sent.size();
             page.fill("#prompt-input", "TYPED-BEFORE");
-            page.click("#predict-btn");
-            page.waitForSelector("#predict-dialog-body .pp-choice");
-            check(page.locator("#predict-dialog-body .pp-choice").count() == 3, "stage 1 lists the three choices");
-            check(page.isDisabled("#predict-dialog-body .pp-next"), "Next waits for a choice");
-            check(page.locator("#predict-dialog-body .pp-item").count() == 0, "no follow-up is listed before a choice");
-            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/predict-1-choices.png")));
-            page.locator("#predict-dialog-body .pp-choice input").nth(1).check();
-            page.click("#predict-dialog-body .pp-next");
-            page.waitForSelector("#predict-dialog-body .pp-item");
+            page.click("#suggest-btn");
+            page.waitForSelector("#suggest-dialog-body .pp-choice");
+            check(page.locator("#suggest-dialog-body .pp-choice").count() == 3, "stage 1 lists the three choices");
+            check(page.isDisabled("#suggest-dialog-body .pp-next"), "Next waits for a choice");
+            check(page.locator("#suggest-dialog-body .pp-item").count() == 0, "no follow-up is listed before a choice");
+            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/suggest-1-choices.png")));
+            page.locator("#suggest-dialog-body .pp-choice input").nth(1).check();
+            page.click("#suggest-dialog-body .pp-next");
+            page.waitForSelector("#suggest-dialog-body .pp-item");
             List<String> items = (List<String>) page.evaluate(
-                    "() => Array.from(document.querySelectorAll('#predict-dialog-body .pp-item')).map(b => b.textContent)");
+                    "() => Array.from(document.querySelectorAll('#suggest-dialog-body .pp-item')).map(b => b.textContent)");
             check(items.size() == 4, "four usable follow-ups are listed (the bare \"Yes.\" is dropped): " + items);
             check(items.stream().allMatch(t -> t.startsWith("Go with B. ")), "each starts with the chosen option");
             check(items.stream().allMatch(t -> t.length() > 60), "each is a fairly long sentence");
-            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/predict-2-followups.png")));
-            page.locator("#predict-dialog-body .pp-item").nth(2).click();
-            check(!page.isVisible("#predict-overlay"), "choosing one closes the dialog");
+            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/suggest-2-followups.png")));
+            page.locator("#suggest-dialog-body .pp-item").nth(2).click();
+            check(!page.isVisible("#suggest-overlay"), "choosing one closes the dialog");
             String got = page.inputValue("#prompt-input");
             check(got.startsWith("Go with B. On design B, PREDICT-THREE"),
                     "the chosen prompt, led by the option, replaces what was typed: " + got);
-            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/predict-3-chosen.png")));
+            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/suggest-3-chosen.png")));
             Thread.sleep(800);
             check(sent.size() == sentBefore, "nothing was sent by choosing it");
 
@@ -121,10 +121,10 @@ public class PredictPromptCheck {
             page.fill("#prompt-input", "ASK-OPEN anything left?");
             page.click("#send-btn");
             waitIdle();
-            page.click("#predict-btn");
-            page.waitForSelector("#predict-dialog-body .pp-item");
-            check(page.locator("#predict-dialog-body .pp-choice").count() == 0, "no choice stage when the question has no choices");
-            String first = page.locator("#predict-dialog-body .pp-item").first().textContent();
+            page.click("#suggest-btn");
+            page.waitForSelector("#suggest-dialog-body .pp-item");
+            check(page.locator("#suggest-dialog-body .pp-choice").count() == 0, "no choice stage when the question has no choices");
+            String first = page.locator("#suggest-dialog-body .pp-item").first().textContent();
             check(first.startsWith("PREDICT-ONE") && !first.startsWith("Go with"), "follow-ups have no head: " + first);
             page.keyboard().press("Escape");
 
@@ -133,23 +133,23 @@ public class PredictPromptCheck {
             page.click("#send-btn");
             waitIdle();
             page.fill("#prompt-input", "KEEP-ME-TOO");
-            page.click("#predict-btn");
-            page.waitForSelector("#predict-dialog-body .pp-error");
-            String bad = page.textContent("#predict-dialog-body");
+            page.click("#suggest-btn");
+            page.waitForSelector("#suggest-dialog-body .pp-error");
+            String bad = page.textContent("#suggest-dialog-body");
             check(bad.contains("did not say what the assistant asked"), "unreadable stage 1: the dialog gives the reason: " + bad);
             check("KEEP-ME-TOO".equals(page.inputValue("#prompt-input")), "the input box is unchanged after the error");
-            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/predict-4-error.png")));
-            page.click("#predict-dialog-close");
-            check(!page.isVisible("#predict-overlay"), "the close button closes the dialog");
+            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/suggest-4-error.png")));
+            page.click("#suggest-dialog-close");
+            check(!page.isVisible("#suggest-overlay"), "the close button closes the dialog");
 
             // An unreadable reply at stage 2.
             page.fill("#prompt-input", "ASK-BADFOLLOW hello");
             page.click("#send-btn");
             waitIdle();
             page.fill("#prompt-input", "KEEP-ME-THREE");
-            page.click("#predict-btn");
-            page.waitForSelector("#predict-dialog-body .pp-error");
-            String bad2 = page.textContent("#predict-dialog-body");
+            page.click("#suggest-btn");
+            page.waitForSelector("#suggest-dialog-body .pp-error");
+            String bad2 = page.textContent("#suggest-dialog-body");
             check(bad2.contains("usable prompts") || bad2.contains("no answer"), "unreadable stage 2: the dialog gives the reason: " + bad2);
             check("KEEP-ME-THREE".equals(page.inputValue("#prompt-input")), "the input box is unchanged after the error");
             page.keyboard().press("Escape");

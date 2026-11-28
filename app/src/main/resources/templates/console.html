@@ -145,7 +145,6 @@
                 <div id="input-resize-handle" title="Drag to resize input area"></div>
                 <footer>
                     <div id="input-area" style="position:relative">
-                        <div id="predict-popup" style="display:none"></div>
                         <div id="skill-suggest" style="display:none"></div>
                         <div id="image-attachments" style="display:none"></div>
                         <textarea id="prompt-input" placeholder="Type a message… (Shift+Enter to send, Ctrl+Shift+Enter to send with thinking, Tab to predict, /btw question for side questions, paste or drop an image to attach it)" rows="5"></textarea>
@@ -160,7 +159,7 @@
                                 <button id="cancel-btn" title="Cancel" disabled>Cancel</button>
                                 <!-- A button cannot hold a control, so the checkbox sits over the button's right end inside one box. -->
                                 <span id="send-group"><button id="send-btn" title="Send (Shift+Enter). With the box ticked the message is sent with thinking on, otherwise the model is asked not to think. Ctrl+Shift+Enter sends this one message with thinking on whatever the box says (local LLM only; Claude Code and Codex think as their effort says).">Send</button><input id="send-think-check" type="checkbox"></span>
-                                <button id="predict-btn" title="Predict long follow-up prompts you may want to type next, from what the assistant last asked. Choosing one puts it in the input box; nothing is sent.">Predict prompt</button>
+                                <button id="suggest-btn" title="Suggest long follow-up prompts you may want to type next, from what the assistant last asked. Choosing one puts it in the input box; nothing is sent.">Suggest prompt</button>
                             </div>
                         </div>
                     </div>
@@ -598,14 +597,14 @@
             <div id="ext-dialog-body"></div>
         </div>
     </div>
-    <!-- Predict prompt: pick an offered choice, then a predicted follow-up; choosing one fills the input -->
-    <div id="predict-overlay" style="display:none">
-        <div id="predict-dialog">
-            <div id="predict-dialog-header">
-                <span id="predict-dialog-title">Predict prompt</span>
-                <button id="predict-dialog-close" title="Close (Escape)">&#x00D7;</button>
+    <!-- Suggest prompt: pick an offered choice, then a suggested follow-up; choosing one fills the input -->
+    <div id="suggest-overlay" style="display:none">
+        <div id="suggest-dialog">
+            <div id="suggest-dialog-header">
+                <span id="suggest-dialog-title">Suggest prompt</span>
+                <button id="suggest-dialog-close" title="Close (Escape)">&#x00D7;</button>
             </div>
-            <div id="predict-dialog-body"></div>
+            <div id="suggest-dialog-body"></div>
         </div>
     </div>
     <script src="app.js?v={assetVersion}"></script>

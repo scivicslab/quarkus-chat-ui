@@ -406,6 +406,21 @@ public class IoLogView {
                 .orElse(null);
     }
 
+    /** The label Suggest prompt writes its instruction and reply under. */
+    public static final String PROMPT_SUGGESTION_LABEL = "prompt-suggestion";
+
+    /** What the same rows were called before Predict prompt became Suggest prompt; stored rows keep it. */
+    static final String LEGACY_PROMPT_PREDICTION_LABEL = "prompt-prediction";
+
+    /**
+     * @return whether a stored row's label is the one asked for; rows stored as {@code prompt-prediction} count as
+     *         {@code prompt-suggestion}, and are not rewritten
+     */
+    static boolean sameLabel(String wanted, String stored) {
+        if (wanted.equals(stored)) return true;
+        return PROMPT_SUGGESTION_LABEL.equals(wanted) && LEGACY_PROMPT_PREDICTION_LABEL.equals(stored);
+    }
+
     /** @return the message of the session's last entry with {@code label}, as written, or {@code null} when it has none */
     public String latestOf(long sessionId, String label) {
         return latestOf(allLogs(sessionId), label);
@@ -413,7 +428,7 @@ public class IoLogView {
 
     static String latestOf(List<LogEntry> raw, String label) {
         return raw.stream()
-                .filter(e -> label.equals(e.getLabel()))
+                .filter(e -> sameLabel(label, e.getLabel()))
                 .max(Comparator.comparingLong(LogEntry::getId))
                 .map(LogEntry::getMessage)
                 .orElse(null);
@@ -422,7 +437,7 @@ public class IoLogView {
     /** @return the messages of every entry of the session with {@code label}, oldest first */
     public List<String> allOf(long sessionId, String label) {
         return allLogs(sessionId).stream()
-                .filter(e -> label.equals(e.getLabel()))
+                .filter(e -> sameLabel(label, e.getLabel()))
                 .sorted(Comparator.comparingLong(LogEntry::getId))
                 .map(LogEntry::getMessage)
                 .toList();
@@ -441,7 +456,7 @@ public class IoLogView {
 
     static org.json.JSONObject latestWithKey(List<LogEntry> raw, String label, String key) {
         return raw.stream()
-                .filter(e -> label.equals(e.getLabel()))
+                .filter(e -> sameLabel(label, e.getLabel()))
                 .sorted(Comparator.comparingLong(LogEntry::getId).reversed())
                 .map(e -> jsonObject(e.getMessage()))
                 .filter(o -> o != null && o.has(key))
