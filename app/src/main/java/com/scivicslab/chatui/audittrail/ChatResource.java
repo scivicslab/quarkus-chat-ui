@@ -315,7 +315,7 @@ public class ChatResource {
         if (read.kind() == ChatUiActorSystem.SuggestFrameRead.Kind.NO_REPOSITORY) {
             return Response.status(409).entity(Map.of("type", "error", "message", "this instance keeps no work frame")).build();
         }
-        Map<String, Object> view = com.scivicslab.chatui.suggestprompt.SuggestFrameView.of(read.frame(), read.finishedTurn());
+        Map<String, Object> view = com.scivicslab.chatui.suggestprompt.SuggestFrameView.of(read.frame(), read.finishedTurn(), read.progress());
         view.put("preamble", com.scivicslab.chatui.suggestprompt.SuggestPreamble.forDefaultEntry(read.frame()));
         return Response.ok(view).build();
     }

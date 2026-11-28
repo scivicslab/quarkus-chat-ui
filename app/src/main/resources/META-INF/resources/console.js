@@ -29,6 +29,7 @@
         logdb: "To see exactly what this conversation sent to its model and what came back, open a recorded session and follow its turns step by step.",
         syslog: "When a turn of this conversation went wrong, read its log here; set Level to WARN or ERROR to find the failure.",
         agentloop: "This conversation runs each of its turns by the agent loop shown here; choose another one to change how it works.",
+        suggest: "When you cannot decide what to say next, get long instructions suggested from the conversation's overall picture and the assistant's last message, and put one in the input box; nothing is sent.",
         tokens: "When this conversation's window fills up, see here which part of its first request takes the tokens and who can cut it; nothing here cuts anything.",
         logsearch: "When you remember what was said but not which conversation said it, search here: it covers every conversation this instance recorded.",
         actions: "A workflow step names an actor and one of its actions, so while writing a workflow, look up here which actors exist and what each action takes.",
@@ -73,6 +74,7 @@
         if (tab === "agentloop") wfOnShow();
         if (tab === "logsearch") lsearchOnShow();
         if (tab === "tokens") tokensLoad();
+        if (tab === "suggest") suggestOnShow();
         if (tab === "jobrun") jobRunOnShow();
         if (tab === "jobs") jobsOnShow();
         if (tab === "joblog") jobLogOnShow();
@@ -2071,6 +2073,7 @@
         if (document.getElementById("tab-tokens") && document.getElementById("tab-tokens").classList.contains("active")) {
             tokensLoad();
         }
+        if (sgActive()) suggestOnShow();
     }
 
     // The last tree drawn, to find the nodes above a conversation.
@@ -3390,6 +3393,380 @@
             .catch(function (e) { if (seq === tokensLoadSeq) { tokensEmpty(turnsBox, "error: " + e.message); tokensSetStatus(""); } });
     }
 
+    // ── Suggest prompt view (SuggestPromptGuidedByWorkFrame_261128_oo01) ─────────────────────────────
+    // A right-pane view of the conversation shown in the centre pane. Two entries: the assistant's last message
+    // (two LLM calls, started by a button, never by opening the view) and the big picture (topic, step and fixed
+    // question are DB reads; only the last list of instructions calls the LLM). "Put in box" fills the input box,
+    // led by the preamble built from the work frame, and never sends. "Analyze conversation" asks for one update of
+    // the work frame at once; the update runs on the server whoever started it, so while the view is shown it asks
+    // the server for the state every second and shows "N of M turns read".
+    var SG_NO_PICTURE = "No overall picture is recorded for this conversation yet.";
+    var sgMode = null;            // null (nothing chosen yet), "last" or "picture"
+    var sgFrame = null;
+    var sgTicket = 0;             // bumped by every step of the body, so a late reply is dropped
+    var sgChat = null;            // the conversation the view shows
+    var sgPollTimer = null;
+    var sgRunSeen = false;        // this view has seen the update run, so its end is announced
+    var sgRevisionBefore = 0;
+
+    function sgEl(id) { return document.getElementById(id); }
+    function sgActive() {
+        var s = sgEl("tab-suggest");
+        return !!(s && s.classList.contains("active"));
+    }
+    function sgChatKey() {
+        var c = (typeof window.chatUiGetActiveChat === "function") ? window.chatUiGetActiveChat() : null;
+        return c ? c.projectId + "/" + c.chatId : null;
+    }
+    function sgRequest(method, path, payload) {
+        var url = activeChatUrl(path);
+        if (!url) return Promise.reject(new Error("no conversation is shown"));
+        var opts = { method: method };
+        if (payload) {
+            opts.headers = { "Content-Type": "application/json" };
+            opts.body = JSON.stringify(payload);
+        }
+        return fetch(url, opts).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
+        });
+    }
+    function sgShow(cls, text) {
+        var body = sgEl("suggest-body");
+        body.textContent = "";
+        sgAdd(cls, text);
+    }
+    function sgAdd(cls, text) {
+        var d = document.createElement("div");
+        d.className = cls;
+        d.textContent = text;
+        sgEl("suggest-body").appendChild(d);
+        return d;
+    }
+    function sgFail(why) { sgShow("pp-error", "Could not suggest prompts: " + why); }
+    function sgPlural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+
+    // "Put in box": the instruction replaces what is in the box, as the queue's Edit button does. It is never sent.
+    function sgChoose(prefix, text, mark) {
+        var box = sgEl("prompt-input");
+        if (!box) return;
+        box.value = prefix + text;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        box.focus();
+        if (mark) mark.textContent = "Put in the input box.";
+    }
+
+    // ---- the work frame as the view knows it ----
+    function sgFrameNote() {
+        if (!sgFrame || !sgFrame.revision) return "No work frame has been recorded yet.";
+        return "Work frame updated " + new Date(sgFrame.updatedAt).toLocaleString() + "; "
+                + sgPlural(sgFrame.newTurns, "turn") + " finished since.";
+    }
+    function sgPaintFrame() {
+        sgEl("suggest-frame-line").textContent = sgFrameNote();
+        var usable = !!(sgFrame && sgFrame.available);
+        var pictureBtn = sgEl("suggest-picture-btn");
+        pictureBtn.disabled = !usable;
+        pictureBtn.title = usable ? "" : SG_NO_PICTURE;
+        sgEl("suggest-picture-reason").textContent = usable ? "" : SG_NO_PICTURE;
+        sgEl("suggest-heading").textContent = sgMode === "picture" ? "The big picture"
+                : sgMode === "last" ? "Suggestions for the last message" : "";
+    }
+    function sgLoadFrame() {
+        var key = sgChat;
+        return sgRequest("GET", "/suggest-frame").then(function (res) {
+            if (key !== sgChat) return null;
+            sgFrame = res.ok ? res.j : null;
+            sgPaintFrame();
+            return sgFrame;
+        }).catch(function () {
+            if (key === sgChat) { sgFrame = null; sgPaintFrame(); }
+            return null;
+        });
+    }
+
+    // ---- the follow-ups: shared by both entries ----
+    function sgUsable(res) {
+        var prompts = res.j && res.j.prompts;
+        return res.ok && Array.isArray(prompts) && prompts.length > 0;
+    }
+    function sgRenderPrompts(j, questionLine) {
+        var preamble = (j && j.preamble) || "";
+        var head = (j && j.head) || "";
+        sgEl("suggest-body").textContent = "";
+        if (questionLine) sgAdd("pp-question", questionLine);
+        if (preamble) sgAdd("pp-preamble", preamble.replace(/\n+$/, ""));
+        j.prompts.forEach(function (p) {
+            var row = document.createElement("div");
+            row.className = "pp-row";
+            var text = document.createElement("div");
+            text.className = "pp-item pp-text";
+            text.textContent = head + p;
+            var use = document.createElement("button");
+            use.className = "pp-use";
+            use.type = "button";
+            use.textContent = "Put in box";
+            var mark = document.createElement("span");
+            mark.className = "pp-mark";
+            use.addEventListener("click", function () { sgChoose(preamble + head, p, mark); });
+            row.appendChild(text);
+            row.appendChild(use);
+            row.appendChild(mark);
+            sgEl("suggest-body").appendChild(row);
+        });
+    }
+
+    // ---- entry: the assistant's last message ----
+    function sgFollowups(question, choice) {
+        var mine = ++sgTicket;
+        sgShow("pp-status", "Suggesting what you may say next…");
+        sgRequest("POST", "/suggest-followups", { question: question, choice: choice }).then(function (res) {
+            if (mine !== sgTicket) return;
+            if (!sgUsable(res)) { sgFail((res.j && res.j.message) || "no prompts came back"); return; }
+            sgRenderPrompts(res.j, question ? (choice ? "Go with " + choice.id + " — " : "") + question : "");
+        }).catch(function (e) { if (mine === sgTicket) sgFail(e.message); });
+    }
+    function sgPickChoice(question, choices) {
+        var body = sgEl("suggest-body");
+        body.textContent = "";
+        sgAdd("pp-question", question);
+        var picked = null;
+        var next = document.createElement("button");
+        next.className = "pp-next";
+        next.type = "button";
+        next.textContent = "Next";
+        next.disabled = true;
+        choices.forEach(function (c) {
+            var row = document.createElement("label");
+            row.className = "pp-choice";
+            var radio = document.createElement("input");
+            radio.type = "radio";
+            radio.name = "pp-choice";
+            radio.addEventListener("change", function () { picked = c; next.disabled = false; });
+            var span = document.createElement("span");
+            span.textContent = c.id + ". " + c.text;
+            row.appendChild(radio);
+            row.appendChild(span);
+            body.appendChild(row);
+        });
+        next.addEventListener("click", function () { if (picked) sgFollowups(question, picked); });
+        body.appendChild(next);
+    }
+    function sgEnterLast() {
+        sgMode = "last";
+        sgPaintFrame();
+        var mine = ++sgTicket;
+        sgShow("pp-status", "Reading the assistant's last message…");
+        sgRequest("POST", "/suggest-question").then(function (res) {
+            if (mine !== sgTicket) return;
+            var question = res.j && res.j.question;
+            if (!res.ok || typeof question !== "string" || !question) {
+                sgFail((res.j && res.j.message) || "the question could not be read");
+                return;
+            }
+            var choices = Array.isArray(res.j.choices) ? res.j.choices : [];
+            if (choices.length >= 2) sgPickChoice(question, choices);
+            else sgFollowups(question, null);
+        }).catch(function (e) { if (mine === sgTicket) sgFail(e.message); });
+    }
+
+    // ---- entry: the big picture ----
+    function sgPickTopic() {
+        ++sgTicket;
+        var topics = sgFrame.topics || [];
+        if (sgFrame.skipTopics && topics.length === 1) { sgPickStep(topics[0]); return; }
+        sgEl("suggest-body").textContent = "";
+        sgAdd("pp-heading", "Which topic do you want to talk about next?");
+        topics.forEach(function (t) {
+            var item = document.createElement("button");
+            item.className = "pp-item pp-topic";
+            item.type = "button";
+            item.textContent = t.title + " (" + t.workType + ")" + (t.delegateSquad ? " → " + t.delegateSquad : "");
+            item.addEventListener("click", function () { sgPickStep(t); });
+            sgEl("suggest-body").appendChild(item);
+        });
+    }
+    function sgPickStep(topic) {
+        ++sgTicket;
+        if (topic.skipSteps || !topic.steps || topic.steps.length === 0) { sgPickQuestion(topic, null); return; }
+        sgEl("suggest-body").textContent = "";
+        sgAdd("pp-heading", "Which step are you concerned with?");
+        topic.steps.forEach(function (s) {
+            var item = document.createElement("button");
+            item.className = "pp-item pp-step";
+            item.type = "button";
+            item.textContent = s.seq + ". " + s.title;
+            var pg = document.createElement("span");
+            pg.className = "pp-progress";
+            pg.textContent = "[" + s.progress + "]";
+            item.appendChild(pg);
+            item.addEventListener("click", function () { sgPickQuestion(topic, s); });
+            sgEl("suggest-body").appendChild(item);
+        });
+        var none = document.createElement("button");
+        none.className = "pp-item pp-step";
+        none.type = "button";
+        none.textContent = "No particular step";
+        none.addEventListener("click", function () { sgPickQuestion(topic, null); });
+        sgEl("suggest-body").appendChild(none);
+    }
+    function sgPickQuestion(topic, step) {
+        var mine = ++sgTicket;
+        sgShow("pp-status", "Reading the fixed questions…");
+        sgRequest("POST", "/suggest-frame/questions", { topicId: topic.topicId, stepSeq: step ? step.seq : null })
+            .then(function (res) {
+                if (mine !== sgTicket) return;
+                var questions = res.j && res.j.questions;
+                if (!res.ok || !Array.isArray(questions)) {
+                    sgFail((res.j && res.j.message) || "the fixed questions could not be read");
+                    return;
+                }
+                var preamble = (res.j && res.j.preamble) || "";
+                sgEl("suggest-body").textContent = "";
+                sgAdd("pp-heading", "What do you want to ask about it?");
+                questions.forEach(function (q) {
+                    var row = document.createElement("div");
+                    row.className = "pp-row";
+                    var item = document.createElement("button");
+                    item.className = "pp-item pp-fixed";
+                    item.type = "button";
+                    item.textContent = q.text;
+                    item.addEventListener("click", function () { sgPictureFollowups(topic, step, q.text); });
+                    var use = document.createElement("button");
+                    use.className = "pp-use";
+                    use.type = "button";
+                    use.textContent = "Put in box";
+                    use.title = "Put this question itself in the input box.";
+                    var mark = document.createElement("span");
+                    mark.className = "pp-mark";
+                    use.addEventListener("click", function () { sgChoose(preamble, q.text, mark); });
+                    row.appendChild(item);
+                    row.appendChild(use);
+                    row.appendChild(mark);
+                    sgEl("suggest-body").appendChild(row);
+                });
+            }).catch(function (e) { if (mine === sgTicket) sgFail(e.message); });
+    }
+    function sgPictureFollowups(topic, step, questionText) {
+        var mine = ++sgTicket;
+        sgShow("pp-status", "Suggesting what you may say next…");
+        sgRequest("POST", "/suggest-followups", { topicId: topic.topicId, stepSeq: step ? step.seq : null, questionText: questionText })
+            .then(function (res) {
+                if (mine !== sgTicket) return;
+                if (!sgUsable(res)) { sgFail((res.j && res.j.message) || "no prompts came back"); return; }
+                sgRenderPrompts(res.j, topic.title + (step ? " / " + step.seq + ". " + step.title : "") + " — " + questionText);
+            }).catch(function (e) { if (mine === sgTicket) sgFail(e.message); });
+    }
+    function sgEnterPicture() {
+        sgMode = "picture";
+        sgPaintFrame();
+        var mine = ++sgTicket;
+        sgLoadFrame().then(function (f) {
+            if (mine !== sgTicket || sgMode !== "picture") return;
+            if (!f || !f.available) { sgMode = null; sgPaintFrame(); sgShow("pp-status", SG_NO_PICTURE); return; }
+            sgPickTopic();
+        });
+    }
+
+    // ---- Analyze conversation, and the progress of an update ----
+    function sgBusyText(a) {
+        if (!a.totalTurns) return "Analyzing…";
+        return "Analyzing… " + a.readTurns + " of " + a.totalTurns + " turns read";
+    }
+    // Paints what the server says. An update that this view saw running is announced when it ends.
+    function sgPaintAnalysis(f) {
+        var btn = sgEl("suggest-analyze-btn");
+        var status = sgEl("suggest-analyze-status");
+        var a = f && f.analysis;
+        if (a && (a.running || a.calling)) {
+            if (!sgRunSeen) { sgRunSeen = true; }
+            btn.disabled = true;
+            status.textContent = sgBusyText(a);
+            return;
+        }
+        btn.disabled = false;
+        if (sgRunSeen && f) {
+            sgRunSeen = false;
+            status.textContent = f.revision > sgRevisionBefore
+                    ? "Analyzed. " + sgPlural(f.newTurns, "turn") + " still unread."
+                    : "The update ended without a result; it is tried again at the next interval.";
+        }
+        if (f) sgRevisionBefore = f.revision;
+    }
+    function sgPoll() {
+        sgPollTimer = null;
+        if (!sgActive() || sgChatKey() !== sgChat) return;
+        sgLoadFrame().then(function (f) {
+            if (f) sgPaintAnalysis(f);
+            if (sgActive() && sgChatKey() === sgChat && sgPollTimer === null) {
+                sgPollTimer = setTimeout(sgPoll, 1000);
+            }
+        });
+    }
+    function sgStartPolling() {
+        if (sgPollTimer !== null) clearTimeout(sgPollTimer);
+        sgPollTimer = setTimeout(sgPoll, 1000);
+    }
+    function sgAnalyze() {
+        var btn = sgEl("suggest-analyze-btn");
+        var status = sgEl("suggest-analyze-status");
+        btn.disabled = true;
+        status.textContent = "";
+        var key = sgChat;
+        sgRequest("POST", "/suggest-frame/analyze").then(function (res) {
+            if (key !== sgChat) return;
+            var r = res.j && res.j.result;
+            if (r === "started" || r === "already-running") {
+                sgRunSeen = true;
+                status.textContent = r === "started" ? "Analyzing " + sgPlural(res.j.turns, "finished turn") + "…" : "Already analyzing.";
+                sgStartPolling();
+            } else {
+                btn.disabled = false;
+                status.textContent = r === "nothing-new" ? "Nothing new to analyze."
+                        : "Could not analyze: " + ((res.j && res.j.message) || "no answer");
+            }
+        }).catch(function (e) {
+            if (key !== sgChat) return;
+            btn.disabled = false;
+            status.textContent = "Could not analyze: " + e.message;
+        });
+    }
+
+    // The view was shown, or the conversation in the centre pane changed: start from that conversation's state.
+    function suggestOnShow() {
+        var key = sgChatKey();
+        if (key !== sgChat) {
+            sgChat = key;
+            sgMode = null;
+            sgFrame = null;
+            ++sgTicket;
+            sgEl("suggest-body").textContent = "";
+            sgEl("suggest-analyze-status").textContent = "";
+            sgEl("suggest-analyze-btn").disabled = false;
+        }
+        sgRunSeen = false;
+        sgRevisionBefore = 0;
+        sgEl("suggest-analyze-status").textContent = "";   // an answer of an earlier visit is stale
+        sgPaintFrame();
+        if (!key) { sgEl("suggest-frame-line").textContent = "No conversation is shown."; return; }
+        sgLoadFrame().then(function (f) {
+            if (f) {
+                sgRevisionBefore = f.revision;
+                sgPaintAnalysis(f);
+            }
+            sgStartPolling();
+        });
+    }
+
+    function initSuggest() {
+        var analyze = sgEl("suggest-analyze-btn");
+        if (!analyze) return;
+        analyze.addEventListener("click", sgAnalyze);
+        sgEl("suggest-last-btn").addEventListener("click", sgEnterLast);
+        sgEl("suggest-picture-btn").addEventListener("click", function () {
+            if (!sgEl("suggest-picture-btn").disabled) sgEnterPicture();
+        });
+    }
+
     function initTokens() {
         var refresh = document.getElementById("tokens-refresh");
         if (refresh) refresh.addEventListener("click", tokensLoad);
@@ -3681,6 +4058,7 @@
         initWorkflow();
         initLsearch();
         initTokens();
+        initSuggest();
         initExtensions();
         initProjectWorkflows();
         initProjectWorkflowEditor();

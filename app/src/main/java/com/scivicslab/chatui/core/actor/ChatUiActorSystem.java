@@ -1138,9 +1138,11 @@ public class ChatUiActorSystem implements ConversationControls {
      * @param frame         the newest generation's work frame; empty (never {@code null}) when none was recorded yet
      * @param finishedTurn  the number of the last finished turn
      * @param questions     the fixed questions
+     * @param progress      where the update under way stands ({@code IDLE} when none, or when the actor does not answer)
      */
     public record SuggestFrameRead(Kind kind, com.scivicslab.chatui.suggestprompt.SuggestFrame frame, int finishedTurn,
-                                   java.util.List<com.scivicslab.chatui.suggestprompt.SuggestQuestion> questions) {
+                                   java.util.List<com.scivicslab.chatui.suggestprompt.SuggestQuestion> questions,
+                                   com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper.Progress progress) {
         public enum Kind { DONE, UNKNOWN_CHAT, NO_REPOSITORY }
     }
 
@@ -1148,17 +1150,33 @@ public class ChatUiActorSystem implements ConversationControls {
     public SuggestFrameRead suggestFrame(String projectId, String chatId) {
         String conversation = chatActorName(projectId, chatId);
         if (!chats.containsKey(conversation)) {
-            return new SuggestFrameRead(SuggestFrameRead.Kind.UNKNOWN_CHAT, null, 0, java.util.List.of());
+            return new SuggestFrameRead(SuggestFrameRead.Kind.UNKNOWN_CHAT, null, 0, java.util.List.of(), IDLE_PROGRESS);
         }
         if (suggestRepository == null) {
-            return new SuggestFrameRead(SuggestFrameRead.Kind.NO_REPOSITORY, null, 0, java.util.List.of());
+            return new SuggestFrameRead(SuggestFrameRead.Kind.NO_REPOSITORY, null, 0, java.util.List.of(), IDLE_PROGRESS);
         }
         com.scivicslab.chatui.suggestprompt.SuggestFrame frame = suggestRepository.loadCurrent(conversation)
                 .orElseGet(() -> com.scivicslab.chatui.suggestprompt.SuggestFrame.empty(conversation, 1,
                         suggestRoleOf(projectId, chatId)));
         ChatSessionIIAR session = chatSessions.get(conversation);
         int finished = session == null ? 0 : session.finishedTurnDirect();
-        return new SuggestFrameRead(SuggestFrameRead.Kind.DONE, frame, finished, suggestRepository.questions());
+        return new SuggestFrameRead(SuggestFrameRead.Kind.DONE, frame, finished, suggestRepository.questions(),
+                suggestProgress(conversation));
+    }
+
+    private static final com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper.Progress IDLE_PROGRESS =
+            com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper.Progress.IDLE;
+
+    /** The update the conversation's Suggest prompt actor has under way, whatever started it; idle if it does not answer. */
+    private com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper.Progress suggestProgress(String conversation) {
+        ActorRef<com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper> keeper = actorSystem.getActor(conversation + ".suggestprompt");
+        if (keeper == null) return IDLE_PROGRESS;
+        try {
+            return keeper.ask(com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper::progress).get(2, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.FINE, "The update state of " + conversation + " could not be read", e);
+            return IDLE_PROGRESS;
+        }
     }
 
     /**
