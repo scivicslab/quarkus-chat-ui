@@ -93,17 +93,19 @@ public final class ConversationToolCatalog {
                 with ask_chat or ask_person). So once you have sent your instructions, end your turn; do not poll
                 get_chat_log or get_chat_status for the reply, since it cannot arrive while your turn goes on.
                 Several replies come one per turn.
-                "noThink" (default false): true asks the receiver to answer this one request without thinking,
-                faster and cheaper for a short question or status report.
+                Declare thinking every time with "think" (boolean): true asks the receiver to think before it answers
+                this one request, for a hard question; false, or leaving "think" out, asks it to answer without
+                thinking, faster and cheaper for a short question or status report. The receiver's own setting does
+                not apply.
                 """,
                 List.of(
                     new ToolParameter("chatId", "string", true, ""),
                     new ToolParameter("prompt", "string", true, ""),
                     new ToolParameter("node", "string", false, ""),
-                    new ToolParameter("noThink", "boolean", false, "")),
+                    new ToolParameter("think", "boolean", false, "")),
                 true);
         add(m, "ask_chat_urgent", """
-                as ask_chat (same chatId, node and noThink): a conversation of this instance takes no node
+                as ask_chat (same chatId, node and think: declare it every time; leaving it out means no think): a conversation of this instance takes no node
                 ("project1/chat-01"); to find the node name of another instance, call list_running_tools first.
                 The request goes into the other conversation's queue ahead of every waiting message that is not
                 urgent, and its reply comes back to you the same way. It does not interrupt a turn the other
@@ -116,7 +118,7 @@ public final class ConversationToolCatalog {
                     new ToolParameter("chatId", "string", true, ""),
                     new ToolParameter("prompt", "string", true, ""),
                     new ToolParameter("node", "string", false, ""),
-                    new ToolParameter("noThink", "boolean", false, "")),
+                    new ToolParameter("think", "boolean", false, "")),
                 true);
         add(m, "cancel_request", """
                 take back a request you sent with ask_chat or ask_chat_urgent while it still waits in the other

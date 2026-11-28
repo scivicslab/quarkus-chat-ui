@@ -1356,8 +1356,10 @@ public class ChatSession extends Interpreter {
         this.turnDone = done;
         // Either side may ask for it: the conversation's own setting, or this one prompt. A message typed on the screen
         // is the exception: its Send and Send (Think mode) buttons answer the question for that one message, so the
-        // conversation's setting, which a workflow may have set, does not apply to it.
-        this.turnNoThink = SCREEN_SOURCE.equals(source) ? noThink : (noThink || isNoThink());
+        // conversation's setting, which a workflow may have set, does not apply to it. Nor does it apply to a request
+        // from another conversation: the asker declares thinking each time (ThinkingAndEffortAreConversationSettings_260917_oo01).
+        this.turnNoThink = SCREEN_SOURCE.equals(source) || (source != null && source.startsWith(ASK_CHAT_SOURCE_PREFIX))
+                ? noThink : (noThink || isNoThink());
         this.turnStartedAt = clock.getAsLong();
         publishStatus();
         if (byDefinition()) handSystemMessage();
@@ -1982,7 +1984,7 @@ public class ChatSession extends Interpreter {
                 String requestId = nextRequestId();
                 String sent = AskChatTool.send(system, projectId, chatId, superior,
                         "[question from " + myChatName() + ", asked with ask_person while no request was waiting"
-                                + " for its answer]\n" + finalAnswer, requestId);
+                                + " for its answer]\n" + finalAnswer, requestId, false);
                 logToConversationSquad(sent.startsWith("sent to ") ? "INFO" : "WARNING",
                         "ask_person: the question went to the superior chat-" + superior + ": " + sent);
                 if (sent.startsWith("sent to ")) {
@@ -3921,8 +3923,8 @@ public class ChatSession extends Interpreter {
                 String requestId = nextRequestId();
                 String node = extractInput(args, "node").strip();
                 boolean urgentAsk = "ask_chat_urgent".equals(tc.name());
-                // Absent or false leaves the thinking to the receiving conversation's own setting.
-                boolean askNoThink = extractBoolean(args, "noThink");
+                // The asker declares thinking each time: think, else the older noThink; neither is no think.
+                boolean askNoThink = declaredNoThink(args);
                 // A conversation of another chat-ui instance (ConversationSquadsAcrossInstances_261115_oo01); the
                 // timekeeper names it with its node, so its watch reads that instance, not one of this name here.
                 String sent = !node.isEmpty()
@@ -3962,12 +3964,12 @@ public class ChatSession extends Interpreter {
         };
     }
 
-    /** Reads one boolean field of a tool call's JSON arguments; absent or unreadable is {@code false}. */
-    private static boolean extractBoolean(String argumentsJson, String field) {
+    /** What the arguments of an ask_chat call declare about thinking, as a no-think flag; unreadable declares no think. */
+    static boolean declaredNoThink(String argumentsJson) {
         try {
-            return new org.json.JSONObject(argumentsJson == null ? "{}" : argumentsJson).optBoolean(field, false);
+            return AskChatTool.declaredNoThink(new org.json.JSONObject(argumentsJson == null ? "{}" : argumentsJson));
         } catch (Exception e) {
-            return false;
+            return true;
         }
     }
 
@@ -4330,9 +4332,10 @@ public class ChatSession extends Interpreter {
      * Sets whether this conversation asks its model to skip the thinking phase
      * ({@code ThinkingAndEffortAreConversationSettings_260917_oo01}).
      *
-     * <p>A workflow cannot pass the flag with each prompt -- {@code ask_chat} carries a prompt and
-     * nothing else -- so a run that wants a model to answer without reasoning says so here, once,
-     * the way it says which model to run on.</p>
+     * <p>The setting does not apply to a message typed on the screen, nor to a request that arrived by
+     * {@code ask_chat}: the asker declares {@code think} with each request, and no declaration means no think.
+     * It applies to the other sources, a workflow's prompts among them, so a run that wants a model to answer
+     * without reasoning says so here, once, the way it says which model to run on.</p>
      */
     public void setNoThink(boolean value) {
         settings.ask(s -> s.noThink = value).join();

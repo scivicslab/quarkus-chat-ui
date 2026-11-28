@@ -78,6 +78,41 @@ class QueueSurvivesRestartTest {
         }
     }
 
+    private static void holdAsked(ActorRef<PromptQueue> queue, ChatSessionIIAR chat, String text, boolean noThink) throws Exception {
+        queue.tell(q -> q.enqueue(text, null, "queue", e -> { }, chat.asChatSessionRef(),
+                ChatSession.ASK_CHAT_SOURCE_PREFIX + "project1/chat-01", null, new CompletableFuture<>(), noThink, false,
+                List.of())).get(5, TimeUnit.SECONDS);
+    }
+
+    /** A request's declaration of thinking is saved with it and read back unchanged; an older record is still read. */
+    @Test
+    void theDeclarationOfThinkingSurvivesARestartAndAnOlderRecordIsStillRead(@TempDir Path dir) throws Exception {
+        try (SystemsOnOneLog systems = new SystemsOnOneLog(dir.resolve("declared"))) {
+            ChatUiActorSystem first = systems.start();
+            assertEquals("02", first.createChat("project1"));
+            ActorRef<PromptQueue> queue = first.getPromptQueue("project1", "02");
+            ChatSessionIIAR chat = first.getChatSession("project1", "02");
+            holdAsked(queue, chat, "think about it", false);
+            holdAsked(queue, chat, "just answer", true);
+            // Records as the earlier code wrote them: only noThink; and an ask_chat request that left it out.
+            SessionEntries entries = SessionEntries.ofConversation(systems.log, IoLogView.over(systems.log), "project1/chat-02");
+            String asked = ChatSession.ASK_CHAT_SOURCE_PREFIX + "project1/chat-01";
+            entries.write(PromptQueue.QUEUE_LABEL, new org.json.JSONObject().put("event", "enqueued").put("id", "old-1")
+                    .put("prompt", "old thinking").put("source", asked).put("urgent", false).put("auto", false)
+                    .put("noThink", false).toString());
+            entries.write(PromptQueue.QUEUE_LABEL, new org.json.JSONObject().put("event", "enqueued").put("id", "old-2")
+                    .put("prompt", "old silent").put("source", asked).put("urgent", false).put("auto", false).toString());
+            assertEquals(List.of(false, true), queue.ask(PromptQueue::waitingNoThink).get(5, TimeUnit.SECONDS));
+
+            ChatUiActorSystem second = systems.start();
+            ActorRef<PromptQueue> back = second.getPromptQueue("project1", "02");
+            assertEquals(List.of("think about it", "just answer", "old thinking", "old silent"),
+                    back.ask(PromptQueue::snapshot).get(5, TimeUnit.SECONDS).stream().map(PromptQueue.QueueEntry::prompt).toList());
+            assertEquals(List.of(false, true, false, true), back.ask(PromptQueue::waitingNoThink).get(5, TimeUnit.SECONDS),
+                    "the declaration came back as it was saved; no record of it means no think");
+        }
+    }
+
     /** Says one scripted thing per prompt, the last one again once the script runs out. */
     private static class Scripted implements LlmProvider {
         final List<String> prompts = new java.util.concurrent.CopyOnWriteArrayList<>();

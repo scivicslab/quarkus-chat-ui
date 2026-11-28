@@ -72,14 +72,16 @@ public final class AskChatTool {
      */
     public static String send(IIActorSystem system, String myProjectId, String myChatId,
                               String target, String prompt, String requestId) {
-        return send(system, myProjectId, myChatId, target, prompt, requestId, false, false);
+        return send(system, myProjectId, myChatId, target, prompt, requestId, false, true);
     }
 
     /**
      * As {@link #send(IIActorSystem, String, String, String, String, String)}, with the choice of thinking.
      *
-     * @param noThink {@code true} if the receiving conversation is to answer this request without thinking;
-     *                {@code false} leaves it to that conversation's own setting
+     * @param noThink {@code true} if the receiving conversation is to answer this request without thinking,
+     *                {@code false} if it is to think; the receiver's own setting does not apply
+     *                ({@code ThinkingAndEffortAreConversationSettings_260917_oo01}). The forms without this
+     *                argument declare no think
      */
     public static String send(IIActorSystem system, String myProjectId, String myChatId,
                               String target, String prompt, String requestId, boolean noThink) {
@@ -95,7 +97,7 @@ public final class AskChatTool {
      */
     public static String sendUrgent(IIActorSystem system, String myProjectId, String myChatId,
                                     String target, String prompt, String requestId) {
-        return send(system, myProjectId, myChatId, target, prompt, requestId, true, false);
+        return send(system, myProjectId, myChatId, target, prompt, requestId, true, true);
     }
 
     /** As {@link #sendUrgent(IIActorSystem, String, String, String, String, String)}, with the choice of thinking. */
@@ -653,7 +655,8 @@ public final class AskChatTool {
         SENT.put(requestId, new Sent(myName, targetName, null, done, nodeName));
         JSONObject m = new JSONObject().put("requestId", requestId).put("sender", myName)
                 .put("senderNode", nodes.myName()).put("target", targetName).put("prompt", prompt).put("urgent", urgent);
-        if (noThink) m.put("noThink", true);
+        // Both keys, so an instance that reads only the old one still gets the declaration.
+        m.put("think", !noThink).put("noThink", noThink);
         Receipt receipt = nodes.send(nodeName, "enqueueRequest", m.toString());
         if (!receipt.accepted()) {
             SENT.remove(requestId);
@@ -745,6 +748,16 @@ public final class AskChatTool {
                 + ". Whether it was removed arrives as a new message: \"removed\" means no reply will come.";
     }
 
+    /**
+     * Reads what a request declares about thinking, as the {@code noThink} flag the queue and the turn carry:
+     * {@code think} wins, else the older {@code noThink} ({@code think = !noThink}); neither declares no think.
+     */
+    public static boolean declaredNoThink(JSONObject declaration) {
+        if (declaration.has("think")) return !declaration.optBoolean("think", false);
+        if (declaration.has("noThink")) return declaration.optBoolean("noThink", false);
+        return true;
+    }
+
     /** On the target's instance: a request from another instance goes into the target's queue. */
     public static ActionResult remoteRequestArrived(IIActorSystem local, RemoteNodes nodes, JSONObject m) {
         String requestId = m.getString("requestId");
@@ -752,7 +765,7 @@ public final class AskChatTool {
         String senderNode = m.getString("senderNode");
         String target = m.getString("target");
         boolean urgent = m.optBoolean("urgent", false);
-        boolean noThink = m.optBoolean("noThink", false);
+        boolean noThink = declaredNoThink(m);
         LOG.info("remote request " + requestId + " from " + sender + " on node " + senderNode + " for " + target);
         IIActorRef<?> targetActor = local.getIIActor(target + ".chat");
         ActorRef<PromptQueue> targetQueue = local.getActor(target + ".queue");

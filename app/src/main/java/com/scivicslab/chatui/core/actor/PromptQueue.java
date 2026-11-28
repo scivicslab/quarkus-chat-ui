@@ -137,7 +137,7 @@ public class PromptQueue {
             org.json.JSONArray saved = o.optJSONArray("images");
             for (int i = 0; saved != null && i < saved.length(); i++) images.add(saved.getString(i));
             QueueItem item = new QueueItem(o.optString("prompt", ""), o.isNull("model") ? null : o.optString("model", null),
-                    emitter, done, source, null, o.optBoolean("noThink", false), o.optBoolean("auto", true), images,
+                    emitter, done, source, null, restoredNoThink(o, source), o.optBoolean("auto", true), images,
                     requestId, urgent, o.optLong("queuedAt", System.currentTimeMillis()), o.getString("id"), link);
             place(item);
         }
@@ -151,6 +151,21 @@ public class PromptQueue {
             emitter.accept(ChatEvent.queueChanged());
             requestDispatch(chatSessionRef, false);
         }
+    }
+
+    /** For each waiting item in order, whether it will be sent to answer without thinking. */
+    List<Boolean> waitingNoThink() {
+        return queue.stream().map(QueueItem::noThink).toList();
+    }
+
+    /**
+     * What a saved item says about thinking. Every item writes {@code noThink}; an old record that has none was a
+     * request from another conversation that left it to the receiver, which now means no think.
+     */
+    private static boolean restoredNoThink(JSONObject o, String source) {
+        if (o.has("think")) return !o.optBoolean("think", false);
+        if (o.has("noThink")) return o.optBoolean("noThink", false);
+        return source != null && source.startsWith(ChatSession.ASK_CHAT_SOURCE_PREFIX);
     }
 
     /** Puts an item in its place: an urgent one ahead of every waiting item that is not urgent, any other at the end. */

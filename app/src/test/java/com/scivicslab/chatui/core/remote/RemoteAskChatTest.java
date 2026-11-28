@@ -44,6 +44,7 @@ class RemoteAskChatTest {
     /** Says one scripted thing per prompt, the last one repeating; optionally holds its first prompt. */
     private static final class Scripted implements LlmProvider {
         final List<String> prompts = new CopyOnWriteArrayList<>();
+        final List<Boolean> noThinks = new CopyOnWriteArrayList<>();
         final List<String> replies;
         final boolean hold;
         final CountDownLatch started = new CountDownLatch(1);
@@ -64,6 +65,7 @@ class RemoteAskChatTest {
         @Override
         public void sendPrompt(String prompt, String model, Consumer<ChatEvent> emitter, ProviderContext ctx) {
             prompts.add(prompt);
+            noThinks.add(ctx.noThink());
             if (hold && started.getCount() > 0) {
                 started.countDown();
                 try { release.await(30, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
@@ -164,6 +166,45 @@ class RemoteAskChatTest {
                         "conversation chat-01 of project project1 on node b, another chat-ui instance")),
                 "the tool named the instance, the project and the conversation: " + asker.prompts);
         waitUntil(() -> one.chat().outstandingChildrenDirect().isEmpty(), "the request closed on a");
+    }
+
+    /**
+     * The asker's declaration of thinking crosses to the other instance and decides there, whatever that conversation's
+     * own no-think setting is; a message in the older form (only noThink, or nothing) is read as well.
+     */
+    @Test
+    void theDeclarationOfThinkingCrossesToTheOtherInstanceAndTheReceiversSettingDoesNotApply() throws Exception {
+        IIActorSystem a = new IIActorSystem("instance-a-think");
+        IIActorSystem b = new IIActorSystem("instance-b-think");
+        squad(a, new Scripted(false, "ok"));
+        Scripted worker = new Scripted(false, "done");
+        Squad bOne = squad(b, worker);
+        bOne.chat().tellNow(x -> ((ChatSession) x).setNoThink(true)).join();
+        startNodes(a, b);
+
+        String[] ids = {"project1/chat-01:s1:t1:r1", "project1/chat-01:s1:t1:r2", "project1/chat-01:s1:t1:r3", "project1/chat-01:s1:t1:r4"};
+        // noThink false: the asker declared think, and b's own setting (no think) does not apply.
+        assertTrue(AskChatTool.sendRemote(a, "project1", "01", "b", "project1/chat-01", "declared think", ids[0], false, false)
+                .startsWith("sent"));
+        waitUntil(() -> worker.prompts.size() == 1, "the first request ran on b");
+        assertEquals(List.of(false), worker.noThinks, "think declared");
+        assertTrue(AskChatTool.sendRemote(a, "project1", "01", "b", "project1/chat-01", "declared no think", ids[1], false, true)
+                .startsWith("sent"));
+        waitUntil(() -> worker.prompts.size() == 2, "the second request ran on b");
+        assertEquals(List.of(false, true), worker.noThinks, "no think declared");
+
+        // The receiving side alone, with messages as an older sender wrote them.
+        for (int n = 0; n < 2; n++) {
+            org.json.JSONObject older = new org.json.JSONObject().put("requestId", ids[2 + n]).put("sender", "project1/chat-01")
+                    .put("senderNode", "a").put("target", "project1/chat-01").put("prompt", n == 0 ? "old think" : "old none")
+                    .put("urgent", false);
+            if (n == 0) older.put("noThink", false);
+            assertTrue(AskChatTool.remoteRequestArrived(b, remoteB, older).isSuccess());
+            int expected = 3 + n;
+            waitUntil(() -> worker.prompts.size() == expected, "the older-form request ran on b");
+        }
+        assertEquals(List.of(false, true, false, true), worker.noThinks,
+                "an older noThink:false thinks; no declaration means no think");
     }
 
     /**
