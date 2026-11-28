@@ -160,7 +160,7 @@
                                 <button id="cancel-btn" title="Cancel" disabled>Cancel</button>
                                 <!-- A button cannot hold a control, so the checkbox sits over the button's right end inside one box. -->
                                 <span id="send-group"><button id="send-btn" title="Send (Shift+Enter). With the box ticked the message is sent with thinking on, otherwise the model is asked not to think. Ctrl+Shift+Enter sends this one message with thinking on whatever the box says (local LLM only; Claude Code and Codex think as their effort says).">Send</button><input id="send-think-check" type="checkbox"></span>
-                                <button id="predict-btn" title="Predict long follow-up prompts you may want to type next, from what the assistant last asked. Choosing one puts it in the input box; nothing is sent.">Predict prompt</button>
+                                <button id="predict-btn" title="Suggest long follow-up prompts you may want to type next, from what the assistant last asked. Choosing one puts it in the input box; nothing is sent.">Suggest prompt</button>
                             </div>
                         </div>
                     </div>
@@ -598,11 +598,11 @@
             <div id="ext-dialog-body"></div>
         </div>
     </div>
-    <!-- Predict prompt: pick an offered choice, then a predicted follow-up; choosing one fills the input -->
+    <!-- Suggest prompt: pick an offered choice, then a suggested follow-up; choosing one fills the input -->
     <div id="predict-overlay" style="display:none">
         <div id="predict-dialog">
             <div id="predict-dialog-header">
-                <span id="predict-dialog-title">Predict prompt</span>
+                <span id="predict-dialog-title">Suggest prompt</span>
                 <button id="predict-dialog-close" title="Close (Escape)">&#x00D7;</button>
             </div>
             <div id="predict-dialog-body"></div>
