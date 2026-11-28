@@ -64,6 +64,9 @@ class ToolCatalogTest {
             Map.entry("list_queue", List.of(List.of("chatId"), List.of("chatId"))),
             Map.entry("remove_queued_message", List.of(List.of("chatId", "entryId"), List.of("chatId", "entryId"))),
             Map.entry("move_queued_message_to_front", List.of(List.of("chatId", "entryId"), List.of("chatId", "entryId"))),
+            // Added with SearchChatLogsThenReadAround_261128_oo01.
+            Map.entry("search_own_log", List.of(List.of("query", "since", "until", "limit"), List.of("query"))),
+            Map.entry("read_own_log", List.of(List.of("logId", "count"), List.of("logId"))),
             // Added after a local model's calls to a tool the catalog lacked came back as text (2026-11-25).
             Map.entry("edit", List.of(List.of("path", "old_string", "new_string", "replace_all"), List.of("path", "old_string", "new_string"))));
 
@@ -95,6 +98,21 @@ class ToolCatalogTest {
         ConversationToolCatalog.builtInTools().forEach((name, spec) ->
                 assertEquals(DRIVING.contains(name), spec.drivesConversation(), name));
         assertEquals(DRIVING, Set.copyOf(ConversationToolCatalog.conversationDrivingTools()));
+    }
+
+    @Test
+    void ownLogToolDescriptionsTellTheRealBehaviour() {
+        var tools = ConversationToolCatalog.builtInTools();
+        String search = tools.get("search_own_log").description();
+        assertTrue(search.contains("questions this conversation received and the answers it gave"), search);
+        assertTrue(search.contains("tool calls and model requests are not"), search);
+        String read = tools.get("read_own_log").description();
+        assertTrue(read.contains("cut at 4,000 characters"), read);
+        assertEquals(4000, OwnLogTools.MAX_ENTRY_CHARS);
+        assertTrue(read.contains("[cut: 4000 of 182,345 characters]"), read);
+        tools.forEach((name, spec) -> {
+            if (name.endsWith("_own_log")) spec.parameters().forEach(p -> assertFalse(p.description().isBlank(), name + "." + p.name()));
+        });
     }
 
     @Test

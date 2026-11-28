@@ -8,6 +8,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Level;
@@ -40,8 +41,19 @@ public class IoLogSearch {
     /** What {@link IoLogStore} prefixes a ConversationSquad's name with to name its session. */
     private static final String CONVERSATION_PREFIX = "chat-ui-conversation-";
 
+    /** The longest snippet {@link #searchConversation} returns ({@code SearchChatLogsThenReadAround_261128_oo01}). */
+    static final int OWN_SNIPPET_CHARS = 300;
+
     @Inject
     IoLogStore ioLog;
+
+    /** For CDI. */
+    public IoLogSearch() {}
+
+    /** @param ioLog the store to read, for a caller that is not a CDI bean (a tool run for one conversation) */
+    public IoLogSearch(IoLogStore ioLog) {
+        this.ioLog = ioLog;
+    }
 
     /**
      * One matching entry.
@@ -149,6 +161,74 @@ public class IoLogSearch {
             return new Result(List.of(), false, String.valueOf(e.getMessage()));
         }
         return new Result(List.copyOf(hits), limited, "");
+    }
+
+    /**
+     * Finds the entries of one conversation whose text contains {@code query}
+     * ({@code SearchChatLogsThenReadAround_261128_oo01}). Every session the conversation's name was recorded under is
+     * searched, ended ones ({@code /clear}) included; no other conversation's entry can match. Only the question and
+     * answer entries ({@code turnN/question} and {@code turnN/conversation}) are searched: LLM request rows, tool rows and
+     * other bulky rows are never hit, because a request row repeats the whole history.
+     *
+     * @param conversation the ConversationSquad's name, e.g. {@code project1/chat-01}
+     * @param query        what to look for; blank finds nothing rather than everything
+     * @param since        only entries recorded at or after this time, or {@code null} for no lower bound
+     * @param until        only entries recorded at or before this time, or {@code null} for no upper bound
+     * @param limit        how many entries to return at most; at least 1
+     * @return the matching entries, newest first, each snippet at most {@value #OWN_SNIPPET_CHARS} characters
+     */
+    public Result searchConversation(String conversation, String query, LocalDateTime since, LocalDateTime until, int limit) {
+        if (query == null || query.isBlank() || conversation == null || conversation.isBlank() || limit < 1) {
+            return new Result(List.of(), false, "");
+        }
+        // One row over the limit, so that "there are more" is known without counting every match.
+        String sql = """
+                SELECT l.id, l.session_id, l.timestamp, l.node_id, l.label, l.message, s.workflow_name
+                FROM logs l JOIN sessions s ON s.id = l.session_id
+                WHERE s.workflow_name = ? AND LOWER(l.message) LIKE ?
+                  AND REGEXP_LIKE(l.label, '^turn[0-9]+/(question|conversation)$')
+                """ + (since == null ? "" : "  AND l.timestamp >= ?\n") + (until == null ? "" : "  AND l.timestamp <= ?\n") + """
+                ORDER BY l.timestamp DESC, l.id DESC
+                LIMIT ?
+                """;
+        List<Hit> hits = new ArrayList<>();
+        boolean limited = false;
+        try (Connection c = open();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            int i = 1;
+            ps.setString(i++, CONVERSATION_PREFIX + conversation);
+            ps.setString(i++, "%" + query.toLowerCase() + "%");
+            if (since != null) ps.setTimestamp(i++, Timestamp.valueOf(since));
+            if (until != null) ps.setTimestamp(i++, Timestamp.valueOf(until));
+            ps.setInt(i, limit + 1);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    if (hits.size() == limit) {
+                        limited = true;
+                        break;
+                    }
+                    String label = nz(rs.getString("label"));
+                    hits.add(new Hit(
+                            rs.getLong("id"),
+                            rs.getLong("session_id"),
+                            text(rs.getTimestamp("timestamp")),
+                            conversationOf(rs.getString("workflow_name")),
+                            nz(rs.getString("node_id")),
+                            label,
+                            turnOf(label),
+                            capped(snippet(rs.getString("message"), query), OWN_SNIPPET_CHARS)));
+                }
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "I/O log search of one conversation failed", e);
+            return new Result(List.of(), false, String.valueOf(e.getMessage()));
+        }
+        return new Result(List.copyOf(hits), limited, "");
+    }
+
+    /** @return {@code text}, cut to {@code max} characters with an ellipsis when it was longer */
+    static String capped(String text, int max) {
+        return text.length() <= max ? text : text.substring(0, max - 1) + "…";
     }
 
     /**

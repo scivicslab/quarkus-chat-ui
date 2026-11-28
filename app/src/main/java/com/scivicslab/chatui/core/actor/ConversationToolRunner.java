@@ -269,6 +269,10 @@ public final class ConversationToolRunner implements ToolCallRecorder {
                 case "delete_chat" -> DeleteChatTool.delete(controls, projectId, conversationName(), input(args, "chatId"));
                 case "get_chat_log" -> GetChatLogTool.get(controls, projectId,
                         input(args, "chatId"), parseIntOrNull(input(args, "count")));
+                case "search_own_log" -> new com.scivicslab.chatui.agent.OwnLogTools(ioLog, conversationName())
+                        .search(input(args, "query"), input(args, "since"), input(args, "until"), input(args, "limit"));
+                case "read_own_log" -> new com.scivicslab.chatui.agent.OwnLogTools(ioLog, conversationName())
+                        .read(input(args, "logId"), input(args, "count"));
                 case "get_request_messages" -> RequestMessagesTools.get(system, projectId, input(args, "chatId"));
                 case "set_request_messages" -> RequestMessagesTools.set(system, projectId,
                         input(args, "chatId"), input(args, "messages"));
