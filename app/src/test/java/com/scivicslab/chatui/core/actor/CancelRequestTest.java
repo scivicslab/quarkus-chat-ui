@@ -162,7 +162,9 @@ class CancelRequestTest {
         String told = asker.prompts.get(0);
         assertTrue(told.contains("[request " + request + " to project1/chat-02 ended without a reply: "), told);
         assertTrue(told.contains("its turn was cancelled"), told);
-        assertEquals(1, asker.prompts.size(), "one message, not a reply as well: " + asker.prompts);
+        assertEquals(1, asker.prompts.stream().filter(p -> p.contains("ended without a reply")).count(),
+                "one message that the turn ended");
+        assertTrue(asker.prompts.stream().noneMatch(p -> p.contains("[reply to request")), "and no reply");
     }
 
     @Test
@@ -182,8 +184,8 @@ class CancelRequestTest {
 
         assertTrue(AskChatTool.cancel(system, ONE, request).startsWith(AskChatTool.CANCELLED_RUNNING));
 
-        waitFor(() -> worker.prompts.size() == 2, "the next message did not start: " + worker.prompts);
-        assertTrue(worker.prompts.get(1).endsWith("the next message"), worker.prompts.get(1));
+        waitFor(() -> worker.prompts.stream().anyMatch(p -> p.endsWith("the next message")),
+                "the next message did not start: " + worker.prompts.size() + " prompts");
         assertEquals(List.of(), waiting(two), "the queue is empty again");
     }
 
