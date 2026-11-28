@@ -156,7 +156,7 @@ class CancelRequestTest {
         String result = AskChatTool.cancel(system, ONE, request);
         assertTrue(result.startsWith(AskChatTool.CANCELLED_RUNNING), result);
         assertTrue(result.contains("ended without a reply"), "the result says whether a reply still comes: " + result);
-        assertEquals(1, worker.cancelCalls.get(), "the provider of the running turn was told to cancel");
+        waitFor(() -> worker.cancelCalls.get() == 1, "the provider of the running turn was told to cancel");
 
         waitFor(() -> !asker.prompts.isEmpty(), "the sender was not told the turn ended");
         String told = asker.prompts.get(0);
@@ -247,7 +247,7 @@ class CancelRequestTest {
 
         assertTrue(three.started.await(10, TimeUnit.SECONDS), "chat-03 did not start the side job");
         waitFor(() -> two.prompts.size() >= 3, "chat-02 did not get the result of the tool: " + two.prompts);
-        assertEquals(1, three.cancelCalls.get(), "the cancel tool stopped chat-03's running turn");
+        waitFor(() -> three.cancelCalls.get() == 1, "the cancel tool stopped chat-03's running turn");
         assertTrue(two.prompts.get(2).contains(AskChatTool.CANCELLED_RUNNING), two.prompts.get(2));
         waitFor(() -> !one.prompts.isEmpty(), "chat-01 never got its reply: " + two.prompts);
         assertTrue(one.prompts.get(0).contains("final report"), one.prompts.get(0));
