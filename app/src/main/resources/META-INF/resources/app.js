@@ -918,6 +918,131 @@
         return text;
     }
 
+    // The Predict prompt button. Stage 1 asks the server what the assistant's last message asks and which
+    // choices it offers; with choices the person picks one (radio) and presses Next, without them the
+    // dialog goes straight on. Stage 2 lists four to six long follow-up instructions predicted on that
+    // decision; choosing one puts it in the input box, led by "Go with X. " when a choice was made. It
+    // replaces what is in the box, as the queue's Edit button does, and never sends. A reply that arrives
+    // after the dialog was closed is dropped.
+    function initPredictPrompt() {
+        var btn = el("predict-btn");
+        var overlay = el("predict-overlay");
+        var body = el("predict-dialog-body");
+        var closeBtn = el("predict-dialog-close");
+        if (!btn || !overlay || !body) return;
+        var ticket = 0;
+
+        function close() { ticket++; overlay.style.display = "none"; }
+        function show(cls, text) {
+            body.textContent = "";
+            var d = document.createElement("div");
+            d.className = cls;
+            d.textContent = text;
+            body.appendChild(d);
+        }
+        function fail(why) { show("pp-error", "Could not predict prompts: " + why); }
+        function post(path, payload) {
+            var opts = { method: "POST" };
+            if (payload) {
+                opts.headers = { "Content-Type": "application/json" };
+                opts.body = JSON.stringify(payload);
+            }
+            return fetch(apiUrl(chatUrl(path)), opts).then(function (r) {
+                return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
+            });
+        }
+        function choose(head, text) {
+            promptInput.value = head + text;
+            if (typeof autoResize === "function") autoResize();
+            close();
+            promptInput.focus();
+        }
+
+        // Stage 2: the follow-ups on the decision made (choice is null when the question had no choices).
+        function followups(question, choice) {
+            var mine = ++ticket;
+            show("pp-status", "Predicting what you may say next…");
+            post("/predict-followups", { question: question, choice: choice })
+                .then(function (res) {
+                    if (mine !== ticket) return;
+                    var prompts = res.j && res.j.prompts;
+                    if (!res.ok || !Array.isArray(prompts) || prompts.length === 0) {
+                        fail((res.j && res.j.message) || "no prompts came back");
+                        return;
+                    }
+                    var head = (res.j && res.j.head) || "";
+                    body.textContent = "";
+                    if (question) {
+                        var q = document.createElement("div");
+                        q.className = "pp-question";
+                        q.textContent = (choice ? "Go with " + choice.id + " — " : "") + question;
+                        body.appendChild(q);
+                    }
+                    prompts.forEach(function (p) {
+                        var item = document.createElement("button");
+                        item.className = "pp-item";
+                        item.textContent = head + p;
+                        item.addEventListener("click", function () { choose(head, p); });
+                        body.appendChild(item);
+                    });
+                })
+                .catch(function (e) { if (mine === ticket) fail(e.message); });
+        }
+
+        // Stage 1 result with choices: pick one, then Next.
+        function pickChoice(question, choices) {
+            body.textContent = "";
+            var q = document.createElement("div");
+            q.className = "pp-question";
+            q.textContent = question;
+            body.appendChild(q);
+            var picked = null;
+            var next = document.createElement("button");
+            next.className = "pp-next";
+            next.textContent = "Next";
+            next.disabled = true;
+            choices.forEach(function (c) {
+                var row = document.createElement("label");
+                row.className = "pp-choice";
+                var radio = document.createElement("input");
+                radio.type = "radio";
+                radio.name = "pp-choice";
+                radio.addEventListener("change", function () { picked = c; next.disabled = false; });
+                var span = document.createElement("span");
+                span.textContent = c.id + ". " + c.text;
+                row.appendChild(radio);
+                row.appendChild(span);
+                body.appendChild(row);
+            });
+            next.addEventListener("click", function () { if (picked) followups(question, picked); });
+            body.appendChild(next);
+        }
+
+        btn.addEventListener("click", function () {
+            var mine = ++ticket;
+            overlay.style.display = "flex";
+            show("pp-status", "Reading the assistant's last message…");
+            post("/predict-question")
+                .then(function (res) {
+                    if (mine !== ticket) return;
+                    var question = res.j && res.j.question;
+                    if (!res.ok || typeof question !== "string" || !question) {
+                        fail((res.j && res.j.message) || "the question could not be read");
+                        return;
+                    }
+                    var choices = Array.isArray(res.j.choices) ? res.j.choices : [];
+                    if (choices.length >= 2) pickChoice(question, choices);
+                    else followups(question, null);
+                })
+                .catch(function (e) { if (mine === ticket) fail(e.message); });
+        });
+        if (closeBtn) closeBtn.addEventListener("click", close);
+        overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+        document.addEventListener("keydown", function (e) {
+            if (e.key === "Escape" && overlay.style.display !== "none") close();
+        });
+    }
+
     function queueEditButton(item) {
         var editBtn = document.createElement("button");
         editBtn.className = "queue-edit";
@@ -1874,6 +1999,7 @@
         if (sendBtn) sendBtn.addEventListener("click", function () { sendPrompt(false); });
         var sendThinkBtn = el("send-think-btn");
         if (sendThinkBtn) sendThinkBtn.addEventListener("click", function () { sendPrompt(true); });
+        initPredictPrompt();
         if (promptInput) {
             promptInput.addEventListener("keydown", function (e) {
                 if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); sendPrompt(false); return; }

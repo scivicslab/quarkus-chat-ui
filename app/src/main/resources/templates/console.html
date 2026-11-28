@@ -160,6 +160,7 @@
                                 <button id="cancel-btn" title="Cancel" disabled>Cancel</button>
                                 <button id="send-btn" title="Send (Shift+Enter). The model is asked not to think.">Send</button>
                                 <button id="send-think-btn" title="Send this one message with thinking on. Only a local LLM takes a thinking switch; Claude Code and Codex think as their effort says.">Send (Think mode)</button>
+                                <button id="predict-btn" title="Predict long follow-up prompts you may want to type next, from what the assistant last asked. Choosing one puts it in the input box; nothing is sent.">Predict prompt</button>
                             </div>
                         </div>
                     </div>
@@ -595,6 +596,16 @@
                 <button id="ext-dialog-close" title="Close">&#x00D7;</button>
             </div>
             <div id="ext-dialog-body"></div>
+        </div>
+    </div>
+    <!-- Predict prompt: pick an offered choice, then a predicted follow-up; choosing one fills the input -->
+    <div id="predict-overlay" style="display:none">
+        <div id="predict-dialog">
+            <div id="predict-dialog-header">
+                <span id="predict-dialog-title">Predict prompt</span>
+                <button id="predict-dialog-close" title="Close (Escape)">&#x00D7;</button>
+            </div>
+            <div id="predict-dialog-body"></div>
         </div>
     </div>
     <script src="app.js?v={assetVersion}"></script>

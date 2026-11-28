@@ -43,6 +43,8 @@ import java.util.regex.Pattern;
  * what was read (McpServerCheck, OpenAiCompatStandardToolCalling_261120_oo01).</li>
  * <li>A revision request from html-saurus's Revise panel ({@code Review lines ...}): one proposal in the JSON form the
  * panel reads, quoting the first twelve characters of the text (RevisionPanel_261120_oo01).</li>
+ * <li>A prediction request from the Predict prompt button: six prompts {@code PREDICT-ONE} to {@code PREDICT-SIX} in a
+ * fenced JSON array, or a sentence that is no list when the conversation holds {@code PREDICT-BAD} (PredictPromptCheck).</li>
  * <li>Anything else: "OK. I will report back in 12 minutes."</li>
  * </ul>
  * When the request carries {@code tools}, as the openai-compat provider sends them, a scripted call is sent as
@@ -246,6 +248,31 @@ public class ScriptedModelServer {
             Thread.sleep(3_600_000);   // the long turn
             return "finished";
         }
+        // Predict prompt (PredictPromptCheck): stage 2 asks for follow-ups, stage 1 asks what the last message asks
+        if (last.contains("different instructions the person is likely to give next")) {
+            if (last.contains("PQ-BADFOLLOW")) return "Sorry, I cannot predict that.";
+            boolean decided = last.contains("The person has decided: B");
+            String lead = decided ? "On design B, " : "";
+            return "```json\n[\"" + lead + "PREDICT-ONE run the whole test suite and show me the failures grouped by cause, because I need to see them before merging.\", "
+                    + "\"" + lead + "PREDICT-TWO show the diff of every changed file and explain why each change was needed, as a short list.\", "
+                    + "\"" + lead + "PREDICT-THREE write a unit test for the empty-input case and keep it under twenty lines, because the file is already long.\", "
+                    + "\"" + lead + "PREDICT-FOUR commit the work on a new branch with a message that names the reason, and do not push it anywhere.\", "
+                    + "\"Yes.\"]\n```";
+        }
+        if (last.startsWith("Below is the last message an AI assistant wrote to a person.")) {
+            if (last.contains("PQ-BAD") && !last.contains("PQ-BADFOLLOW")) return "I am sorry, I cannot tell what it asks.";
+            if (last.contains("PQ-CHOICES")) {
+                return "{\"question\":\"Which design should be used?\",\"choices\":["
+                        + "{\"id\":\"A\",\"text\":\"Keep one actor for everything\"},"
+                        + "{\"id\":\"B\",\"text\":\"Split it into two actors\"},"
+                        + "{\"id\":\"C\",\"text\":\"Leave the design as it is\"}]}";
+            }
+            return "{\"question\":\"Should the work continue?\",\"choices\":[]}";
+        }
+        if (last.contains("ASK-CHOICES")) return "PQ-CHOICES There are three ways. A: keep one actor. B: split it into two actors. C: leave it. Which do you want?";
+        if (last.contains("ASK-OPEN")) return "PQ-OPEN The work is done so far. Should I continue?";
+        if (last.contains("ASK-BADFOLLOW")) return "PQ-BADFOLLOW Should I continue?";
+        if (last.contains("ASK-BAD")) return "PQ-BAD hmm.";
         if (last.contains("HELLO-ONLY")) return "Hello.";
         if (last.contains("SCENARIO-A")) return CALLS_A;
         if (last.contains("SCENARIO-G4")) return GRAPH_G4;

@@ -231,6 +231,66 @@ public class ChatResource {
                 "model", t.model() == null ? "" : t.model())).build();
     }
 
+    /**
+     * Stage 1 of "Predict prompt": what the assistant's last message asks, and its choices, read
+     * by the Local LLM Translate uses. Nothing is added to the conversation.
+     *
+     * @return {@code {"question", "choices": [{"id","text"}], "model"}}; 404 for no such conversation,
+     *         409 when it has no assistant message yet, 502 when the model gave no usable answer
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/predict-question")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response predictQuestion(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        ChatUiActorSystem.PromptPredictions p = actorSystem.predictQuestion(projectId, chatId);
+        if (p.kind() != ChatUiActorSystem.PromptPredictions.Kind.DONE) return predictionError(p);
+        java.util.List<Map<String, String>> choices = new java.util.ArrayList<>();
+        for (var c : p.question().choices()) choices.add(Map.of("id", c.id(), "text", c.text()));
+        return Response.ok(Map.of("question", p.question().question(), "choices", choices,
+                "model", p.model() == null ? "" : p.model())).build();
+    }
+
+    /**
+     * Stage 2 of "Predict prompt": four to six long follow-up instructions the person may give next.
+     * The body is {@code {"question": "...", "choice": {"id","text"} | null}}.
+     *
+     * @return {@code {"prompts": [4-6 strings], "head", "model"}}, where {@code head} is what the
+     *         chosen prompt starts with; 400 for a body without a question, 404, 409 and 502 as for
+     *         {@link #predictQuestion}
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/predict-followups")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response predictFollowups(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
+                                     Map<String, Object> body) {
+        Object q = body == null ? null : body.get("question");
+        if (!(q instanceof String question) || question.isBlank()) {
+            return Response.status(400).entity(Map.of("type", "error", "message", "question is required")).build();
+        }
+        com.scivicslab.chatui.promptprediction.PromptPrediction.Choice chosen = null;
+        if (body.get("choice") instanceof Map<?, ?> c && c.get("id") instanceof String id && !id.isBlank()
+                && c.get("text") instanceof String text) {
+            chosen = new com.scivicslab.chatui.promptprediction.PromptPrediction.Choice(id.strip(), text.strip());
+        }
+        ChatUiActorSystem.PromptPredictions p = actorSystem.predictFollowups(projectId, chatId,
+                new com.scivicslab.chatui.promptprediction.PromptPrediction.Question(question.strip(), java.util.List.of()), chosen);
+        if (p.kind() != ChatUiActorSystem.PromptPredictions.Kind.DONE) return predictionError(p);
+        return Response.ok(Map.of("prompts", p.prompts(),
+                "head", com.scivicslab.chatui.promptprediction.PromptPrediction.headFor(chosen),
+                "model", p.model() == null ? "" : p.model())).build();
+    }
+
+    private static Response predictionError(ChatUiActorSystem.PromptPredictions p) {
+        int status = switch (p.kind()) {
+            case DONE -> 200;
+            case UNKNOWN_CHAT -> 404;
+            case NO_HISTORY -> 409;
+            case NO_ANSWER, UNREADABLE -> 502;
+        };
+        return Response.status(status).entity(Map.of("type", "error", "message", p.reason())).build();
+    }
+
     private static final com.fasterxml.jackson.databind.ObjectMapper EVENT_JSON =
             new com.fasterxml.jackson.databind.ObjectMapper();
 
