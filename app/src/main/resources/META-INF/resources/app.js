@@ -961,17 +961,17 @@
         return text;
     }
 
-    // The Predict prompt button. Stage 1 asks the server what the assistant's last message asks and which
+    // The Suggest prompt button. Stage 1 asks the server what the assistant's last message asks and which
     // choices it offers; with choices the person picks one (radio) and presses Next, without them the
     // dialog goes straight on. Stage 2 lists four to six long follow-up instructions predicted on that
     // decision; choosing one puts it in the input box, led by "Go with X. " when a choice was made. It
     // replaces what is in the box, as the queue's Edit button does, and never sends. A reply that arrives
     // after the dialog was closed is dropped.
-    function initPredictPrompt() {
-        var btn = el("predict-btn");
-        var overlay = el("predict-overlay");
-        var body = el("predict-dialog-body");
-        var closeBtn = el("predict-dialog-close");
+    function initSuggestPrompt() {
+        var btn = el("suggest-btn");
+        var overlay = el("suggest-overlay");
+        var body = el("suggest-dialog-body");
+        var closeBtn = el("suggest-dialog-close");
         if (!btn || !overlay || !body) return;
         var ticket = 0;
 
@@ -1005,7 +1005,7 @@
         function followups(question, choice) {
             var mine = ++ticket;
             show("pp-status", "Predicting what you may say next…");
-            post("/predict-followups", { question: question, choice: choice })
+            post("/suggest-followups", { question: question, choice: choice })
                 .then(function (res) {
                     if (mine !== ticket) return;
                     var prompts = res.j && res.j.prompts;
@@ -1065,7 +1065,7 @@
             var mine = ++ticket;
             overlay.style.display = "flex";
             show("pp-status", "Reading the assistant's last message…");
-            post("/predict-question")
+            post("/suggest-question")
                 .then(function (res) {
                     if (mine !== ticket) return;
                     var question = res.j && res.j.question;
@@ -2042,7 +2042,7 @@
         applyViewMode();
 
         if (sendBtn) sendBtn.addEventListener("click", function () { sendPrompt(); });
-        initPredictPrompt();
+        initSuggestPrompt();
         if (promptInput) {
             promptInput.addEventListener("keydown", function (e) {
                 // Ctrl+Shift+Enter is judged first: it thinks whatever the box says. Shift+Enter follows the box.

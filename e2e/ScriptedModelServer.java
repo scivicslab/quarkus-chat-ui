@@ -44,8 +44,8 @@ import java.util.regex.Pattern;
  * <li>A revision request from html-saurus's Revise panel ({@code Review lines ...}): one proposal in the JSON form the
  * panel reads, quoting the first twelve characters of the text (RevisionPanel_261120_oo01).</li>
  * <li>{@code IMG-SHOW}: an answer that refers to nine pictures and carries raw html with event handlers by path and address (LocalImageCheck).</li>
- * <li>A prediction request from the Predict prompt button: six prompts {@code PREDICT-ONE} to {@code PREDICT-SIX} in a
- * fenced JSON array, or a sentence that is no list when the conversation holds {@code PREDICT-BAD} (PredictPromptCheck).</li>
+ * <li>A prediction request from the Suggest prompt button: six prompts {@code PREDICT-ONE} to {@code PREDICT-SIX} in a
+ * fenced JSON array, or a sentence that is no list when the conversation holds {@code PREDICT-BAD} (SuggestPromptCheck).</li>
  * <li>Anything else: "OK. I will report back in 12 minutes."</li>
  * </ul>
  * When the request carries {@code tools}, as the openai-compat provider sends them, a scripted call is sent as
@@ -257,7 +257,7 @@ public class ScriptedModelServer {
             Thread.sleep(3_600_000);   // the long turn
             return "finished";
         }
-        // Predict prompt (PredictPromptCheck): stage 2 asks for follow-ups, stage 1 asks what the last message asks
+        // Suggest prompt (SuggestPromptCheck): stage 2 asks for follow-ups, stage 1 asks what the last message asks
         if (last.contains("different instructions the person is likely to give next")) {
             if (last.contains("PQ-BADFOLLOW")) return "Sorry, I cannot predict that.";
             boolean decided = last.contains("The person has decided: B");

@@ -1,4 +1,4 @@
-package com.scivicslab.chatui.promptprediction;
+package com.scivicslab.chatui.suggestprompt;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,12 +11,12 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * The "Predict prompt" button's plain steps, which touch neither a model nor a conversation and are
+ * The "Suggest prompt" button's plain steps, which touch neither a model nor a conversation and are
  * tested alone. Predicting is two questions to a local LLM. The first reads the assistant's last
  * message and says what it asks the person, and which choices (A, B, C...) it offers, if any. The
  * second, given the choice the person made, predicts four to six long follow-up instructions.
  */
-public final class PromptPrediction {
+public final class PromptSuggestion {
 
     /** Fewest follow-up prompts worth showing; a reply with fewer readable ones is an error. */
     public static final int MIN_COUNT = 4;
@@ -47,7 +47,7 @@ public final class PromptPrediction {
                     + "[\\s.!?。、,！？]*$",
             Pattern.CASE_INSENSITIVE);
 
-    private PromptPrediction() {}
+    private PromptSuggestion() {}
 
     /**
      * One message of the conversation.

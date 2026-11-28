@@ -14,7 +14,7 @@ import com.scivicslab.chatui.core.provider.LlmProvider;
 import com.scivicslab.chatui.logging.ForwardingAccumulator;
 import com.scivicslab.chatui.logging.RecentEntriesAccumulator;
 import com.scivicslab.chatui.openaicompat.OpenAiCompatProvider;
-import com.scivicslab.chatui.promptprediction.PromptPrediction;
+import com.scivicslab.chatui.suggestprompt.PromptSuggestion;
 import com.scivicslab.chatui.translation.TranslationLanguages;
 import com.scivicslab.chatui.translation.TranslationPrompt;
 import com.scivicslab.pojoactor.core.ActorRef;
@@ -1047,77 +1047,77 @@ public class ChatUiActorSystem implements ConversationControls {
     }
 
     /**
-     * What {@link #predictQuestion} or {@link #predictFollowups} gave back: the question and its
+     * What {@link #suggestQuestion} or {@link #suggestFollowups} gave back: the question and its
      * choices, or the follow-up prompts, with the model that answered; or why there is nothing.
      */
-    public record PromptPredictions(Kind kind, PromptPrediction.Question question,
+    public record PromptSuggestions(Kind kind, PromptSuggestion.Question question,
                                     java.util.List<String> prompts, String model, String reason) {
         /** {@code DONE}, or why nothing was predicted. */
         public enum Kind { DONE, UNKNOWN_CHAT, NO_HISTORY, NO_ANSWER, UNREADABLE }
 
-        static PromptPredictions refused(Kind kind, String reason) {
-            return new PromptPredictions(kind, null, java.util.List.of(), null, reason);
+        static PromptSuggestions refused(Kind kind, String reason) {
+            return new PromptSuggestions(kind, null, java.util.List.of(), null, reason);
         }
     }
 
     /**
-     * Stage 1 of "Predict prompt": reads the newest assistant message of a conversation and says what
-     * it asks the person and which choices it offers ({@link PromptPrediction#questionPromptFor}).
+     * Stage 1 of "Suggest prompt": reads the newest assistant message of a conversation and says what
+     * it asks the person and which choices it offers ({@link PromptSuggestion#questionPromptFor}).
      */
-    public PromptPredictions predictQuestion(String projectId, String chatId) {
+    public PromptSuggestions suggestQuestion(String projectId, String chatId) {
         String conversation = chatActorName(projectId, chatId);
         if (!chats.containsKey(conversation)) {
-            return PromptPredictions.refused(PromptPredictions.Kind.UNKNOWN_CHAT, "no such conversation: " + conversation);
+            return PromptSuggestions.refused(PromptSuggestions.Kind.UNKNOWN_CHAT, "no such conversation: " + conversation);
         }
-        String last = PromptPrediction.lastAssistantText(recentMessages(conversation));
+        String last = PromptSuggestion.lastAssistantText(recentMessages(conversation));
         if (last == null || last.isBlank()) {
-            return PromptPredictions.refused(PromptPredictions.Kind.NO_HISTORY,
+            return PromptSuggestions.refused(PromptSuggestions.Kind.NO_HISTORY,
                     "this conversation has no assistant message to predict from");
         }
-        String[] answer = askLocal(conversation, PromptPrediction.questionPromptFor(last));
+        String[] answer = askLocal(conversation, PromptSuggestion.questionPromptFor(last));
         if (answer[0] == null || answer[0].isBlank()) {
-            return PromptPredictions.refused(PromptPredictions.Kind.NO_ANSWER, "the model gave no answer");
+            return PromptSuggestions.refused(PromptSuggestions.Kind.NO_ANSWER, "the model gave no answer");
         }
-        var question = PromptPrediction.parseQuestion(answer[0]);
+        var question = PromptSuggestion.parseQuestion(answer[0]);
         if (question.isEmpty()) {
-            return PromptPredictions.refused(PromptPredictions.Kind.UNREADABLE,
+            return PromptSuggestions.refused(PromptSuggestions.Kind.UNREADABLE,
                     "the model's answer did not say what the assistant asked");
         }
-        return new PromptPredictions(PromptPredictions.Kind.DONE, question.get(), java.util.List.of(), answer[1], "");
+        return new PromptSuggestions(PromptSuggestions.Kind.DONE, question.get(), java.util.List.of(), answer[1], "");
     }
 
     /**
-     * Stage 2 of "Predict prompt": predicts four to six long follow-up instructions, taking the
-     * person's choice (or none) as made ({@link PromptPrediction#followupPromptFor}).
+     * Stage 2 of "Suggest prompt": predicts four to six long follow-up instructions, taking the
+     * person's choice (or none) as made ({@link PromptSuggestion#followupPromptFor}).
      */
-    public PromptPredictions predictFollowups(String projectId, String chatId,
-                                              PromptPrediction.Question asked, PromptPrediction.Choice chosen) {
+    public PromptSuggestions suggestFollowups(String projectId, String chatId,
+                                              PromptSuggestion.Question asked, PromptSuggestion.Choice chosen) {
         String conversation = chatActorName(projectId, chatId);
         if (!chats.containsKey(conversation)) {
-            return PromptPredictions.refused(PromptPredictions.Kind.UNKNOWN_CHAT, "no such conversation: " + conversation);
+            return PromptSuggestions.refused(PromptSuggestions.Kind.UNKNOWN_CHAT, "no such conversation: " + conversation);
         }
-        java.util.List<PromptPrediction.Message> recent = recentMessages(conversation);
+        java.util.List<PromptSuggestion.Message> recent = recentMessages(conversation);
         if (recent.isEmpty()) {
-            return PromptPredictions.refused(PromptPredictions.Kind.NO_HISTORY,
+            return PromptSuggestions.refused(PromptSuggestions.Kind.NO_HISTORY,
                     "this conversation has no messages to predict from");
         }
-        String[] answer = askLocal(conversation, PromptPrediction.followupPromptFor(recent, asked, chosen));
+        String[] answer = askLocal(conversation, PromptSuggestion.followupPromptFor(recent, asked, chosen));
         if (answer[0] == null || answer[0].isBlank()) {
-            return PromptPredictions.refused(PromptPredictions.Kind.NO_ANSWER, "the model gave no answer");
+            return PromptSuggestions.refused(PromptSuggestions.Kind.NO_ANSWER, "the model gave no answer");
         }
-        java.util.List<String> prompts = PromptPrediction.parseFollowups(answer[0]);
-        if (prompts.size() < PromptPrediction.MIN_COUNT) {
-            return PromptPredictions.refused(PromptPredictions.Kind.UNREADABLE,
-                    "the model's answer did not hold " + PromptPrediction.MIN_COUNT + " usable prompts");
+        java.util.List<String> prompts = PromptSuggestion.parseFollowups(answer[0]);
+        if (prompts.size() < PromptSuggestion.MIN_COUNT) {
+            return PromptSuggestions.refused(PromptSuggestions.Kind.UNREADABLE,
+                    "the model's answer did not hold " + PromptSuggestion.MIN_COUNT + " usable prompts");
         }
-        return new PromptPredictions(PromptPredictions.Kind.DONE, asked, prompts, answer[1], "");
+        return new PromptSuggestions(PromptSuggestions.Kind.DONE, asked, prompts, answer[1], "");
     }
 
     /**
      * Asks the same Local LLM provider Translate uses ({@link #translator()}), so the model and the
      * server are the ones configured for Translate and the conversation's own provider is not kept
      * waiting. Nothing is added to the conversation; the instruction and the reply are recorded in
-     * its I/O log session under the label {@code prompt-prediction}.
+     * its I/O log session under the label {@code prompt-suggestion}.
      *
      * @return {reply or null, model}
      */
@@ -1133,7 +1133,7 @@ public class ChatUiActorSystem implements ConversationControls {
             answer = new String[] { null, null };
         }
         if (ioLogStore != null) {
-            ioLogStore.record(ioLogStore.ensureSession(conversation), conversation, "prompt-prediction",
+            ioLogStore.record(ioLogStore.ensureSession(conversation), conversation, com.scivicslab.chatui.core.iolog.IoLogView.PROMPT_SUGGESTION_LABEL,
                     "MODEL: " + answer[1] + "\n\nINPUT:\n" + prompt + "\n\nOUTPUT:\n"
                             + (answer[0] == null ? "(no answer)" : answer[0]));
         }
@@ -1141,17 +1141,17 @@ public class ChatUiActorSystem implements ConversationControls {
     }
 
     /** The conversation's newest messages, from its persisted history, oldest first. */
-    private java.util.List<PromptPrediction.Message> recentMessages(String conversation) {
+    private java.util.List<PromptSuggestion.Message> recentMessages(String conversation) {
         ChatSessionIIAR session = chatSessions.get(conversation);
         // Steps and tool calls share the history with the messages, so more entries are read than are kept.
-        int limit = PromptPrediction.RECENT_MESSAGES * 5;
+        int limit = PromptSuggestion.RECENT_MESSAGES * 5;
         com.scivicslab.chatui.core.provider.PersistedLog log =
                 session == null ? null : session.persistedLogDirect(limit, Long.MAX_VALUE);
         if (log == null) log = new IoLogHistory(ioLogStore).read(conversation, limit, Long.MAX_VALUE);
-        java.util.List<PromptPrediction.Message> messages = new java.util.ArrayList<>();
+        java.util.List<PromptSuggestion.Message> messages = new java.util.ArrayList<>();
         for (var e : log.entries()) {
-            if ("user".equals(e.type())) messages.add(new PromptPrediction.Message(true, e.text()));
-            else if ("assistant".equals(e.type())) messages.add(new PromptPrediction.Message(false, e.text()));
+            if ("user".equals(e.type())) messages.add(new PromptSuggestion.Message(true, e.text()));
+            else if ("assistant".equals(e.type())) messages.add(new PromptSuggestion.Message(false, e.text()));
         }
         return messages;
     }
