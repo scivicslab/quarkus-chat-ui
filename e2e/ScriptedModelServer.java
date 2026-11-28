@@ -260,6 +260,7 @@ public class ScriptedModelServer {
         }
         // Work frame update (SuggestPromptKeeper): two open topics, the first with two steps and a term, whatever the messages say.
         if (last.startsWith("You keep a work frame of a conversation")) {
+            if (last.contains("SLOW-ANALYZE")) Thread.sleep(8_000);   // a long update, so a check can close and reopen the dialog mid-run
             return "{\"overview\":\"Rebuilding the connector in small steps.\","
                     + "\"topics\":[{\"title\":\"Rebuild the connector\",\"summary\":\"Rework the connector.\",\"work_type\":\"implement\",\"status\":\"open\"},"
                     + "{\"title\":\"Write the design note\",\"summary\":\"Record why.\",\"work_type\":\"write\",\"status\":\"open\"}],"

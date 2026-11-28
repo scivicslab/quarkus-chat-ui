@@ -63,6 +63,11 @@ public class SuggestPromptKeeper {
     private boolean restored;
     private boolean calling;
     private int callEpoch;
+    // One update: from the first call until the frame has caught up, a call failed, or a reply held nothing usable.
+    // It spans the gaps between calls of a catch-up, so the screen can show one steady run.
+    private boolean running;
+    private long runStartedAt;
+    private int runFromTurn;
 
     /**
      * @param squad      the conversation's name, which keys its rows
@@ -118,6 +123,7 @@ public class SuggestPromptKeeper {
      */
     public void startNewFrame() {
         try {
+            running = false;
             frame = SuggestFrame.empty(squad, repository.maxEpoch(squad) + 1, roleNow());
             repository.save(frame);
         } catch (RuntimeException e) {
@@ -133,9 +139,15 @@ public class SuggestPromptKeeper {
         if (calling) return;
         try {
             if (frame == null) restore();
-            if (frame == null) return;
+            if (frame == null) {
+                running = false;
+                return;
+            }
             int finished = turns.finishedTurn();
-            if (finished <= frame.digestedTurn()) return;
+            if (finished <= frame.digestedTurn()) {
+                running = false;
+                return;
+            }
             List<SuggestPatchPrompt.Message> messages = turns.read(frame.digestedTurn(), finished);
             SuggestPatchPrompt.Built built = SuggestPatchPrompt.build(frame, messages, finished);
             if (!built.needsModel()) {
@@ -143,10 +155,16 @@ public class SuggestPromptKeeper {
                 advanceTo(built.digestedUpTo());
                 return;
             }
+            if (!running) {
+                running = true;
+                runStartedAt = clock.getAsLong();
+                runFromTurn = frame.digestedTurn();
+            }
             calling = true;
             callEpoch = frame.epoch();
             launcher.launch(() -> call(built, callEpoch));
         } catch (RuntimeException e) {
+            running = false;
             LOG.log(Level.WARNING, squad + ": the work frame could not be brought up to date", e);
         }
     }
@@ -191,13 +209,17 @@ public class SuggestPromptKeeper {
     /** The LLM answered. Applies the patch, moves {@code digested_turn}, saves, and goes on if turns remain. */
     public void onReply(SuggestPatchPrompt.Built built, int epoch, String reply) {
         calling = false;
-        if (frame == null || frame.epoch() != epoch) return;   // a /clear came in between: the answer is for the old frame
+        if (frame == null || frame.epoch() != epoch) {   // a /clear came in between: the answer is for the old frame
+            running = false;
+            return;
+        }
         try {
             SuggestPatchPrompt.Parsed parsed = SuggestPatchPrompt.parse(reply);
             Optional<SuggestPatch> patch = parsed.patch();
             if (patch.isEmpty()) {
                 // Nothing readable: the turns stay unread, and the next interval asks again.
                 LOG.warning(squad + ": the LLM's reply held no patch: " + parsed.reason());
+                running = false;
                 return;
             }
             SuggestFrame.Applied applied = frame.apply(patch.get(), built.digestedUpTo(), clock.getAsLong());
@@ -213,6 +235,7 @@ public class SuggestPromptKeeper {
             repository.save(frame);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, squad + ": the patch could not be applied", e);
+            running = false;
             return;
         }
         continueIfBehind();
@@ -221,6 +244,7 @@ public class SuggestPromptKeeper {
     /** The LLM call failed or timed out. {@code digested_turn} does not move, and nothing is read until the next interval. */
     public void onFailure(Exception cause) {
         calling = false;
+        running = false;
         LOG.log(Level.WARNING, squad + ": the LLM call for the work frame failed", cause);
     }
 
@@ -236,6 +260,25 @@ public class SuggestPromptKeeper {
     /** Catch-up: while finished turns are still unread, update again at once instead of waiting for the interval. */
     private void continueIfBehind() {
         if (turns.finishedTurn() > frame.digestedTurn()) self.accept(SuggestPromptKeeper::bringUpToDate);
+        else running = false;
+    }
+
+    /**
+     * Where the update in hand stands, for the screen.
+     *
+     * @param calling   whether an LLM call is out
+     * @param running   whether an update is under way: from its first call until the frame has caught up or it ended
+     *                  without a result; it stays true between the calls of a catch-up
+     * @param startedAt when the update began, in milliseconds since the epoch; 0 when none is running
+     * @param fromTurn  {@code digested_turn} when the update began; 0 when none is running
+     */
+    public record Progress(boolean calling, boolean running, long startedAt, int fromTurn) {
+        public static final Progress IDLE = new Progress(false, false, 0, 0);
+    }
+
+    /** @return the state of the update, whatever started it: the interval, the button, or a catch-up */
+    public Progress progress() {
+        return running ? new Progress(calling, true, runStartedAt, runFromTurn) : new Progress(calling, false, 0, 0);
     }
 
     private String roleNow() {
