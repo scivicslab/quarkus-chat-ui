@@ -156,25 +156,26 @@ public class ChatUiShellCheck {
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/shell-3-settings.png")));
             page.selectOption("#right-tab-select", "logdb");
 
-            // (4) Plain Send never thinks; Send (Think mode) does, even when the old setting said not to think.
-            check(page.isVisible("#send-think-btn") && page.textContent("#send-think-btn").trim().equals("Send (Think mode)"),
-                    "a third button, Send (Think mode), is next to Cancel and Send");
+            // (4) Plain Send and Shift+Enter never think; Ctrl+Shift+Enter does, even when the old setting said not to think.
+            check(page.locator("#send-think-btn").count() == 0, "there is no Send (Think mode) button any more");
+            check(page.getAttribute("#send-btn", "title").contains("Ctrl+Shift+Enter"),
+                    "the Send button's title says how to send with thinking on: " + page.getAttribute("#send-btn", "title"));
             rest("POST", "/api/projects/project1/chats/01/no-think", "{\"noThink\":true}");
             page.fill("#prompt-input", "PLAIN-SEND hello");
-            page.click("#send-btn");
+            page.press("#prompt-input", "Shift+Enter");
             waitIdle();
             rest("POST", "/api/projects/project1/chats/01/no-think", "{\"noThink\":true}");
             page.fill("#prompt-input", "THINK-SEND hello");
-            page.click("#send-think-btn");
+            page.press("#prompt-input", "Control+Shift+Enter");
             waitIdle();
             rest("POST", "/api/projects/project1/chats/01/no-think", "{\"noThink\":false}");
             page.fill("#prompt-input", "PLAIN-AFTER-THINK-SETTING hello");
-            page.click("#send-btn");
+            page.click("#send-btn");   // the button itself still sends without thinking
             waitIdle();
             check(sent.size() == 3, "three prompts were sent: " + sent);
             if (sent.size() == 3) {
-                check(sent.get(0).contains("\"noThink\":true"), "plain Send says noThink: " + sent.get(0));
-                check(sent.get(1).contains("\"noThink\":false"), "Send (Think mode) says think: " + sent.get(1));
+                check(sent.get(0).contains("\"noThink\":true"), "Shift+Enter says noThink: " + sent.get(0));
+                check(sent.get(1).contains("\"noThink\":false"), "Ctrl+Shift+Enter says think: " + sent.get(1));
                 check(sent.get(2).contains("\"noThink\":true"), "plain Send never thinks, whatever the old setting is: " + sent.get(2));
             }
             String log = rest("GET", "/api/iolog/search?q=enable_thinking&limit=20", null);

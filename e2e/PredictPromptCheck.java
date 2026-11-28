@@ -71,10 +71,10 @@ public class PredictPromptCheck {
             page.waitForSelector("#actors-tree .actor-name");
             page.waitForFunction("() => document.querySelectorAll('#model-select option').length > 0");
 
-            // The button is in the row of Cancel, Send and Send (Think mode), after them.
+            // The button is in the row of Cancel and Send, after them.
             List<String> row = (List<String>) page.evaluate(
                     "() => Array.from(document.querySelectorAll('#send-cancel-slot > button')).map(b => b.textContent.trim())");
-            check(row.equals(List.of("Cancel", "Send", "Send (Think mode)", "Predict prompt")), "the buttons beside the input: " + row);
+            check(row.equals(List.of("Cancel", "Send", "Predict prompt")), "the buttons beside the input: " + row);
             check(page.isVisible("#predict-btn") && !page.isVisible("#predict-overlay"), "the button shows; the dialog does not");
 
             // A conversation with no assistant message: the dialog says so, and the input box is untouched.

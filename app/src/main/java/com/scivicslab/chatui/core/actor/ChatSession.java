@@ -1355,7 +1355,7 @@ public class ChatSession extends Interpreter {
         this.turnSelf = self;
         this.turnDone = done;
         // Either side may ask for it: the conversation's own setting, or this one prompt. A message typed on the screen
-        // is the exception: its Send and Send (Think mode) buttons answer the question for that one message, so the
+        // is the exception: its Send button (Shift+Enter) and Ctrl+Shift+Enter answer the question for that one message, so the
         // conversation's setting, which a workflow may have set, does not apply to it. Nor does it apply to a request
         // from another conversation: the asker declares thinking each time (ThinkingAndEffortAreConversationSettings_260917_oo01).
         this.turnNoThink = SCREEN_SOURCE.equals(source) || (source != null && source.startsWith(ASK_CHAT_SOURCE_PREFIX))

@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * A message typed on the screen carries its own answer to "think or not" (the Send and Send (Think mode) buttons): the
+ * A message typed on the screen carries its own answer to "think or not" (Shift+Enter or the Send button, and Ctrl+Shift+Enter): the
  * conversation's no-think setting, which a workflow can set, does not apply to it. A message from anywhere else still
  * follows the setting.
  */
@@ -69,7 +69,7 @@ class ScreenPromptsAskForThinkingThemselvesTest {
 
             // The old toggle left the conversation set to answer without thinking.
             assertTrue(system.setNoThink("project1", "01", true));
-            send(system, "screen", false);                    // Send (Think mode): thinks, whatever the setting says
+            send(system, "screen", false);                    // Ctrl+Shift+Enter: thinks, whatever the setting says
             send(system, "screen", true);                     // Send: never thinks
             // The setting is off: plain Send still does not think, and a workflow's message follows the setting.
             assertTrue(system.setNoThink("project1", "01", false));

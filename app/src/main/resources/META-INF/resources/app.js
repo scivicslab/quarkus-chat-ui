@@ -2040,11 +2040,11 @@
         applyViewMode();
 
         if (sendBtn) sendBtn.addEventListener("click", function () { sendPrompt(false); });
-        var sendThinkBtn = el("send-think-btn");
-        if (sendThinkBtn) sendThinkBtn.addEventListener("click", function () { sendPrompt(true); });
         initPredictPrompt();
         if (promptInput) {
             promptInput.addEventListener("keydown", function (e) {
+                // Ctrl+Shift+Enter is judged first: it sends this one message with thinking on. Shift+Enter alone does not think.
+                if (e.key === "Enter" && e.shiftKey && e.ctrlKey) { e.preventDefault(); sendPrompt(true); return; }
                 if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); sendPrompt(false); return; }
                 if (activeKeybind === "emacs" && emacsKey(e)) e.preventDefault();
             });

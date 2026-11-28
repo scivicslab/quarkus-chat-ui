@@ -967,7 +967,6 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow
 
 /* ── The activity text sits beside the input buttons ── */
 #input-toolbar-left #activity-label { color: var(--accent-blue, #a5b4fc); font-size: 12px; }
-#send-cancel-slot > #send-think-btn { width: auto; white-space: nowrap; }
 
 /* The project's name in the Graph opens the project, like a conversation's name opens the conversation. */
 .cg-project .cg-project-name { cursor: pointer; }
