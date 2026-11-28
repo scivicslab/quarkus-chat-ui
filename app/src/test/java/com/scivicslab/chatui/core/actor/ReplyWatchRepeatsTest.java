@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ReplyWatchRepeatsTest {
 
-    private static final long WARN = 300_000;   // five minutes, the default
+    private static final long WARN = 300_000;   // five minutes, passed to the Timekeeper explicitly (not the default)
 
     /** Says one scripted thing per prompt, the last one repeating; optionally holds its first prompt. */
     private static final class Scripted implements LlmProvider {

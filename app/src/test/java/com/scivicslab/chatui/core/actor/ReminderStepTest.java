@@ -120,19 +120,19 @@ class ReminderStepTest {
     private static final String PROMISE = "The survey is running. I will report back when it is done.";
 
     @Test
-    void aPromiseWithNoStatedTimeRegistersTheDefaultFiveMinutes() throws Exception {
+    void aPromiseWithNoStatedTimeRegistersTheDefaultTenMinutes() throws Exception {
         IIActorSystem system = new IIActorSystem("reminder-step-default");
         Scripted model = new Scripted(false, 0, PROMISE, "REGISTER DEFAULT | \"I will report back when it is done.\"");
         Squad one = squad(system, "01", model);
         personTypes(one, "run the survey");
 
         String decision = waitForDecision(one);
-        assertTrue(decision.startsWith("REGISTERED 5 min"), decision);
+        assertTrue(decision.startsWith("REGISTERED 10 min"), decision);
         List<PromisedReports.Pending> p = pending(one);
         assertEquals(1, p.size());
         assertNull(p.get(0).requestId(), "a promise to the person is registered with no request, as expect_report on its own id is");
         assertNull(p.get(0).asker());
-        assertDueInAbout(5, p.get(0).dueAt());
+        assertDueInAbout(10, p.get(0).dueAt());
         assertEquals(2, model.prompts.size(), "one answer, one small decision call");
         assertTrue(model.prompts.get(1).contains("FINAL ANSWER:\n" + PROMISE), "the call shows the final answer");
     }
@@ -244,13 +244,13 @@ class ReminderStepTest {
         busy.release.countDown();
     }
 
-    /** The tool texts the models read say five minutes, and no longer tell a model to register a reminder for its own promise. */
+    /** The tool texts the models read say ten minutes, and no longer tell a model to register a reminder for its own promise. */
     @Test
-    void theToolDescriptionsSayFiveMinutesAndDoNotTellTheModelToRegisterItsOwnPromise() {
+    void theToolDescriptionsSayTenMinutesAndDoNotTellTheModelToRegisterItsOwnPromise() {
         Squad one = squad(new IIActorSystem("reminder-step-tool-texts"), "01", new Scripted(false, 0, "x"));
         String tools = one.chat().askNow(a -> ((ChatSession) a).toolInstructionsText()).join()
                 .replaceAll("\\s+", " ");  // where a line wraps is not what this test is about
-        assertTrue(tools.contains("without a reply before it is told (default 5)"), "set_chat_timekeeper says 5");
+        assertTrue(tools.contains("without a reply before it is told (default 10)"), "set_chat_timekeeper says 10");
         assertTrue(!tools.contains("(default 30)"), "no 30 is left");
         assertTrue(tools.contains("- expect_report(chatId, requestId, minutes, node)"), "the tool itself stays");
         assertTrue(tools.contains("about 20 more minutes"), "for a reply that says so");
@@ -324,8 +324,8 @@ class ReminderStepTest {
     }
 
     @Test
-    void theDefaultsAreFiveMinutes() {
-        assertEquals(5, Timekeeper.DEFAULT_CHILD_REPLY_WARN_MINUTES);
-        assertEquals(5, Timekeeper.DEFAULT_PROMISE_REMINDER_MINUTES);
+    void theDefaultsAreTenMinutes() {
+        assertEquals(10, Timekeeper.DEFAULT_CHILD_REPLY_WARN_MINUTES);
+        assertEquals(10, Timekeeper.DEFAULT_PROMISE_REMINDER_MINUTES);
     }
 }

@@ -43,13 +43,13 @@ public class Timekeeper {
     static final long DEFAULT_URGENT_WAIT_MINUTES = 10;
 
     /** Default for how long a request may go without a reply before the conversation is told. */
-    static final long DEFAULT_CHILD_REPLY_WARN_MINUTES = 5;
+    static final long DEFAULT_CHILD_REPLY_WARN_MINUTES = 10;
 
     /**
      * Default wait for a reminder the end-of-turn step registers when the answer states no time of its own
      * ({@code ReminderDecidedAtTheEndOfTheTurn_261114_oo01}).
      */
-    public static final long DEFAULT_PROMISE_REMINDER_MINUTES = 5;
+    public static final long DEFAULT_PROMISE_REMINDER_MINUTES = 10;
 
     /**
      * The value a limit holds, in milliseconds, when its watch is off: set as 0 minutes. A limit of 0 milliseconds,
