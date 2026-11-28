@@ -131,7 +131,11 @@
                     <div class="left-pane-actions" style="display:flex;align-items:center;gap:8px">
                         <button id="save-chat-btn" title="Save conversation as Markdown">Save Chat</button>
                         <button id="clear-chat-btn" title="Clear chat display (session continues)">Clear</button>
-                        <button id="view-mode-btn" aria-pressed="false" title="Showing every message of this ConversationSquad actor. Click to hide the inputs and steps of the turns you did not start, keeping their final answers.">Show all messages</button>
+                        <span id="view-mode" class="view-mode-group" role="group" aria-label="View">
+                            <span class="view-mode-label">View:</span>
+                            <button id="view-all-btn" class="view-mode-btn" type="button" data-view="all" aria-pressed="true" title="Show every message of this ConversationSquad actor.">All messages</button>
+                            <button id="view-person-btn" class="view-mode-btn" type="button" data-view="person" aria-pressed="false" title="Show the turns you started, and the final answer of every other turn except the replies to requests from other conversations. The inputs and steps of the turns you did not start are hidden.">Person-facing only</button>
+                        </span>
                     </div>
                 </header>
                 <div id="notification-bar"></div>
