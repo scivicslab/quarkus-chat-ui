@@ -232,9 +232,12 @@ public class ChatSession extends Interpreter {
     private static final String IMAGE_NOTE = """
             To show an image (a diagram, an icon, a drawing you were asked for), write a fenced code \
             block whose language is "svg", containing valid, self-contained SVG markup — it renders as \
-            an actual picture in the chat pane. This is the only way to produce an image here: there is \
-            no image-generation tool or model, so do not call one or invent one. Do not wrap the SVG in \
-            a data: URI or a markdown image link; write the <svg>...</svg> markup itself.""";
+            an actual picture in the chat pane. To show an image file (png, jpg, jpeg, gif, webp, svg), \
+            write ![description](absolute path) — a relative path is taken from the write directory, and \
+            the file must be inside the directories read may read; put an image you make under the \
+            write directory. http(s) addresses and data: addresses other than png, jpeg, gif \
+            and webp are not shown. There is no image-generation tool or model here, so do not call \
+            one or invent one.""";
 
     private static final String SYSTEM_PROMPT_HEAD = """
             You are a helpful assistant with access to tools. To call a tool, write EXACTLY this format \

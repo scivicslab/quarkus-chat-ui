@@ -43,6 +43,7 @@ import java.util.regex.Pattern;
  * what was read (McpServerCheck, OpenAiCompatStandardToolCalling_261120_oo01).</li>
  * <li>A revision request from html-saurus's Revise panel ({@code Review lines ...}): one proposal in the JSON form the
  * panel reads, quoting the first twelve characters of the text (RevisionPanel_261120_oo01).</li>
+ * <li>{@code IMG-SHOW}: an answer that refers to nine pictures by path and address (LocalImageCheck).</li>
  * <li>A prediction request from the Predict prompt button: six prompts {@code PREDICT-ONE} to {@code PREDICT-SIX} in a
  * fenced JSON array, or a sentence that is no list when the conversation holds {@code PREDICT-BAD} (PredictPromptCheck).</li>
  * <li>Anything else: "OK. I will report back in 12 minutes."</li>
@@ -241,6 +242,14 @@ public class ScriptedModelServer {
 
     /** What the script answers to a call whose last message is {@code last}; {@code whole} is every message. */
     static String answer(String last, String whole) throws Exception {
+        // Pictures an answer refers to (LocalImageCheck): the files are made by that check under /tmp/imgcheck.
+        if (last.contains("IMG-SHOW")) {
+            return "A abs inside:\n\n![inside](/tmp/imgcheck/home/works/in.png)\n\nB outside:\n\n![outside](/tmp/imgcheck/outside/o.png)\n\n"
+                    + "C relative:\n\n![rel](sub/rel.png)\n\nD file url:\n\n![fu](file:///tmp/imgcheck/home/works/in.png)\n\n"
+                    + "E tilde:\n\n![t](~/works/in.png)\n\nF svg file:\n\n![s](/tmp/imgcheck/home/works/in.svg)\n\n"
+                    + "G http:\n\n![h](http://127.0.0.1:1/x.png)\n\nH data png:\n\n![d](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==)\n\n"
+                    + "I data svg:\n\n![ds](data:image/svg+xml;base64,PHN2Zy8+)\n\nEND-IMG";
+        }
         if (last.contains("bookkeeping check")) {
             return last.contains("I will report back") ? "REGISTER 12 | \"I will report back\"" : "NONE | nothing promised";
         }

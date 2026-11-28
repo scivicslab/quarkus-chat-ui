@@ -107,22 +107,60 @@
     function withLocalImages(html) {
         var holder = document.createElement("div");
         holder.innerHTML = html;
-        var imgs = holder.getElementsByTagName("img");
-        for (var i = 0; i < imgs.length; i++) {
-            var raw = imgs[i].getAttribute("src") || "";
-            var filePath = null;
-            if (raw.indexOf("file://") === 0) {
-                filePath = decodeURIComponent(raw.substring("file://".length));
-            } else if (raw.charAt(0) === "/" && raw.indexOf("/api/") !== 0) {
-                filePath = raw;
+        var imgs = Array.prototype.slice.call(holder.getElementsByTagName("img"));
+        imgs.forEach(function (img) {
+            var raw = (img.getAttribute("src") || "").trim();
+            if (raw.indexOf("api/local-image?") === 0 || raw.indexOf("/api/") === 0) return;
+            if (/^data:image\/(png|jpeg|gif|webp);base64,/i.test(raw)) return;
+            // Any other address that names a place (http:, https:, a protocol-relative //host, data: of
+            // another type, blob:, ...) is not fetched: the browser would send the reader's request
+            // to it, and what the conversation wrote into the address with it.
+            var scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(raw);
+            if (raw.indexOf("//") === 0 || (scheme && scheme[1].toLowerCase() !== "file")) {
+                img.replaceWith(imageNotice("Image not shown: only a file on this machine or a png/jpeg/gif/webp data: address is shown",
+                        raw.length > 80 ? raw.substring(0, 80) + "…" : raw));
+                return;
             }
-            if (filePath) {
-                imgs[i].setAttribute("src", "api/local-image?path=" + encodeURIComponent(filePath));
+            var filePath = raw;
+            if (scheme) {   // file://
+                try { filePath = decodeURIComponent(raw.substring("file://".length)); }
+                catch (e) { filePath = raw.substring("file://".length); }
             }
-        }
+            if (filePath === "") return;
+            img.setAttribute("src", "api/local-image?path=" + encodeURIComponent(filePath));
+            img.setAttribute("data-local-path", filePath);
+        });
         renderInlineSvg(holder);
         return holder.innerHTML;
     }
+
+    /** A line that stands where a picture could not be shown, in place of the browser's broken-image icon. */
+    function imageNotice(reason, what) {
+        var span = document.createElement("span");
+        span.className = "image-notice";
+        span.textContent = reason + (what ? ": " + what : "");
+        return span;
+    }
+
+    // A picture the server refuses or cannot find: ask again for the reason, and put it on screen.
+    // The error event does not bubble, so it is caught on the way down.
+    document.addEventListener("error", function (ev) {
+        var img = ev.target;
+        if (!img || img.tagName !== "IMG" || !img.hasAttribute("data-local-path")) return;
+        var src = img.getAttribute("src"), path = img.getAttribute("data-local-path");
+        fetch(src).then(function (r) {
+            return r.text().then(function (t) { return "HTTP " + r.status + " " + t; });
+        }, function () { return "the server could not be reached"; }).then(function (reason) {
+            if (img.isConnected) img.replaceWith(imageNotice("Image not shown (" + reason + ")", path));
+        });
+    }, true);
+
+    // Clicking a picture from a file opens it at its own size in a new tab.
+    document.addEventListener("click", function (ev) {
+        var img = ev.target;
+        if (!img || img.tagName !== "IMG" || !img.hasAttribute("data-local-path")) return;
+        window.open(img.getAttribute("src"), "_blank", "noopener");
+    });
 
     // --- LLM-drawn images: a ```svg fenced code block or a bare <svg> tag in the model's own
     // reply, rendered as an actual picture (ImageOutputViaSvg_260908_oo01). No image-generation
