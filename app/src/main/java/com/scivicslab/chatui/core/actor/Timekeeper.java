@@ -329,12 +329,45 @@ public class Timekeeper {
                 urgentQueuedAt, chat.outstandingChildrenDirect(), warned, rearmedAt, promised.snapshot(), now);
     }
 
+    /** How often the work frame is brought up to date, in milliseconds; 0 or less means never. */
+    private long suggestIntervalMillis;
+    /** When the work frame was last asked to update, or when this watch was armed. */
+    private long suggestSentAt;
+    private Runnable suggestSend = () -> { };
+
+    /**
+     * Has this timekeeper send {@code send} (a {@code tell} to the conversation's Suggest prompt keeper) each time
+     * {@code intervalMillis} has passed ({@code SuggestPromptGuidedByWorkFrame_261128_oo01}). The keeper has no period
+     * of its own; this is its clock. A value of 0 or less sends nothing.
+     *
+     * @param intervalMillis the interval, in milliseconds
+     * @param armedAt        the time the count starts from, in milliseconds since the epoch
+     * @param send           what to run at each interval; it must not wait
+     */
+    public void suggestPromptEvery(long intervalMillis, long armedAt, Runnable send) {
+        this.suggestIntervalMillis = intervalMillis;
+        this.suggestSentAt = armedAt;
+        this.suggestSend = send;
+    }
+
+    /** Sends the work frame its update when the interval has passed, and counts the next one from now. */
+    private void bringSuggestPromptUpToDate(long now) {
+        if (suggestIntervalMillis <= 0 || now - suggestSentAt < suggestIntervalMillis) return;
+        suggestSentAt = now;
+        try {
+            suggestSend.run();
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, conversation + ": the work frame could not be sent its update", e);
+        }
+    }
+
     /**
      * One check, at {@code now}.
      *
      * @param now the current time, in milliseconds since the epoch
      */
     public void tick(long now) {
+        bringSuggestPromptUpToDate(now);
         try {
             if (urgentWaitMillis != OFF && chat.isBusyDirect()) {
                 Long since = queue.ask(PromptQueue::frontUrgentQueuedAt).get(5, TimeUnit.SECONDS);

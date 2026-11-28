@@ -162,6 +162,9 @@ public class ChatSessionIIAR extends InterpreterIIAR {
         return s.busy() ? s.turnStartedAt() : null;
     }
 
+    /** The last finished turn of the current I/O log session, read without waiting for a running turn. */
+    public int finishedTurnDirect() { return chatSession().status().finishedTurn(); }
+
     /** The sent requests with a promised report pending, read without waiting for a running turn. */
     public java.util.Set<String> promisedRequestsDirect() { return chatSession().status().promised(); }
 

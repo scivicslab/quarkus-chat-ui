@@ -2542,7 +2542,15 @@ public class ChatSession extends Interpreter {
     private ChatBoard.Status currentStatus() {
         return new ChatBoard.Status(busy, turnStartedAt, historySnapshot, outstandingSnapshot, promisedSnapshot,
                 unansweredSnapshot, lastReplyWatchLines, lastReminderDecision, provider, entries, toolSet,
-                promptWorkflowFile, ioSession, ioTurnNo, stepCount, runningRequestIds());
+                promptWorkflowFile, ioSession, ioTurnNo, stepCount, runningRequestIds(), finishedTurn());
+    }
+
+    /**
+     * The last turn of the current I/O log session that has finished. {@code ioTurn} counts the running turn too, and
+     * is raised on a restart to the session's last recorded turn, so the running turn is taken off while one runs.
+     */
+    private int finishedTurn() {
+        return Math.max(0, busy ? ioTurn - 1 : ioTurn);
     }
 
     /** The ids of the requests the running turn is for; empty when no turn runs. */
@@ -4530,6 +4538,12 @@ public class ChatSession extends Interpreter {
         // New conversation: end the current I/O-log session and renumber turns from 1.
         if (ioLog != null) ioLog.resetSession(myChatName());
         ioTurn = 0;
+        publishStatus();
+        // The work frame of Suggest prompt starts a new generation with the new session
+        // (SuggestPromptGuidedByWorkFrame_261128_oo01); an instance without it has no such actor.
+        ActorRef<com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper> suggest =
+                system == null ? null : system.getActor(myChatName() + ".suggestprompt");
+        if (suggest != null) suggest.tell(com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper::startNewFrame);
         // The settings live in the session; the new one starts with them, or a restart would put the conversation back
         // on the default provider (it is still on the one it was on).
         recordSettings(null);

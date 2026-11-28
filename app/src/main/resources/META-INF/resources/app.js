@@ -961,21 +961,35 @@
         return text;
     }
 
-    // The Suggest prompt button. Stage 1 asks the server what the assistant's last message asks and which
-    // choices it offers; with choices the person picks one (radio) and presses Next, without them the
-    // dialog goes straight on. Stage 2 lists four to six long follow-up instructions predicted on that
-    // decision; choosing one puts it in the input box, led by "Go with X. " when a choice was made. It
-    // replaces what is in the box, as the queue's Edit button does, and never sends. A reply that arrives
-    // after the dialog was closed is dropped.
+    // The Suggest prompt button. It has two entries (SuggestPromptGuidedByWorkFrame_261128_oo01).
+    // The default one answers the assistant's last message: stage 1 asks the server what that message asks and which
+    // choices it offers (with choices the person picks one and presses Next, without them the dialog goes straight
+    // on); stage 2 lists four to six long follow-up instructions predicted on that decision. The big-picture entry,
+    // reached by the button above the suggestions, reads the conversation's work frame instead: the person picks a
+    // topic, a step and a fixed question (no LLM is called for those three), then stage 2 lists the instructions on
+    // that. A chosen instruction goes into the input box, led by the preamble built from the work frame and by
+    // "Go with X. " when a choice was made. It replaces what is in the box, as the queue's Edit button does, and never
+    // sends. A reply that arrives after the dialog was closed is dropped. "Analyze conversation" asks for one update of
+    // the work frame at once.
     function initSuggestPrompt() {
         var btn = el("suggest-btn");
         var overlay = el("suggest-overlay");
         var body = el("suggest-dialog-body");
         var closeBtn = el("suggest-dialog-close");
+        var heading = el("suggest-heading");
+        var pictureBtn = el("suggest-picture-btn");
+        var reasonEl = el("suggest-picture-reason");
+        var frameLine = el("suggest-frame-line");
+        var analyzeBtn = el("suggest-analyze-btn");
+        var analyzeStatus = el("suggest-analyze-status");
         if (!btn || !overlay || !body) return;
+        var NO_PICTURE = "No overall picture is recorded for this conversation yet.";
         var ticket = 0;
+        var mode = "last";
+        var frame = null;
+        var analyzeTicket = 0;
 
-        function close() { ticket++; overlay.style.display = "none"; }
+        function close() { ticket++; analyzeTicket++; overlay.style.display = "none"; }
         function show(cls, text) {
             body.textContent = "";
             var d = document.createElement("div");
@@ -983,7 +997,14 @@
             d.textContent = text;
             body.appendChild(d);
         }
-        function fail(why) { show("pp-error", "Could not predict prompts: " + why); }
+        function add(cls, text) {
+            var d = document.createElement("div");
+            d.className = cls;
+            d.textContent = text;
+            body.appendChild(d);
+            return d;
+        }
+        function fail(why) { show("pp-error", "Could not suggest prompts: " + why); }
         function post(path, payload) {
             var opts = { method: "POST" };
             if (payload) {
@@ -994,40 +1015,83 @@
                 return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
             });
         }
-        function choose(head, text) {
-            promptInput.value = head + text;
+        function get(path) {
+            return fetch(apiUrl(chatUrl(path))).then(function (r) {
+                return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
+            });
+        }
+        function choose(prefix, text) {
+            promptInput.value = prefix + text;
             if (typeof autoResize === "function") autoResize();
             close();
             promptInput.focus();
         }
 
+        // ---- the work frame as the screen knows it ----
+        function frameNote() {
+            if (!frame || !frame.revision) return "No work frame has been recorded yet.";
+            return "Work frame updated " + new Date(frame.updatedAt).toLocaleString() + "; "
+                    + frame.newTurns + " turn" + (frame.newTurns === 1 ? "" : "s") + " finished since.";
+        }
+        function paintFrame() {
+            frameLine.textContent = frameNote();
+            var usable = !!(frame && frame.available);
+            if (mode === "last") {
+                pictureBtn.textContent = "Back to the big picture";
+                heading.textContent = "Suggestions for the last message";
+                pictureBtn.disabled = !usable;
+                pictureBtn.title = usable ? "" : NO_PICTURE;
+                reasonEl.textContent = usable ? "" : NO_PICTURE;
+            } else {
+                pictureBtn.textContent = "Back to the last message";
+                heading.textContent = "The big picture";
+                pictureBtn.disabled = false;
+                pictureBtn.title = "";
+                reasonEl.textContent = "";
+            }
+        }
+        function loadFrame() {
+            return get("/suggest-frame").then(function (res) {
+                frame = res.ok ? res.j : null;
+                paintFrame();
+                return frame;
+            }).catch(function () { frame = null; paintFrame(); return null; });
+        }
+
+        // ---- the follow-ups: shared by both entries ----
+        function renderPrompts(j, questionLine) {
+            var prompts = j && j.prompts;
+            var head = (j && j.head) || "";
+            var preamble = (j && j.preamble) || "";
+            body.textContent = "";
+            if (questionLine) add("pp-question", questionLine);
+            if (preamble) add("pp-preamble", preamble.replace(/\n+$/, ""));
+            prompts.forEach(function (p) {
+                var item = document.createElement("button");
+                item.className = "pp-item";
+                item.textContent = head + p;
+                item.addEventListener("click", function () { choose(preamble + head, p); });
+                body.appendChild(item);
+            });
+        }
+        function usablePrompts(res) {
+            var prompts = res.j && res.j.prompts;
+            return res.ok && Array.isArray(prompts) && prompts.length > 0;
+        }
+
+        // ---- default entry: the assistant's last message ----
         // Stage 2: the follow-ups on the decision made (choice is null when the question had no choices).
         function followups(question, choice) {
             var mine = ++ticket;
-            show("pp-status", "Predicting what you may say next…");
+            show("pp-status", "Suggesting what you may say next…");
             post("/suggest-followups", { question: question, choice: choice })
                 .then(function (res) {
                     if (mine !== ticket) return;
-                    var prompts = res.j && res.j.prompts;
-                    if (!res.ok || !Array.isArray(prompts) || prompts.length === 0) {
+                    if (!usablePrompts(res)) {
                         fail((res.j && res.j.message) || "no prompts came back");
                         return;
                     }
-                    var head = (res.j && res.j.head) || "";
-                    body.textContent = "";
-                    if (question) {
-                        var q = document.createElement("div");
-                        q.className = "pp-question";
-                        q.textContent = (choice ? "Go with " + choice.id + " — " : "") + question;
-                        body.appendChild(q);
-                    }
-                    prompts.forEach(function (p) {
-                        var item = document.createElement("button");
-                        item.className = "pp-item";
-                        item.textContent = head + p;
-                        item.addEventListener("click", function () { choose(head, p); });
-                        body.appendChild(item);
-                    });
+                    renderPrompts(res.j, question ? (choice ? "Go with " + choice.id + " — " : "") + question : "");
                 })
                 .catch(function (e) { if (mine === ticket) fail(e.message); });
         }
@@ -1061,9 +1125,10 @@
             body.appendChild(next);
         }
 
-        btn.addEventListener("click", function () {
+        function enterLast() {
+            mode = "last";
+            paintFrame();
             var mine = ++ticket;
-            overlay.style.display = "flex";
             show("pp-status", "Reading the assistant's last message…");
             post("/suggest-question")
                 .then(function (res) {
@@ -1078,7 +1143,160 @@
                     else followups(question, null);
                 })
                 .catch(function (e) { if (mine === ticket) fail(e.message); });
+        }
+
+        // ---- big-picture entry: topic, step, fixed question; DB reads only until the last suggestion ----
+        function pickTopic() {
+            ++ticket;
+            var topics = frame.topics || [];
+            if (frame.skipTopics && topics.length === 1) { pickStep(topics[0]); return; }
+            body.textContent = "";
+            add("pp-heading", "Which topic do you want to talk about next?");
+            add("pp-note", frameNote());
+            topics.forEach(function (t) {
+                var item = document.createElement("button");
+                item.className = "pp-item pp-topic";
+                item.textContent = t.title + " (" + t.workType + ")" + (t.delegateSquad ? " → " + t.delegateSquad : "");
+                item.addEventListener("click", function () { pickStep(t); });
+                body.appendChild(item);
+            });
+        }
+        function pickStep(topic) {
+            ++ticket;
+            if (topic.skipSteps || !topic.steps || topic.steps.length === 0) { pickQuestion(topic, null); return; }
+            body.textContent = "";
+            add("pp-heading", "Which step are you concerned with?");
+            topic.steps.forEach(function (s) {
+                var item = document.createElement("button");
+                item.className = "pp-item pp-step";
+                item.textContent = s.seq + ". " + s.title;
+                var pg = document.createElement("span");
+                pg.className = "pp-progress";
+                pg.textContent = "[" + s.progress + "]";
+                item.appendChild(pg);
+                item.addEventListener("click", function () { pickQuestion(topic, s); });
+                body.appendChild(item);
+            });
+            var none = document.createElement("button");
+            none.className = "pp-item pp-step";
+            none.textContent = "No particular step";
+            none.addEventListener("click", function () { pickQuestion(topic, null); });
+            body.appendChild(none);
+        }
+        function pickQuestion(topic, step) {
+            var mine = ++ticket;
+            show("pp-status", "Reading the fixed questions…");
+            post("/suggest-frame/questions", { topicId: topic.topicId, stepSeq: step ? step.seq : null })
+                .then(function (res) {
+                    if (mine !== ticket) return;
+                    var questions = res.j && res.j.questions;
+                    if (!res.ok || !Array.isArray(questions)) {
+                        fail((res.j && res.j.message) || "the fixed questions could not be read");
+                        return;
+                    }
+                    var preamble = (res.j && res.j.preamble) || "";
+                    body.textContent = "";
+                    add("pp-heading", "What do you want to ask about it?");
+                    questions.forEach(function (q) {
+                        var row = document.createElement("div");
+                        row.className = "pp-row";
+                        var item = document.createElement("button");
+                        item.className = "pp-item pp-fixed";
+                        item.textContent = q.text;
+                        item.addEventListener("click", function () { pictureFollowups(topic, step, q.text); });
+                        var use = document.createElement("button");
+                        use.className = "pp-use";
+                        use.textContent = "Put in box";
+                        use.title = "Put this question itself in the input box.";
+                        use.addEventListener("click", function () { choose(preamble, q.text); });
+                        row.appendChild(item);
+                        row.appendChild(use);
+                        body.appendChild(row);
+                    });
+                })
+                .catch(function (e) { if (mine === ticket) fail(e.message); });
+        }
+        function pictureFollowups(topic, step, questionText) {
+            var mine = ++ticket;
+            show("pp-status", "Suggesting what you may say next…");
+            post("/suggest-followups", { topicId: topic.topicId, stepSeq: step ? step.seq : null, questionText: questionText })
+                .then(function (res) {
+                    if (mine !== ticket) return;
+                    if (!usablePrompts(res)) {
+                        fail((res.j && res.j.message) || "no prompts came back");
+                        return;
+                    }
+                    renderPrompts(res.j, topic.title + (step ? " / " + step.seq + ". " + step.title : "") + " — " + questionText);
+                })
+                .catch(function (e) { if (mine === ticket) fail(e.message); });
+        }
+        function enterPicture() {
+            mode = "picture";
+            paintFrame();
+            ++ticket;
+            loadFrame().then(function (f) {
+                if (mode !== "picture" || overlay.style.display === "none") return;
+                if (!f || !f.available) { enterLast(); return; }
+                pickTopic();
+            });
+        }
+
+        // ---- Analyze conversation ----
+        function analyze() {
+            var mine = ++analyzeTicket;
+            analyzeBtn.disabled = true;
+            analyzeStatus.textContent = "";
+            post("/suggest-frame/analyze").then(function (res) {
+                analyzeBtn.disabled = false;
+                if (mine !== analyzeTicket) return;
+                var r = res.j && res.j.result;
+                if (r === "started") {
+                    var n = res.j.turns;
+                    analyzeStatus.textContent = "Analyzing " + n + " finished turns…";
+                    watchAnalysis(mine, frame ? frame.revision : 0, 0);
+                } else if (r === "already-running") {
+                    analyzeStatus.textContent = "Already analyzing.";
+                } else if (r === "nothing-new") {
+                    analyzeStatus.textContent = "Nothing new to analyze.";
+                } else {
+                    analyzeStatus.textContent = "Could not analyze: " + ((res.j && res.j.message) || "no answer");
+                }
+            }).catch(function (e) {
+                analyzeBtn.disabled = false;
+                if (mine === analyzeTicket) analyzeStatus.textContent = "Could not analyze: " + e.message;
+            });
+        }
+        // The update runs on after the answer; the frame line is renewed when it has landed.
+        function watchAnalysis(mine, revisionBefore, tries) {
+            if (mine !== analyzeTicket || tries > 60) return;
+            setTimeout(function () {
+                if (mine !== analyzeTicket) return;
+                loadFrame().then(function (f) {
+                    if (mine !== analyzeTicket) return;
+                    if (f && f.revision > revisionBefore) {
+                        analyzeStatus.textContent = "Analyzed. " + f.newTurns + " turn" + (f.newTurns === 1 ? "" : "s") + " still unread.";
+                        return;
+                    }
+                    watchAnalysis(mine, revisionBefore, tries + 1);
+                });
+            }, 1000);
+        }
+
+        btn.addEventListener("click", function () {
+            overlay.style.display = "flex";
+            analyzeStatus.textContent = "";
+            analyzeBtn.disabled = false;
+            mode = "last";
+            frame = null;
+            paintFrame();
+            loadFrame();
+            enterLast();
         });
+        pictureBtn.addEventListener("click", function () {
+            if (pictureBtn.disabled) return;
+            if (mode === "last") enterPicture(); else { loadFrame(); enterLast(); }
+        });
+        analyzeBtn.addEventListener("click", analyze);
         if (closeBtn) closeBtn.addEventListener("click", close);
         overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
         document.addEventListener("keydown", function (e) {

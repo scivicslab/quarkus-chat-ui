@@ -163,6 +163,40 @@ public final class PromptSuggestion {
         return sb.toString();
     }
 
+    /**
+     * The second question to the model at the big-picture entry: the follow-up instructions the person may give next,
+     * taking the chosen topic, step and fixed question as decided. The body of an instruction is at most
+     * {@link #MAX_PROMPT_CHARS} characters; the preamble is put in front of it by the caller.
+     *
+     * @param recent        the conversation's newest messages, oldest first
+     * @param topic         the chosen topic
+     * @param step          the chosen step, or {@code null} when none
+     * @param fixedQuestion the chosen fixed question with its placeholders filled in
+     */
+    public static String followupPromptForFrame(List<Message> recent, SuggestFrame.Topic topic, SuggestFrame.Step step,
+                                                String fixedQuestion) {
+        int from = Math.max(0, recent.size() - RECENT_MESSAGES);
+        StringBuilder sb = new StringBuilder();
+        sb.append("Below is the end of a conversation between a person and an AI assistant.\n")
+          .append("The person has decided what to talk about next.\n")
+          .append("Topic: ").append(topic.title()).append(" (").append(topic.workType()).append(")\n");
+        if (step != null) {
+            sb.append("Step: ").append(step.seq()).append(" ").append(step.title()).append(" [").append(step.progress()).append("]\n");
+        }
+        sb.append("What the person wants to ask about it: ").append(fixedQuestion).append("\n")
+          .append("Predict ").append(MIN_COUNT).append(" to ").append(MAX_COUNT)
+          .append(" different instructions the person is likely to give next, taking that decision as made.\n")
+          .append("Each instruction must be concrete and fairly long (two or three sentences): say what to do and include a reason, a constraint, ")
+          .append("or the form the result should take. Never a bare yes or no, and do not repeat the decision itself.\n")
+          .append("Write each in the person's own voice and in the language the person has been using.\n")
+          .append("Reply with ONLY a JSON array of strings — no preamble, no explanation, no code fence.\n\n")
+          .append("Conversation:\n");
+        for (Message m : recent.subList(from, recent.size())) {
+            sb.append(m.fromPerson() ? "PERSON: " : "ASSISTANT: ").append(clip(m.text())).append("\n\n");
+        }
+        return sb.toString();
+    }
+
     private static String clip(String text) {
         String t = text == null ? "" : text.strip();
         return t.length() <= MAX_MESSAGE_CHARS ? t : "…" + t.substring(t.length() - MAX_MESSAGE_CHARS);

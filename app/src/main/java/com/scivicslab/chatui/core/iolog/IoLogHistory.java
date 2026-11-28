@@ -99,6 +99,63 @@ public final class IoLogHistory {
         }
     }
 
+    /**
+     * One finished turn's record: what was asked and what came back.
+     *
+     * @param turn     the turn's number within its I/O log session
+     * @param question what was asked
+     * @param answer   the answer, or {@code null} when the turn failed
+     * @param error    the failure, or {@code null} when the turn was answered
+     */
+    public record TurnRow(int turn, String question, String answer, String error) {
+    }
+
+    private static final java.util.regex.Pattern TURN_CONVERSATION_LABEL =
+            java.util.regex.Pattern.compile("turn(\\d+)/conversation");
+
+    /**
+     * Reads finished turns by number, for the work frame ({@code SuggestPromptGuidedByWorkFrame_261128_oo01}). Only the
+     * conversation's current I/O log session is read: after {@code /clear} the turn numbers start again at 1, so rows
+     * of an ended session are not this conversation's turns. A turn that has no {@code conversation} entry has not
+     * finished and is not returned.
+     *
+     * @param conversationSquadName the conversation's name, e.g. {@code project1/chat-02}
+     * @param afterTurn             only turns numbered above this
+     * @param upToTurn              only turns numbered up to and including this
+     * @return the rows, oldest first; empty when there is no current session; the same turn may appear more than once
+     *         (an autonomous continuation writes one more entry under its number)
+     * @throws IllegalStateException when the log could not be read, so a caller does not take a failure for "no turns"
+     */
+    public List<TurnRow> readTurns(String conversationSquadName, int afterTurn, int upToTurn) {
+        if (ioLog == null || upToTurn <= afterTurn) return List.of();
+        // Neither call creates a session: a read must not open one.
+        long session = ioLog.currentSessionId(conversationSquadName);
+        if (session < 0) session = ioLog.findResumableSession(conversationSquadName);
+        if (session < 0) return List.of();
+        ioLog.flush();
+        String sql = "SELECT l.label, l.message FROM logs l WHERE l.session_id = ? AND l.label LIKE 'turn%/conversation' "
+                + "ORDER BY l.timestamp ASC, l.id ASC";
+        List<TurnRow> rows = new ArrayList<>();
+        try (Connection c = DriverManager.getConnection(ioLog.jdbcUrl()); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setLong(1, session);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    java.util.regex.Matcher m = TURN_CONVERSATION_LABEL.matcher(rs.getString("label"));
+                    if (!m.matches()) continue;
+                    int turn = Integer.parseInt(m.group(1));
+                    if (turn <= afterTurn || turn > upToTurn) continue;
+                    IoLogView.Turn t = IoLogView.parseConversationEntry(rs.getString("message"));
+                    if (t != null) rows.add(new TurnRow(turn, t.question(), t.answer(), t.error()));
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("the I/O log could not be read: " + e.getMessage(), e);
+        }
+        // Stable: rows of one turn keep the order they were written in.
+        rows.sort(java.util.Comparator.comparingInt(TurnRow::turn));
+        return rows;
+    }
+
     private static boolean hasSession(Connection c, String workflowName) throws Exception {
         try (PreparedStatement ps = c.prepareStatement("SELECT 1 FROM sessions WHERE workflow_name = ? LIMIT 1")) {
             ps.setString(1, workflowName);

@@ -147,7 +147,7 @@
                     <div id="input-area" style="position:relative">
                         <div id="skill-suggest" style="display:none"></div>
                         <div id="image-attachments" style="display:none"></div>
-                        <textarea id="prompt-input" placeholder="Type a message… (Shift+Enter to send, Ctrl+Shift+Enter to send with thinking, Tab to predict, /btw question for side questions, paste or drop an image to attach it)" rows="5"></textarea>
+                        <textarea id="prompt-input" placeholder="Type a message… (Shift+Enter to send, Ctrl+Shift+Enter to send with thinking, Tab to suggest, /btw question for side questions, paste or drop an image to attach it)" rows="5"></textarea>
                         <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
                         <div id="input-toolbar">
                             <div id="input-toolbar-left">
@@ -604,6 +604,16 @@
                 <span id="suggest-dialog-title">Suggest prompt</span>
                 <button id="suggest-dialog-close" title="Close (Escape)">&#x00D7;</button>
             </div>
+            <div id="suggest-tools">
+                <button id="suggest-analyze-btn" title="Bring the work frame up to date now, without waiting for the interval.">Analyze conversation</button>
+                <span id="suggest-analyze-status"></span>
+            </div>
+            <div id="suggest-frame-line"></div>
+            <div id="suggest-nav">
+                <span id="suggest-heading">Suggestions for the last message</span>
+                <button id="suggest-picture-btn">Back to the big picture</button>
+            </div>
+            <div id="suggest-picture-reason"></div>
             <div id="suggest-dialog-body"></div>
         </div>
     </div>
