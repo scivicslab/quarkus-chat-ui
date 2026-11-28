@@ -84,6 +84,11 @@ public class ViewToggleCheck {
         return String.valueOf(page.evaluate(ANSWER_KINDS));
     }
 
+    /** @return {@code all} or {@code person}: the button of the View control that is pressed */
+    static String viewMode(Page page) {
+        return "true".equals(page.getAttribute("#view-person-btn", "aria-pressed")) ? "person" : "all";
+    }
+
     static int visible(Page page, String selector) {
         int n = 0;
         for (ElementHandle e : page.querySelectorAll(selector)) if (e.isVisible()) n++;
@@ -144,15 +149,24 @@ public class ViewToggleCheck {
                     "their answers carry turn-other too");
             check(page.querySelectorAll(OTHER_ANSWERS).size() == page.querySelectorAll("#chat-area .message.assistant.turn-other").size(),
                     "and each of those answers is marked as its turn's final answer (turn-answer)");
-            String btn = page.textContent("#view-mode-btn");
-            check("Show all messages".equals(btn.strip()), "the button starts as 'Show all messages': " + btn);
-            check(visible(page, "#chat-area .message") == allBubbles, "in 'Show all messages' every bubble is visible");
+            check("View:".equals(page.textContent("#view-mode .view-mode-label").strip()), "the control is labelled 'View:'");
+            check("All messages".equals(page.textContent("#view-all-btn").strip())
+                            && "Person-facing only".equals(page.textContent("#view-person-btn").strip()),
+                    "the two buttons read 'All messages' and 'Person-facing only'");
+            check("true".equals(page.getAttribute("#view-all-btn", "aria-pressed"))
+                            && "false".equals(page.getAttribute("#view-person-btn", "aria-pressed")),
+                    "'All messages' is pressed and 'Person-facing only' is not");
+            check(visible(page, "#chat-area .message") == allBubbles, "with 'All messages' pressed every bubble is visible");
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/1-all.png")));
 
-            // Toggle to "Show person-facing messages only".
-            page.click("#view-mode-btn");
-            check("Show person-facing messages only".equals(page.textContent("#view-mode-btn").strip()), "the button now reads 'Show person-facing messages only'");
-            check("true".equals(page.getAttribute("#view-mode-btn", "aria-pressed")), "aria-pressed is true");
+            // Press "Person-facing only".
+            page.click("#view-person-btn");
+            check("person".equals(viewMode(page)), "the 'Person-facing only' button is now pressed");
+            check("true".equals(page.getAttribute("#view-person-btn", "aria-pressed"))
+                            && "false".equals(page.getAttribute("#view-all-btn", "aria-pressed")), "aria-pressed is true on it only");
+            // Clicking the pressed button again changes nothing.
+            page.click("#view-person-btn");
+            check("person".equals(viewMode(page)), "clicking the pressed button keeps the choice");
             check(page.querySelectorAll(HIDDEN).size() >= 2 && visible(page, HIDDEN) == 0,
                     "no input or step of another actor's turn is visible");
             int otherAnswers = page.querySelectorAll(OTHER_ANSWERS).size();
@@ -168,7 +182,7 @@ public class ViewToggleCheck {
             check(page.querySelectorAll("#chat-area .message").size() == allBubbles, "nothing was deleted: still " + allBubbles + " bubbles");
             page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("/tmp/uitest/2-person-only.png")));
 
-            // A live turn that arrives while in "Show person-facing messages only" follows the same rule.
+            // A live turn that arrives with "Person-facing only" pressed follows the same rule.
             rest("POST", "/api/projects/project1/chats/02/chat", "{\"text\":\"Second API turn while hidden: reply OK.\"}");
             page.waitForFunction("document.querySelectorAll('#chat-area .message.user.turn-other').length >= " + (otherUsers + 1));
             waitIdle("02");
@@ -228,7 +242,7 @@ public class ViewToggleCheck {
             page.reload();
             page.waitForLoadState(LoadState.DOMCONTENTLOADED);
             page.waitForSelector("#chat-area .message.user", ATTACHED);
-            check("Show person-facing messages only".equals(page.textContent("#view-mode-btn").strip()), "after reload the button still reads 'Show person-facing messages only'");
+            check("person".equals(viewMode(page)), "after reload 'Person-facing only' is still pressed");
             check(page.querySelectorAll("#chat-area .message.user.turn-person").size() == 2
                             && page.querySelectorAll("#chat-area .message.user.turn-other").size() == otherUsersBeforeReload,
                     "restored history marks the turns the same way");
@@ -246,16 +260,16 @@ public class ViewToggleCheck {
             // Another chat has its own choice.
             page.evaluate("window.chatUiSwitchChat('project1','03')");
             page.waitForSelector("#chat-area .message.user", ATTACHED);
-            check("Show all messages".equals(page.textContent("#view-mode-btn").strip()), "chat-03 has its own choice: 'Show all messages'");
+            check("all".equals(viewMode(page)), "chat-03 has its own choice: 'All messages' is pressed");
             check(visible(page, "#chat-area .message.turn-other") >= 2, "chat-03 shows its job turn");
             page.evaluate("window.chatUiSwitchChat('project1','02')");
             page.waitForSelector("#chat-area .message.user", ATTACHED);
-            check("Show person-facing messages only".equals(page.textContent("#view-mode-btn").strip()), "back on chat-02 the choice is 'Show person-facing messages only'");
+            check("person".equals(viewMode(page)), "back on chat-02 'Person-facing only' is pressed");
             check(visible(page, HIDDEN) == 0, "and its other turns' inputs are hidden");
 
             // Back to All.
-            page.click("#view-mode-btn");
-            check("Show all messages".equals(page.textContent("#view-mode-btn").strip()), "toggled back to 'Show all messages'");
+            page.click("#view-all-btn");
+            check("all".equals(viewMode(page)), "'All messages' pressed again");
             check(visible(page, "#chat-area .message") == page.querySelectorAll("#chat-area .message").size(), "everything is visible again");
             check(kind(page, "asker") >= 1 && kind(page, "askerShown") == kind(page, "asker"),
                     "with the filter off, the final answers of the job's requests are visible again: " + kinds(page));
@@ -271,8 +285,8 @@ public class ViewToggleCheck {
             check(kind(page, "asker") >= 2 && kind(page, "askerShown") == kind(page, "asker")
                             && kind(page, "askerFooterShown") == kind(page, "asker"),
                     "chat-03 with the filter off: the answers to the job's and chat-02's requests are visible, with their Request footer");
-            page.click("#view-mode-btn");
-            check("Show person-facing messages only".equals(page.textContent("#view-mode-btn").strip()), "chat-03 now shows person-facing messages only");
+            page.click("#view-person-btn");
+            check("person".equals(viewMode(page)), "chat-03 now has 'Person-facing only' pressed");
             check(kind(page, "asker") >= 2 && kind(page, "askerShown") == 0 && kind(page, "askerFooterShown") == 0,
                     "the answers to the requests are hidden from history, their Request footer with them: " + kinds(page));
             int askerBefore = kind(page, "asker");
@@ -317,8 +331,8 @@ public class ViewToggleCheck {
             check(kind(page, "kept") >= 1 && kind(page, "keptShown") == kind(page, "kept"),
                     "after reload, the other answers (the API turn) are visible");
 
-            page.click("#view-mode-btn");
-            check("Show all messages".equals(page.textContent("#view-mode-btn").strip()), "chat-03 toggled back to 'Show all messages'");
+            page.click("#view-all-btn");
+            check("all".equals(viewMode(page)), "chat-03 'All messages' pressed again");
             check(visible(page, "#chat-area .message") == page.querySelectorAll("#chat-area .message").size()
                             && kind(page, "askerFooterShown") == kind(page, "asker"),
                     "with the filter off everything on chat-03 is visible again, the answers to requests and their footers too");

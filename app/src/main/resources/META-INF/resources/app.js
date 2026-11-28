@@ -2024,23 +2024,19 @@
         return localStorage.getItem(viewModeKey()) === "person" ? "person" : "all";
     }
 
-    // Shows the stored choice of the chat now on screen: the class on the chat area and the button.
+    // Shows the stored choice of the chat now on screen: the class on the chat area and which of the two buttons is
+    // pressed.
     function applyViewMode() {
-        var personOnly = currentViewMode() === "person";
-        if (chatArea) chatArea.classList.toggle("person-only", personOnly);
-        var btn = document.getElementById("view-mode-btn");
-        if (!btn) return;
-        btn.textContent = personOnly ? "Show person-facing messages only" : "Show all messages";
-        btn.setAttribute("aria-pressed", personOnly ? "true" : "false");
-        btn.title = personOnly
-            ? "Showing the turns you started, and the final answer of every other turn except the replies to "
-              + "requests from other conversations. Click to show every message."
-            : "Showing every message of this ConversationSquad actor. Click to hide the inputs and steps of the turns "
-              + "you did not start, and the replies to other conversations' requests, keeping the other final answers.";
+        var mode = currentViewMode();
+        if (chatArea) chatArea.classList.toggle("person-only", mode === "person");
+        var buttons = document.querySelectorAll(".view-mode-btn");
+        for (var i = 0; i < buttons.length; i++) {
+            buttons[i].setAttribute("aria-pressed", buttons[i].getAttribute("data-view") === mode ? "true" : "false");
+        }
     }
 
-    function toggleViewMode() {
-        localStorage.setItem(viewModeKey(), currentViewMode() === "person" ? "all" : "person");
+    function setViewMode(mode) {
+        localStorage.setItem(viewModeKey(), mode === "person" ? "person" : "all");
         applyViewMode();
         scrollToBottom();
     }
@@ -2255,8 +2251,9 @@
         if (clearChatBtn) clearChatBtn.addEventListener("click", clearChatDisplay);
         var saveChatBtn = el("save-chat-btn");
         if (saveChatBtn) saveChatBtn.addEventListener("click", saveChatAsMarkdown);
-        var viewModeBtn = el("view-mode-btn");
-        if (viewModeBtn) viewModeBtn.addEventListener("click", toggleViewMode);
+        document.querySelectorAll(".view-mode-btn").forEach(function (b) {
+            b.addEventListener("click", function () { setViewMode(b.getAttribute("data-view")); });
+        });
         applyViewMode();
 
         if (sendBtn) sendBtn.addEventListener("click", function () { sendPrompt(); });
