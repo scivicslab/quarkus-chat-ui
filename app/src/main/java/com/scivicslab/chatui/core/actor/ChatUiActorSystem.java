@@ -1072,7 +1072,7 @@ public class ChatUiActorSystem implements ConversationControls {
         String last = PromptSuggestion.lastAssistantText(recentMessages(conversation));
         if (last == null || last.isBlank()) {
             return PromptSuggestions.refused(PromptSuggestions.Kind.NO_HISTORY,
-                    "this conversation has no assistant message to predict from");
+                    "this conversation has no assistant message to suggest from");
         }
         String[] answer = askLocal(conversation, PromptSuggestion.questionPromptFor(last));
         if (answer[0] == null || answer[0].isBlank()) {
@@ -1099,7 +1099,7 @@ public class ChatUiActorSystem implements ConversationControls {
         java.util.List<PromptSuggestion.Message> recent = recentMessages(conversation);
         if (recent.isEmpty()) {
             return PromptSuggestions.refused(PromptSuggestions.Kind.NO_HISTORY,
-                    "this conversation has no messages to predict from");
+                    "this conversation has no messages to suggest from");
         }
         String[] answer = askLocal(conversation, PromptSuggestion.followupPromptFor(recent, asked, chosen));
         if (answer[0] == null || answer[0].isBlank()) {
