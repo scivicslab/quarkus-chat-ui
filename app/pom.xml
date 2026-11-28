@@ -18,6 +18,8 @@
     <!-- uber-jar without the -runner suffix, per the project naming rule -->
     <quarkus.package.jar.type>uber-jar</quarkus.package.jar.type>
     <quarkus.package.jar.add-runner-suffix>false</quarkus.package.jar.add-runner-suffix>
+    <!-- Integration tests (*IT) need k8s-dev; "mvn verify -DskipITs=false" turns them on there. -->
+    <skipITs>true</skipITs>
   </properties>
 
   <dependencies>
@@ -134,6 +136,17 @@
       <groupId>org.apache.pdfbox</groupId>
       <artifactId>pdfbox</artifactId>
       <version>${pdfbox.version}</version>
+    </dependency>
+    <!-- The Suggest prompt work frame DB (SuggestPromptGuidedByWorkFrame_261128_oo01): the named datasource "suggest".
+         Its H2 is the one the BOM manages; plugin-log-db declares 2.2.224 but the BOM already overrides it, so there is
+         one H2 on the classpath, as before this dependency. -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-jdbc-h2</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-agroal</artifactId>
     </dependency>
     <!-- Health probe for Kubernetes, per the project standard -->
     <dependency>
@@ -294,6 +307,27 @@
             <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
             <!-- The end-of-turn reminder step adds a model call to every turn; the tests that count a conversation's
                  model calls would all change. ReminderStepTest turns it on for the conversations it tests. -->
+            <chat-ui.reminder-decision>false</chat-ui.reminder-decision>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+      <!-- *IT.java: integration tests (the project's testing rule). They run on k8s-dev with
+           "mvn verify -DskipITs=false"; a build anywhere else leaves them out, since skipITs is true by default. -->
+      <plugin>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <version>${surefire-plugin.version}</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <systemPropertyVariables>
+            <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+            <maven.home>${maven.home}</maven.home>
             <chat-ui.reminder-decision>false</chat-ui.reminder-decision>
           </systemPropertyVariables>
         </configuration>
