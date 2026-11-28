@@ -1132,6 +1132,111 @@ public class ChatUiActorSystem implements ConversationControls {
     }
 
     /**
+     * The work frame of a conversation as the screen reads it, or why there is none.
+     *
+     * @param kind          {@code DONE}, or why nothing is given
+     * @param frame         the newest generation's work frame; empty (never {@code null}) when none was recorded yet
+     * @param finishedTurn  the number of the last finished turn
+     * @param questions     the fixed questions
+     */
+    public record SuggestFrameRead(Kind kind, com.scivicslab.chatui.suggestprompt.SuggestFrame frame, int finishedTurn,
+                                   java.util.List<com.scivicslab.chatui.suggestprompt.SuggestQuestion> questions) {
+        public enum Kind { DONE, UNKNOWN_CHAT, NO_REPOSITORY }
+    }
+
+    /** Reads the conversation's work frame from the Suggest prompt DB. Starts no update and calls no LLM. */
+    public SuggestFrameRead suggestFrame(String projectId, String chatId) {
+        String conversation = chatActorName(projectId, chatId);
+        if (!chats.containsKey(conversation)) {
+            return new SuggestFrameRead(SuggestFrameRead.Kind.UNKNOWN_CHAT, null, 0, java.util.List.of());
+        }
+        if (suggestRepository == null) {
+            return new SuggestFrameRead(SuggestFrameRead.Kind.NO_REPOSITORY, null, 0, java.util.List.of());
+        }
+        com.scivicslab.chatui.suggestprompt.SuggestFrame frame = suggestRepository.loadCurrent(conversation)
+                .orElseGet(() -> com.scivicslab.chatui.suggestprompt.SuggestFrame.empty(conversation, 1,
+                        suggestRoleOf(projectId, chatId)));
+        ChatSessionIIAR session = chatSessions.get(conversation);
+        int finished = session == null ? 0 : session.finishedTurnDirect();
+        return new SuggestFrameRead(SuggestFrameRead.Kind.DONE, frame, finished, suggestRepository.questions());
+    }
+
+    /**
+     * The preamble to put at the head of a suggested instruction: the first line only for the default entry, and the
+     * plan of the chosen topic as the second line at the big-picture entry. Empty when the frame is empty.
+     *
+     * @param topicId the chosen topic, or {@code null} for the default entry
+     */
+    public String suggestPreamble(String projectId, String chatId, Integer topicId) {
+        SuggestFrameRead read = suggestFrame(projectId, chatId);
+        if (read.kind() != SuggestFrameRead.Kind.DONE) return "";
+        return com.scivicslab.chatui.suggestprompt.SuggestPreamble.of(read.frame(), topicId);
+    }
+
+    /**
+     * The person pressed {@code Analyze conversation}: asks the conversation's Suggest prompt actor for one update
+     * now. Answers at once; the update itself runs on.
+     *
+     * @return what was found, or {@code null} when the conversation or its actor does not exist
+     */
+    public com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper.Analysis analyzeSuggestFrame(String projectId, String chatId) {
+        String conversation = chatActorName(projectId, chatId);
+        ActorRef<com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper> keeper =
+                chats.containsKey(conversation) ? actorSystem.getActor(conversation + ".suggestprompt") : null;
+        if (keeper == null) return null;
+        try {
+            return keeper.ask(com.scivicslab.chatui.suggestprompt.SuggestPromptKeeper::analyzeNow).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Analyze conversation in " + conversation + " failed", e);
+            return null;
+        }
+    }
+
+    /**
+     * Stage 2 of the big-picture entry: the follow-up instructions on the topic, step and fixed question chosen
+     * ({@link PromptSuggestion#followupPromptForFrame}).
+     *
+     * @param stepSeq       the chosen step, or {@code null}
+     * @param fixedQuestion one of the texts {@link com.scivicslab.chatui.suggestprompt.StagedSuggestions#questionStage}
+     *                      gives for the topic and step; anything else is refused as {@code UNREADABLE}
+     */
+    public PromptSuggestions suggestFollowupsOnFrame(String projectId, String chatId, int topicId, Integer stepSeq,
+                                                     String fixedQuestion) {
+        SuggestFrameRead read = suggestFrame(projectId, chatId);
+        if (read.kind() == SuggestFrameRead.Kind.UNKNOWN_CHAT) {
+            return PromptSuggestions.refused(PromptSuggestions.Kind.UNKNOWN_CHAT,
+                    "no such conversation: " + chatActorName(projectId, chatId));
+        }
+        if (read.kind() != SuggestFrameRead.Kind.DONE) {
+            return PromptSuggestions.refused(PromptSuggestions.Kind.NO_HISTORY, "this instance keeps no work frame");
+        }
+        var topic = read.frame().topics().stream().filter(t -> t.topicId() == topicId).findFirst().orElse(null);
+        var step = topic == null || stepSeq == null ? null
+                : topic.steps().stream().filter(s -> s.seq() == stepSeq).findFirst().orElse(null);
+        boolean listed = topic != null && (stepSeq == null || step != null)
+                && com.scivicslab.chatui.suggestprompt.StagedSuggestions
+                        .questionStage(read.frame(), topicId, stepSeq, read.questions()).stream()
+                        .anyMatch(q -> q.text().equals(fixedQuestion));
+        if (!listed) {
+            return PromptSuggestions.refused(PromptSuggestions.Kind.UNREADABLE,
+                    "the topic, step or question is not in the work frame any more");
+        }
+        String conversation = chatActorName(projectId, chatId);
+        java.util.List<PromptSuggestion.Message> recent = recentMessages(conversation);
+        String[] answer = askLocal(conversation, PromptSuggestion.followupPromptForFrame(recent, topic, step, fixedQuestion));
+        if (answer[0] == null || answer[0].isBlank()) {
+            return PromptSuggestions.refused(PromptSuggestions.Kind.NO_ANSWER, "the model gave no answer");
+        }
+        java.util.List<String> prompts = PromptSuggestion.parseFollowups(answer[0]);
+        if (prompts.size() < PromptSuggestion.MIN_COUNT) {
+            return PromptSuggestions.refused(PromptSuggestions.Kind.UNREADABLE,
+                    "the model's answer did not hold " + PromptSuggestion.MIN_COUNT + " usable prompts");
+        }
+        return new PromptSuggestions(PromptSuggestions.Kind.DONE, new PromptSuggestion.Question(fixedQuestion, java.util.List.of()),
+                prompts, answer[1], "");
+    }
+
+    /**
      * Asks the same Local LLM provider Translate uses ({@link #translator()}), so the model and the
      * server are the ones configured for Translate and the conversation's own provider is not kept
      * waiting. Nothing is added to the conversation; the instruction and the reply are recorded in

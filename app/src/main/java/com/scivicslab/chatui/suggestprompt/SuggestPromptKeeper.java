@@ -151,6 +151,31 @@ public class SuggestPromptKeeper {
         }
     }
 
+    /** What an {@link #analyzeNow} request found; {@code turns} is the number of finished turns still to be read. */
+    public record Analysis(Kind kind, int turns) {
+        public enum Kind { STARTED, ALREADY_RUNNING, NOTHING_NEW }
+    }
+
+    /**
+     * The person pressed {@code Analyze conversation}: one update without waiting for the interval, under the same
+     * rules as the interval's (nothing while a call is out, nothing when no turn has finished since
+     * {@code digested_turn}). It answers at once and does not wait for the LLM.
+     */
+    public Analysis analyzeNow() {
+        if (calling) return new Analysis(Analysis.Kind.ALREADY_RUNNING, 0);
+        try {
+            if (frame == null) restore();
+            if (frame == null) return new Analysis(Analysis.Kind.NOTHING_NEW, 0);
+            int unread = turns.finishedTurn() - frame.digestedTurn();
+            if (unread <= 0) return new Analysis(Analysis.Kind.NOTHING_NEW, 0);
+            bringUpToDate();
+            return new Analysis(Analysis.Kind.STARTED, unread);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, squad + ": the update asked for could not be started", e);
+            return new Analysis(Analysis.Kind.NOTHING_NEW, 0);
+        }
+    }
+
     /** Runs on the launcher's thread: waits for the LLM, and hands the result back as a message. */
     private void call(SuggestPatchPrompt.Built built, int epoch) {
         String reply;

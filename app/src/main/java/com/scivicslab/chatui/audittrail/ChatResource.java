@@ -252,10 +252,12 @@ public class ChatResource {
 
     /**
      * Stage 2 of "Suggest prompt": four to six long follow-up instructions the person may give next.
-     * The body is {@code {"question": "...", "choice": {"id","text"} | null}}.
+     * The body is {@code {"question": "...", "choice": {"id","text"} | null}}; at the big-picture entry it is
+     * {@code {"topicId": 3, "stepSeq": 2 | null, "questionText": "..."}} instead.
      *
-     * @return {@code {"prompts": [4-6 strings], "head", "model"}}, where {@code head} is what the
-     *         chosen prompt starts with; 400 for a body without a question, 404, 409 and 502 as for
+     * @return {@code {"prompts": [4-6 strings], "head", "preamble", "model"}}, where {@code head} is what the
+     *         chosen prompt starts with and {@code preamble} what is put in front of that (built by code from the
+     *         work frame, empty when there is none); 400 for a body without a question, 404, 409 and 502 as for
      *         {@link #suggestQuestion}
      */
     @POST
@@ -264,6 +266,18 @@ public class ChatResource {
     @Produces(MediaType.APPLICATION_JSON)
     public Response suggestFollowups(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
                                      Map<String, Object> body) {
+        // The big-picture entry names the topic (and step) and the fixed question chosen.
+        if (body != null && body.get("topicId") instanceof Number topic) {
+            if (!(body.get("questionText") instanceof String fixed) || fixed.isBlank()) {
+                return Response.status(400).entity(Map.of("type", "error", "message", "questionText is required")).build();
+            }
+            Integer step = body.get("stepSeq") instanceof Number n ? n.intValue() : null;
+            ChatUiActorSystem.PromptSuggestions p = actorSystem.suggestFollowupsOnFrame(projectId, chatId, topic.intValue(), step, fixed);
+            if (p.kind() != ChatUiActorSystem.PromptSuggestions.Kind.DONE) return suggestionError(p);
+            return Response.ok(Map.of("prompts", p.prompts(), "head", "",
+                    "preamble", actorSystem.suggestPreamble(projectId, chatId, topic.intValue()),
+                    "model", p.model() == null ? "" : p.model())).build();
+        }
         Object q = body == null ? null : body.get("question");
         if (!(q instanceof String question) || question.isBlank()) {
             return Response.status(400).entity(Map.of("type", "error", "message", "question is required")).build();
@@ -278,7 +292,84 @@ public class ChatResource {
         if (p.kind() != ChatUiActorSystem.PromptSuggestions.Kind.DONE) return suggestionError(p);
         return Response.ok(Map.of("prompts", p.prompts(),
                 "head", com.scivicslab.chatui.suggestprompt.PromptSuggestion.headFor(chosen),
+                "preamble", actorSystem.suggestPreamble(projectId, chatId, null),
                 "model", p.model() == null ? "" : p.model())).build();
+    }
+
+    /**
+     * What the screen shows of the conversation's work frame: topics, steps, terms, and when it was last brought up to
+     * date. Reads the DB; starts no update and calls no LLM.
+     *
+     * @return the view ({@link com.scivicslab.chatui.suggestprompt.SuggestFrameView#of}) with {@code preamble} (the
+     *         default entry's first line, empty when the frame has no open topic); 404 for no such conversation, 409
+     *         when this instance keeps no work frame
+     */
+    @GET
+    @Path("/{projectId}/chats/{chatId}/suggest-frame")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response suggestFrame(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        ChatUiActorSystem.SuggestFrameRead read = actorSystem.suggestFrame(projectId, chatId);
+        if (read.kind() == ChatUiActorSystem.SuggestFrameRead.Kind.UNKNOWN_CHAT) {
+            return Response.status(404).entity(Map.of("type", "error", "message", "no such conversation")).build();
+        }
+        if (read.kind() == ChatUiActorSystem.SuggestFrameRead.Kind.NO_REPOSITORY) {
+            return Response.status(409).entity(Map.of("type", "error", "message", "this instance keeps no work frame")).build();
+        }
+        Map<String, Object> view = com.scivicslab.chatui.suggestprompt.SuggestFrameView.of(read.frame(), read.finishedTurn());
+        view.put("preamble", com.scivicslab.chatui.suggestprompt.SuggestPreamble.forDefaultEntry(read.frame()));
+        return Response.ok(view).build();
+    }
+
+    /**
+     * The fixed questions of a chosen topic and step, with the placeholders filled in. The body is
+     * {@code {"topicId": 3, "stepSeq": 2 | null}}. Terms have no id of their own, so one question is given for each
+     * term of the topic.
+     *
+     * @return {@code {"questions": [{"id","text"}], "preamble"}}; 400 for a body without a topic
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/suggest-frame/questions")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response suggestFrameQuestions(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId,
+                                          Map<String, Object> body) {
+        if (body == null || !(body.get("topicId") instanceof Number topic)) {
+            return Response.status(400).entity(Map.of("type", "error", "message", "topicId is required")).build();
+        }
+        Integer step = body.get("stepSeq") instanceof Number n ? n.intValue() : null;
+        ChatUiActorSystem.SuggestFrameRead read = actorSystem.suggestFrame(projectId, chatId);
+        if (read.kind() != ChatUiActorSystem.SuggestFrameRead.Kind.DONE) {
+            return Response.status(read.kind() == ChatUiActorSystem.SuggestFrameRead.Kind.UNKNOWN_CHAT ? 404 : 409)
+                    .entity(Map.of("type", "error", "message", "there is no work frame to read")).build();
+        }
+        java.util.List<Map<String, String>> questions = new java.util.ArrayList<>();
+        for (var q : com.scivicslab.chatui.suggestprompt.StagedSuggestions
+                .questionStage(read.frame(), topic.intValue(), step, read.questions())) {
+            questions.add(Map.of("id", q.questionId(), "text", q.text()));
+        }
+        return Response.ok(Map.of("questions", questions,
+                "preamble", com.scivicslab.chatui.suggestprompt.SuggestPreamble.of(read.frame(), topic.intValue()))).build();
+    }
+
+    /**
+     * {@code Analyze conversation}: asks for one update of the work frame now, and does not wait for it.
+     *
+     * @return {@code {"result": "started", "turns": N}}, {@code {"result": "already-running"}} or
+     *         {@code {"result": "nothing-new"}}; 404 when the conversation has no Suggest prompt actor
+     */
+    @POST
+    @Path("/{projectId}/chats/{chatId}/suggest-frame/analyze")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response suggestFrameAnalyze(@PathParam("projectId") String projectId, @PathParam("chatId") String chatId) {
+        var a = actorSystem.analyzeSuggestFrame(projectId, chatId);
+        if (a == null) {
+            return Response.status(404).entity(Map.of("type", "error", "message", "no Suggest prompt actor for this conversation")).build();
+        }
+        return switch (a.kind()) {
+            case STARTED -> Response.ok(Map.of("result", "started", "turns", a.turns())).build();
+            case ALREADY_RUNNING -> Response.ok(Map.of("result", "already-running")).build();
+            case NOTHING_NEW -> Response.ok(Map.of("result", "nothing-new")).build();
+        };
     }
 
     private static Response suggestionError(ChatUiActorSystem.PromptSuggestions p) {

@@ -46,6 +46,7 @@ import java.util.regex.Pattern;
  * <li>{@code IMG-SHOW}: an answer that refers to nine pictures and carries raw html with event handlers by path and address (LocalImageCheck).</li>
  * <li>A prediction request from the Suggest prompt button: six prompts {@code PREDICT-ONE} to {@code PREDICT-SIX} in a
  * fenced JSON array, or a sentence that is no list when the conversation holds {@code PREDICT-BAD} (SuggestPromptCheck).</li>
+ * <li>A work frame update request from the keeper (\"You keep a work frame ...\"): a patch with two open topics, the first with two steps.</li>
  * <li>Anything else: "OK. I will report back in 12 minutes."</li>
  * </ul>
  * When the request carries {@code tools}, as the openai-compat provider sends them, a scripted call is sent as
@@ -256,6 +257,15 @@ public class ScriptedModelServer {
         if (last.contains("TASK-WORK")) {
             Thread.sleep(3_600_000);   // the long turn
             return "finished";
+        }
+        // Work frame update (SuggestPromptKeeper): two open topics, the first with two steps and a term, whatever the messages say.
+        if (last.startsWith("You keep a work frame of a conversation")) {
+            return "{\"overview\":\"Rebuilding the connector in small steps.\","
+                    + "\"topics\":[{\"title\":\"Rebuild the connector\",\"summary\":\"Rework the connector.\",\"work_type\":\"implement\",\"status\":\"open\"},"
+                    + "{\"title\":\"Write the design note\",\"summary\":\"Record why.\",\"work_type\":\"write\",\"status\":\"open\"}],"
+                    + "\"steps\":[{\"topic_id\":1,\"title\":\"Write the plain POJO\",\"progress\":\"done\"},"
+                    + "{\"topic_id\":1,\"title\":\"Wire it into the actor tree\",\"progress\":\"in-progress\"}],"
+                    + "\"terms\":[{\"topic_id\":1,\"term\":\"work frame\"}]}";
         }
         // Suggest prompt (SuggestPromptCheck): stage 2 asks for follow-ups, stage 1 asks what the last message asks
         if (last.contains("different instructions the person is likely to give next")) {
