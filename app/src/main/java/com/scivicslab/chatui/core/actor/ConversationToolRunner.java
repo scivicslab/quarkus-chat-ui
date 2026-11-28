@@ -243,6 +243,11 @@ public final class ConversationToolRunner implements ToolCallRecorder {
                                     input(args, "collaboratorChatId"), node,
                                     n -> RemoteNodes.of(system) != null && RemoteNodes.of(system).knows(n));
                 }
+                case "list_queue" -> com.scivicslab.chatui.agent.QueueTools.list(system, projectId, input(args, "chatId"));
+                case "remove_queued_message" -> com.scivicslab.chatui.agent.QueueTools.remove(system, projectId,
+                        input(args, "chatId"), input(args, "entryId"));
+                case "move_queued_message_to_front" -> com.scivicslab.chatui.agent.QueueTools.moveToFront(system, projectId,
+                        input(args, "chatId"), input(args, "entryId"));
                 case "get_chat_status" -> GetChatStatusTool.get(system, projectId, input(args, "chatId"));
                 case "list_chat_models" -> ListChatModelsTool.list(system, projectId, input(args, "chatId"));
                 case "set_chat_model" -> SetChatModelTool.set(system, controls, projectId,

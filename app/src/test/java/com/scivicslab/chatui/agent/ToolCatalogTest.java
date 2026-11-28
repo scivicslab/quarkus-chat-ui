@@ -60,6 +60,10 @@ class ToolCatalogTest {
             Map.entry("complete_messages", List.of(List.of("chatId", "messages", "model", "noThink"), List.of("chatId", "messages"))),
             // Added after the table was read (ExternalMcpServersOfAConversation_261120_oo01).
             Map.entry("set_mcp_servers", List.of(List.of("chatId", "servers"), List.of("chatId", "servers"))),
+            // Added with AgentEditsAnotherQueue_261128_oo01.
+            Map.entry("list_queue", List.of(List.of("chatId"), List.of("chatId"))),
+            Map.entry("remove_queued_message", List.of(List.of("chatId", "entryId"), List.of("chatId", "entryId"))),
+            Map.entry("move_queued_message_to_front", List.of(List.of("chatId", "entryId"), List.of("chatId", "entryId"))),
             // Added after a local model's calls to a tool the catalog lacked came back as text (2026-11-25).
             Map.entry("edit", List.of(List.of("path", "old_string", "new_string", "replace_all"), List.of("path", "old_string", "new_string"))));
 
