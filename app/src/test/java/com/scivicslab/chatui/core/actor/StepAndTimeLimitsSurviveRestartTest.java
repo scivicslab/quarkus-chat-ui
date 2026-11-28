@@ -13,7 +13,7 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * A conversation's step limit and time limit are settings of the conversation, kept in its settings record beside the
  * model and the Think box, so a restart puts them back. A record written before they were kept restores to the
- * defaults, 100 steps and 10 minutes.
+ * defaults, 100 steps and 30 minutes.
  */
 class StepAndTimeLimitsSurviveRestartTest {
 
@@ -24,7 +24,7 @@ class StepAndTimeLimitsSurviveRestartTest {
             assertEquals("02", system.createChat("project1"));
             ChatSessionIIAR chat = system.getChatSession("project1", "02");
             assertEquals(100, chat.getStepLimitDirect());
-            assertEquals(10, chat.getTimeLimitMinutesDirect());
+            assertEquals(30, chat.getTimeLimitMinutesDirect());
         }
     }
 
@@ -57,7 +57,7 @@ class StepAndTimeLimitsSurviveRestartTest {
             ChatUiActorSystem system = systems.start();
             ChatSessionIIAR back = system.getChatSession("project1", "02");
             assertEquals(100, back.getStepLimitDirect());
-            assertEquals(10, back.getTimeLimitMinutesDirect());
+            assertEquals(30, back.getTimeLimitMinutesDirect());
         }
     }
 
@@ -70,7 +70,7 @@ class StepAndTimeLimitsSurviveRestartTest {
             org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () -> system.setStepLimit("project1", "02", 0));
             org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () -> system.setTimeLimitMinutes("project1", "02", -1));
             assertEquals(100, chat.getStepLimitDirect());
-            assertEquals(10, chat.getTimeLimitMinutesDirect());
+            assertEquals(30, chat.getTimeLimitMinutesDirect());
             assertFalse(system.setStepLimit("project1", "99", 5), "no such conversation");
         }
     }
@@ -80,10 +80,10 @@ class StepAndTimeLimitsSurviveRestartTest {
         ChatSession session = new ChatSession(new NoProvider(), java.util.Optional.empty());
         ChatUiActorSystem.restoreLimits(session, null, null);
         assertEquals(100, session.getStepLimit());
-        assertEquals(10, session.getTimeLimitMinutes());
+        assertEquals(30, session.getTimeLimitMinutes());
         ChatUiActorSystem.restoreLimits(session, 0, -5);
         assertEquals(100, session.getStepLimit());
-        assertEquals(10, session.getTimeLimitMinutes());
+        assertEquals(30, session.getTimeLimitMinutes());
         ChatUiActorSystem.restoreLimits(session, 7, 0);
         assertEquals(7, session.getStepLimit());
         assertEquals(0, session.getTimeLimitMinutes());
