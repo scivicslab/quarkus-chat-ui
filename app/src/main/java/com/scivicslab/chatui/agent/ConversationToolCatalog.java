@@ -142,7 +142,7 @@ public final class ConversationToolCatalog {
                 change the timekeeper of another conversation of this project, or your own. urgentWaitMinutes:
                 how long an urgent request may wait during a long turn before the turn is paused to answer it
                 (default 10). childReplyWarnMinutes: how long a request it sent may go without a reply before it
-                is told (default 5). Give at least one, in whole minutes; one left out keeps its value. 0 turns
+                is told (default 10). Give at least one, in whole minutes; one left out keeps its value. 0 turns
                 that watch off.
                 """,
                 List.of(
