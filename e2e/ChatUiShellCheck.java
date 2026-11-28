@@ -11,7 +11,7 @@ import java.util.List;
 
 /**
  * Browser check of the page's frame: the navbar, the hamburger that opens and closes the left pane, the Extensions
- * menu in the left pane, the centre header that holds only which conversation this is and three buttons, the
+ * menu in the left pane, the centre header that holds only which conversation this is and four buttons, the
  * conversation's settings in the right pane's "Settings" entry, and the Think-mode send button. Run against a
  * throwaway instance that has only chat-01 and talks to e2e/ScriptedModelServer.java. Java Playwright, outside the
  * Maven build.
@@ -125,13 +125,13 @@ public class ChatUiShellCheck {
             page.waitForSelector("#actors-tree .actor-name");
             check(page.isVisible("#actors-tree") && !page.isVisible("#extensions-view"), "choosing Actor Tree again hides Extensions");
 
-            // (3) The centre header: which conversation, and three buttons.
+            // (3) The centre header: which conversation, and four buttons.
             String head = page.locator("#app > header").innerText();
             check(head.contains("project1/chat-01"), "the header names the conversation: " + head.replace('\n', '|'));
             check((Boolean) page.evaluate("() => document.querySelectorAll('#app > header select, #app > header input').length === 0"),
                     "the header has no selector or input");
             List<String> buttons = (List<String>) page.evaluate("() => Array.from(document.querySelectorAll('#app > header button')).map(b => b.textContent.trim())");
-            check(buttons.equals(List.of("Save Chat", "Clear", "Show all messages")), "the header's buttons: " + buttons);
+            check(buttons.equals(List.of("Settings", "Save Chat", "Clear", "Show all messages")), "the header's buttons: " + buttons);
             String provider = (String) page.evaluate("() => document.getElementById('provider-select').selectedOptions[0].textContent");
             String model = page.inputValue("#model-select");
             check(!provider.isBlank() && head.contains(provider) && head.contains(model),
