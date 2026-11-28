@@ -21,6 +21,15 @@ public final class SuggestFrameView {
      *         an open topic); {@code newTurns} is how many turns have finished since {@code digestedTurn}.
      */
     public static Map<String, Object> of(SuggestFrame frame, int finishedTurn) {
+        return of(frame, finishedTurn, SuggestPromptKeeper.Progress.IDLE);
+    }
+
+    /**
+     * As {@link #of(SuggestFrame, int)}, with {@code analysis}: the update under way. {@code readTurns} is how many of
+     * the turns the update set out to read are read, and {@code totalTurns} how many it has to read now (turns that
+     * finished during the update count); both are 0 when no update is running.
+     */
+    public static Map<String, Object> of(SuggestFrame frame, int finishedTurn, SuggestPromptKeeper.Progress progress) {
         StagedSuggestions.TopicStage stage = StagedSuggestions.topicStage(frame);
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("available", !stage.choices().isEmpty());
@@ -32,6 +41,14 @@ public final class SuggestFrameView {
         root.put("digestedTurn", frame.digestedTurn());
         root.put("finishedTurn", finishedTurn);
         root.put("newTurns", Math.max(0, finishedTurn - frame.digestedTurn()));
+        Map<String, Object> analysis = new LinkedHashMap<>();
+        analysis.put("calling", progress.calling());
+        analysis.put("running", progress.running());
+        analysis.put("startedAt", progress.startedAt());
+        analysis.put("fromTurn", progress.fromTurn());
+        analysis.put("readTurns", progress.running() ? Math.max(0, frame.digestedTurn() - progress.fromTurn()) : 0);
+        analysis.put("totalTurns", progress.running() ? Math.max(0, finishedTurn - progress.fromTurn()) : 0);
+        root.put("analysis", analysis);
         List<Map<String, Object>> topics = new ArrayList<>();
         for (StagedSuggestions.TopicChoice t : stage.choices()) {
             Map<String, Object> m = new LinkedHashMap<>();

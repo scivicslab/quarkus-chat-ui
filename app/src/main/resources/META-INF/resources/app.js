@@ -1242,44 +1242,73 @@
         }
 
         // ---- Analyze conversation ----
+        // The update runs on the server whether or not this dialog is open (the interval starts them too), so the
+        // dialog asks the server for its state: when it opens, and every second while it is open.
+        function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+        function busyText(a) {
+            if (!a.totalTurns) return "Analyzing…";
+            return "Analyzing… " + a.readTurns + " of " + a.totalTurns + " turns read";
+        }
+        // Shows what the server says. watched is true when this dialog has seen the update run, so its end is announced.
+        function paintAnalysis(f, watched, revisionBefore) {
+            var a = f && f.analysis;
+            if (a && (a.running || a.calling)) {
+                analyzeBtn.disabled = true;
+                analyzeStatus.textContent = busyText(a);
+                return true;
+            }
+            analyzeBtn.disabled = false;
+            if (watched && f) {
+                analyzeStatus.textContent = f.revision > revisionBefore
+                        ? "Analyzed. " + plural(f.newTurns, "turn") + " still unread."
+                        : "The update ended without a result; it is tried again at the next interval.";
+            }
+            return false;
+        }
+        function watchAnalysis(mine, revisionBefore, watched, errors) {
+            if (mine !== analyzeTicket) return;
+            setTimeout(function () {
+                if (mine !== analyzeTicket) return;
+                loadFrame().then(function (f) {
+                    if (mine !== analyzeTicket) return;
+                    if (!f) {
+                        if (errors < 5) watchAnalysis(mine, revisionBefore, watched, errors + 1);
+                        else analyzeBtn.disabled = false;
+                        return;
+                    }
+                    if (paintAnalysis(f, watched, revisionBefore)) watchAnalysis(mine, revisionBefore, true, 0);
+                    else if (!watched) watchAnalysis(mine, f.revision, false, 0);
+                });
+            }, 1000);
+        }
+        // The dialog was opened or the button pressed: look at the server and follow any update under way.
+        function followAnalysis(f) {
+            if (overlay.style.display === "none") return;
+            var mine = ++analyzeTicket;
+            var running = paintAnalysis(f, false, 0);
+            watchAnalysis(mine, f ? f.revision : 0, running, 0);
+        }
         function analyze() {
             var mine = ++analyzeTicket;
             analyzeBtn.disabled = true;
             analyzeStatus.textContent = "";
             post("/suggest-frame/analyze").then(function (res) {
-                analyzeBtn.disabled = false;
                 if (mine !== analyzeTicket) return;
                 var r = res.j && res.j.result;
-                if (r === "started") {
-                    var n = res.j.turns;
-                    analyzeStatus.textContent = "Analyzing " + n + " finished turns…";
-                    watchAnalysis(mine, frame ? frame.revision : 0, 0);
-                } else if (r === "already-running") {
-                    analyzeStatus.textContent = "Already analyzing.";
-                } else if (r === "nothing-new") {
-                    analyzeStatus.textContent = "Nothing new to analyze.";
+                if (r === "started" || r === "already-running") {
+                    var before = frame ? frame.revision : 0;
+                    analyzeStatus.textContent = r === "started" ? "Analyzing " + plural(res.j.turns, "finished turn") + "…" : "Already analyzing.";
+                    watchAnalysis(mine, before, true, 0);
                 } else {
-                    analyzeStatus.textContent = "Could not analyze: " + ((res.j && res.j.message) || "no answer");
+                    analyzeBtn.disabled = false;
+                    analyzeStatus.textContent = r === "nothing-new" ? "Nothing new to analyze."
+                            : "Could not analyze: " + ((res.j && res.j.message) || "no answer");
                 }
             }).catch(function (e) {
-                analyzeBtn.disabled = false;
-                if (mine === analyzeTicket) analyzeStatus.textContent = "Could not analyze: " + e.message;
-            });
-        }
-        // The update runs on after the answer; the frame line is renewed when it has landed.
-        function watchAnalysis(mine, revisionBefore, tries) {
-            if (mine !== analyzeTicket || tries > 60) return;
-            setTimeout(function () {
                 if (mine !== analyzeTicket) return;
-                loadFrame().then(function (f) {
-                    if (mine !== analyzeTicket) return;
-                    if (f && f.revision > revisionBefore) {
-                        analyzeStatus.textContent = "Analyzed. " + f.newTurns + " turn" + (f.newTurns === 1 ? "" : "s") + " still unread.";
-                        return;
-                    }
-                    watchAnalysis(mine, revisionBefore, tries + 1);
-                });
-            }, 1000);
+                analyzeBtn.disabled = false;
+                analyzeStatus.textContent = "Could not analyze: " + e.message;
+            });
         }
 
         btn.addEventListener("click", function () {
@@ -1289,7 +1318,7 @@
             mode = "last";
             frame = null;
             paintFrame();
-            loadFrame();
+            loadFrame().then(followAnalysis);
             enterLast();
         });
         pictureBtn.addEventListener("click", function () {

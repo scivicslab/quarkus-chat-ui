@@ -21,6 +21,8 @@ import java.util.List;
  * <li>On a conversation whose work frame is empty the whole-picture button cannot be pressed, and says why.</li>
  * <li>On the superior, after "Analyze conversation", the button lists the topics; topic, step and fixed question
  * lead to long instructions, and the one chosen goes into the input box led by the preamble, without being sent.</li>
+ * <li>An update that is still running when the dialog is closed shows its progress ("Analyzing… 0 of 2 turns read",
+ * button disabled) when the dialog is opened again, also after a page reload, and ends with "Analyzed."</li>
  * </ol>
  *
  * <pre>
@@ -201,6 +203,52 @@ public class SuggestFrameCheck {
             check(sup.textContent("#suggest-analyze-status").contains("Nothing new to analyze"),
                     "a second Analyze finds nothing new: " + sup.textContent("#suggest-analyze-status"));
             shot(sup, "8-superior-nothing-new.png");
+            sup.keyboard().press("Escape");
+
+            // An update that is still running when the dialog is closed shows its progress when the dialog is opened again.
+            for (int i = 0; i < 2; i++) {
+                sup.fill("#prompt-input", "SLOW-ANALYZE ASK-OPEN more " + i + "?");
+                sup.click("#send-btn");
+                waitIdle("01");
+            }
+            sup.click("#suggest-btn");
+            sup.waitForSelector("#suggest-dialog-body button.pp-item");
+            check(!sup.isDisabled("#suggest-analyze-btn") && sup.textContent("#suggest-analyze-status").isEmpty(),
+                    "4. before the run: the button is enabled and the status is empty");
+            sup.click("#suggest-analyze-btn");
+            sup.waitForFunction("() => document.getElementById('suggest-analyze-status').textContent.startsWith('Analyzing\u2026 0 of 2')",
+                    null, new Page.WaitForFunctionOptions().setTimeout(10000));
+            check(sup.isDisabled("#suggest-analyze-btn"), "4. while it runs the button is disabled: "
+                    + sup.textContent("#suggest-analyze-status"));
+            shot(sup, "9-superior-analyzing-progress.png");
+
+            sup.keyboard().press("Escape");
+            check(!sup.isVisible("#suggest-overlay"), "4. the dialog is closed while the update runs on");
+            Thread.sleep(1500);
+            sup.click("#suggest-btn");
+            sup.waitForFunction("() => document.getElementById('suggest-analyze-status').textContent.startsWith('Analyzing')",
+                    null, new Page.WaitForFunctionOptions().setTimeout(5000));
+            String reopened = sup.textContent("#suggest-analyze-status");
+            check(reopened.equals("Analyzing\u2026 0 of 2 turns read") && sup.isDisabled("#suggest-analyze-btn"),
+                    "4. reopened mid-run: the progress shows and the button is disabled: " + reopened);
+            shot(sup, "10-superior-reopened-mid-run.png");
+            sup.keyboard().press("Escape");
+
+            // Even a page that never pressed the button (a reload) reads the run from the server.
+            sup.reload();
+            sup.waitForSelector("#actors-tree .actor-name");
+            sup.click("#suggest-btn");
+            sup.waitForFunction("() => document.getElementById('suggest-analyze-status').textContent.startsWith('Analyzing')",
+                    null, new Page.WaitForFunctionOptions().setTimeout(5000));
+            check(sup.isDisabled("#suggest-analyze-btn"), "4. after a page reload the running update shows too: "
+                    + sup.textContent("#suggest-analyze-status"));
+
+            sup.waitForFunction("() => document.getElementById('suggest-analyze-status').textContent.startsWith('Analyzed')",
+                    null, new Page.WaitForFunctionOptions().setTimeout(40000));
+            check(sup.textContent("#suggest-analyze-status").equals("Analyzed. 0 turns still unread.")
+                    && !sup.isDisabled("#suggest-analyze-btn"),
+                    "4. when it ends the line says Analyzed and the button is enabled: " + sup.textContent("#suggest-analyze-status"));
+            shot(sup, "11-superior-analyzed-after-run.png");
             sup.keyboard().press("Escape");
 
             check(errors.isEmpty(), "no page error: " + errors);
