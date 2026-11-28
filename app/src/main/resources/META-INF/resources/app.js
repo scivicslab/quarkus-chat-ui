@@ -105,8 +105,10 @@
     // comes out broken. The browser has no way to open a local file itself; only the server does.
     // Sources under /api/ are left alone: those are this application's own endpoints, not files.
     function withLocalImages(html) {
-        var holder = document.createElement("div");
-        holder.innerHTML = html;
+        // Parsed in a document of its own: an <img> built in a detached element of THIS page is
+        // fetched at once, before its address is looked at, and its onerror runs. A parsed document
+        // loads nothing and runs nothing.
+        var holder = new DOMParser().parseFromString(html, "text/html").body;
         var imgs = Array.prototype.slice.call(holder.getElementsByTagName("img"));
         imgs.forEach(function (img) {
             var raw = (img.getAttribute("src") || "").trim();
